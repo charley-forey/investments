@@ -1,0 +1,41 @@
+Agentic AI Trading System
+
+
+Multi Agent System
+- Research
+- Executing 
+- News
+- Ideas
+- Trades
+- Testing
+- Scoring
+- etc.
+
+
+Loops / Webhooks / Triggers / Schedule
+
+Trading Strategy
+
+What Broker and API to make Trades?
+
+Where to get live pricing data? 
+
+How to store data and track trends?
+
+Reddit / Twitter / News for activities in the market
+
+Back testing and setup strategies. 
+
+How to analyze opportunities?
+
+Options strategy to maximize. 
+
+Continuously working and trading and finding opportunities. 
+
+How to ensure its making proper trades?
+
+How to set specific guard rails or limits, etc?
+
+
+
+

@@ -1,0 +1,57 @@
+# Hard limits enforced by the guardrail engine (pure Python — the LLM cannot bypass these).
+# All percentage limits are percent of current account equity, so they scale with the account.
+
+mode: paper            # paper | live. Live also requires ALPACA_LIVE_* keys in .env.
+
+position:
+  max_position_pct: 10.0        # max % of equity in any single position
+  max_position_usd: 5000.0      # absolute cap per position, whichever is smaller
+  max_open_positions: 8
+  risk_per_trade_pct: 1.0       # sizing: max % of equity risked per trade (stop distance / max loss)
+
+orders:
+  max_order_notional_usd: 5000.0
+  max_new_trades_per_day: 5
+  max_new_trades_per_week: 15
+  allow_market_orders: false    # limit orders only unless explicitly allowed
+
+loss_kill_switch:
+  max_daily_loss_pct: 3.0       # realized + unrealized; breach cancels open orders and blocks new proposals
+  requires_manual_reset: true
+
+symbols:
+  min_price: 5.0
+  min_avg_daily_volume: 500000
+  blocklist: []                 # e.g. ["TQQQ", "SQQQ"]
+  allow_leveraged_etfs: false
+
+options:
+  defined_risk_only: true       # naked short options are rejected by leg inspection
+  max_loss_per_trade_usd: 500.0
+  min_days_to_expiry: 7
+  max_contracts_per_order: 10
+
+pdt:
+  enforce: true                 # if equity < threshold, block the 4th day trade in 5 rolling days
+  equity_threshold_usd: 25000.0
+  max_day_trades_per_5_days: 3
+
+wash_sale:
+  enforce: true
+  window_days: 30               # block re-buys within N days of a realized loss in the same symbol
+
+cost_hurdle:
+  enforce: true
+  min_edge_multiple: 2.0        # expected edge must be >= N x estimated total cost
+  option_fee_per_contract_usd: 0.05
+  slippage_bps: 5               # assumed slippage in basis points of notional
+
+live:
+  approval_required: true
+  auto_submit_below_usd: 0.0    # live orders under this notional skip approval (0 = never)
+
+lifecycle:
+  # strategy promotion/demotion gates (milestone 3+)
+  paper_to_live_min_trades: 30
+  paper_to_live_min_expectancy: 0.0
+  demote_after_losing_weeks: 2

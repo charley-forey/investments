@@ -1,0 +1,333 @@
+"""SQLite journal: the audit trail for every proposal, verdict, order, fill,
+tax lot, score, and system event. Everything the system decides or does lands here.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any
+
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS proposals (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    agent TEXT NOT NULL,                -- which agent (or 'human') proposed it
+    strategy_tag TEXT NOT NULL DEFAULT 'manual',
+    symbol TEXT NOT NULL,
+    asset_class TEXT NOT NULL,          -- 'stock' | 'option'
+    side TEXT NOT NULL,                 -- 'buy' | 'sell'
+    qty REAL NOT NULL,
+    order_type TEXT NOT NULL,           -- 'limit' | 'market'
+    limit_price REAL,
+    stop_price REAL,                    -- planned stop for sizing (stocks)
+    legs_json TEXT,                     -- options legs, JSON
+    thesis TEXT,
+    expected_edge_usd REAL,
+    max_loss_usd REAL,
+    confidence REAL,
+    status TEXT NOT NULL DEFAULT 'proposed'
+        -- proposed | rejected | vetoed | pending_approval | submitted | filled | canceled
+);
+
+CREATE TABLE IF NOT EXISTS verdicts (
+    id INTEGER PRIMARY KEY,
+    proposal_id INTEGER NOT NULL REFERENCES proposals(id),
+    ts TEXT NOT NULL,
+    source TEXT NOT NULL,               -- 'guardrail' | 'risk_agent' | 'human'
+    verdict TEXT NOT NULL,              -- 'approve' | 'reject' | 'veto'
+    rule TEXT,                          -- which guardrail rule fired
+    reason TEXT
+);
+
+CREATE TABLE IF NOT EXISTS orders (
+    id INTEGER PRIMARY KEY,
+    proposal_id INTEGER REFERENCES proposals(id),
+    broker_order_id TEXT,
+    ts TEXT NOT NULL,
+    mode TEXT NOT NULL,                 -- 'paper' | 'live'
+    symbol TEXT NOT NULL,
+    side TEXT NOT NULL,
+    qty REAL NOT NULL,
+    order_type TEXT NOT NULL,
+    limit_price REAL,
+    status TEXT NOT NULL DEFAULT 'submitted',
+    is_day_trade INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS fills (
+    id INTEGER PRIMARY KEY,
+    order_id INTEGER NOT NULL REFERENCES orders(id),
+    ts TEXT NOT NULL,
+    qty REAL NOT NULL,
+    price REAL NOT NULL,
+    fees_usd REAL NOT NULL DEFAULT 0,
+    est_cost_usd REAL                   -- pre-trade estimated cost (spread+fees+slippage)
+);
+
+CREATE TABLE IF NOT EXISTS tax_lots (
+    id INTEGER PRIMARY KEY,
+    symbol TEXT NOT NULL,
+    qty REAL NOT NULL,
+    open_ts TEXT NOT NULL,
+    open_price REAL NOT NULL,
+    close_ts TEXT,
+    close_price REAL,
+    realized_pnl REAL,
+    term TEXT,                          -- 'short' | 'long' (at close)
+    wash_sale_flag INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS scores (
+    id INTEGER PRIMARY KEY,
+    proposal_id INTEGER REFERENCES proposals(id),
+    ts TEXT NOT NULL,
+    strategy_tag TEXT,
+    grade TEXT,
+    thesis_adherence REAL,
+    pnl_usd REAL,
+    notes TEXT
+);
+
+CREATE TABLE IF NOT EXISTS kv_state (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS heartbeats (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    job TEXT NOT NULL,
+    status TEXT NOT NULL,
+    detail TEXT
+);
+"""
+
+
+def utcnow() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class Journal:
+    def __init__(self, db_path: str | Path):
+        db_path = Path(db_path)
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(db_path))
+        self.conn.row_factory = sqlite3.Row
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.executescript(SCHEMA)
+        self.conn.commit()
+
+    def close(self) -> None:
+        self.conn.close()
+
+    # -- proposals / verdicts -------------------------------------------------
+
+    def record_proposal(
+        self,
+        *,
+        agent: str,
+        symbol: str,
+        asset_class: str,
+        side: str,
+        qty: float,
+        order_type: str,
+        strategy_tag: str = "manual",
+        limit_price: float | None = None,
+        stop_price: float | None = None,
+        legs: list[dict] | None = None,
+        thesis: str | None = None,
+        expected_edge_usd: float | None = None,
+        max_loss_usd: float | None = None,
+        confidence: float | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO proposals
+               (ts, agent, strategy_tag, symbol, asset_class, side, qty, order_type,
+                limit_price, stop_price, legs_json, thesis, expected_edge_usd,
+                max_loss_usd, confidence)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                utcnow(), agent, strategy_tag, symbol.upper(), asset_class, side, qty,
+                order_type, limit_price, stop_price,
+                json.dumps(legs) if legs else None, thesis, expected_edge_usd,
+                max_loss_usd, confidence,
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def record_verdict(
+        self,
+        proposal_id: int,
+        *,
+        source: str,
+        verdict: str,
+        rule: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        self.conn.execute(
+            "INSERT INTO verdicts (proposal_id, ts, source, verdict, rule, reason) VALUES (?,?,?,?,?,?)",
+            (proposal_id, utcnow(), source, verdict, rule, reason),
+        )
+        self.conn.commit()
+
+    def set_proposal_status(self, proposal_id: int, status: str) -> None:
+        self.conn.execute("UPDATE proposals SET status=? WHERE id=?", (status, proposal_id))
+        self.conn.commit()
+
+    def get_proposal(self, proposal_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM proposals WHERE id=?", (proposal_id,)).fetchone()
+        return dict(row) if row else None
+
+    def verdicts_for(self, proposal_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM verdicts WHERE proposal_id=? ORDER BY id", (proposal_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def pending_approvals(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM proposals WHERE status='pending_approval' ORDER BY id"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- orders / fills -------------------------------------------------------
+
+    def record_order(
+        self,
+        *,
+        proposal_id: int | None,
+        mode: str,
+        symbol: str,
+        side: str,
+        qty: float,
+        order_type: str,
+        limit_price: float | None,
+        broker_order_id: str | None = None,
+        is_day_trade: bool = False,
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO orders
+               (proposal_id, broker_order_id, ts, mode, symbol, side, qty, order_type,
+                limit_price, is_day_trade)
+               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+            (
+                proposal_id, broker_order_id, utcnow(), mode, symbol.upper(), side, qty,
+                order_type, limit_price, int(is_day_trade),
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def record_fill(
+        self, order_id: int, *, qty: float, price: float,
+        fees_usd: float = 0.0, est_cost_usd: float | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO fills (order_id, ts, qty, price, fees_usd, est_cost_usd) VALUES (?,?,?,?,?,?)",
+            (order_id, utcnow(), qty, price, fees_usd, est_cost_usd),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def trades_since(self, since: datetime) -> int:
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM orders WHERE ts >= ?",
+            (since.astimezone(timezone.utc).isoformat(timespec="seconds"),),
+        ).fetchone()
+        return int(row["n"])
+
+    def day_trades_last_n_days(self, days: int = 5) -> int:
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        row = self.conn.execute(
+            "SELECT COUNT(*) AS n FROM orders WHERE is_day_trade=1 AND ts >= ?",
+            (since.isoformat(timespec="seconds"),),
+        ).fetchone()
+        return int(row["n"])
+
+    # -- tax lots / wash sale -------------------------------------------------
+
+    def open_lot(self, *, symbol: str, qty: float, price: float, ts: str | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO tax_lots (symbol, qty, open_ts, open_price) VALUES (?,?,?,?)",
+            (symbol.upper(), qty, ts or utcnow(), price),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def close_lot(
+        self, lot_id: int, *, price: float, ts: str | None = None,
+        long_term_days: int = 365,
+    ) -> dict:
+        row = self.conn.execute("SELECT * FROM tax_lots WHERE id=?", (lot_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no tax lot {lot_id}")
+        close_ts = ts or utcnow()
+        opened = datetime.fromisoformat(row["open_ts"])
+        closed = datetime.fromisoformat(close_ts)
+        holding_days = (closed - opened).days
+        term = "long" if holding_days > long_term_days else "short"
+        realized = (price - row["open_price"]) * row["qty"]
+        self.conn.execute(
+            "UPDATE tax_lots SET close_ts=?, close_price=?, realized_pnl=?, term=? WHERE id=?",
+            (close_ts, price, realized, term, lot_id),
+        )
+        self.conn.commit()
+        return {"realized_pnl": realized, "term": term, "holding_days": holding_days}
+
+    def open_lots(self, symbol: str | None = None) -> list[dict]:
+        q = "SELECT * FROM tax_lots WHERE close_ts IS NULL"
+        args: tuple[Any, ...] = ()
+        if symbol:
+            q += " AND symbol=?"
+            args = (symbol.upper(),)
+        return [dict(r) for r in self.conn.execute(q, args).fetchall()]
+
+    def last_realized_loss(self, symbol: str, window_days: int) -> dict | None:
+        since = (datetime.now(timezone.utc) - timedelta(days=window_days)).isoformat(
+            timespec="seconds"
+        )
+        row = self.conn.execute(
+            """SELECT * FROM tax_lots
+               WHERE symbol=? AND realized_pnl < 0 AND close_ts >= ?
+               ORDER BY close_ts DESC LIMIT 1""",
+            (symbol.upper(), since),
+        ).fetchone()
+        return dict(row) if row else None
+
+    # -- kill switch / kv state ----------------------------------------------
+
+    def get_state(self, key: str, default: str | None = None) -> str | None:
+        row = self.conn.execute("SELECT value FROM kv_state WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_state(self, key: str, value: str) -> None:
+        self.conn.execute(
+            "INSERT INTO kv_state (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, value),
+        )
+        self.conn.commit()
+
+    def kill_switch_active(self) -> bool:
+        return self.get_state("kill_switch") == "active"
+
+    def trip_kill_switch(self, reason: str) -> None:
+        self.set_state("kill_switch", "active")
+        self.set_state("kill_switch_reason", reason)
+        self.set_state("kill_switch_ts", utcnow())
+
+    def reset_kill_switch(self) -> None:
+        self.set_state("kill_switch", "off")
+
+    # -- heartbeats -----------------------------------------------------------
+
+    def heartbeat(self, job: str, status: str = "ok", detail: str | None = None) -> None:
+        self.conn.execute(
+            "INSERT INTO heartbeats (ts, job, status, detail) VALUES (?,?,?,?)",
+            (utcnow(), job, status, detail),
+        )
+        self.conn.commit()

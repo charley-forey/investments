@@ -1,0 +1,29 @@
+# Non-safety settings. Safety limits live in limits.yaml.
+
+universe:
+  # starting watch universe; the research agent may propose additions within symbol limits
+  core: [SPY, QQQ, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AMD]
+
+schedule:
+  timezone: America/New_York
+  premarket_research: "08:30"
+  intraday_scan_every_minutes: 15
+  postclose_review: "16:30"
+  weekend_research_day: sat
+  weekend_research_time: "10:00"
+
+tax:
+  # used for after-tax expectancy scoring (milestone 3); estimates, not tax advice
+  federal_short_term_rate: 0.24
+  federal_long_term_rate: 0.15
+  state_rate: 0.05
+
+paths:
+  journal_db: data/journal.db
+  bars_dir: data/bars
+  memory_dir: memory
+  playbooks_dir: playbooks
+
+agents:
+  model: claude-opus-4-8
+  max_tokens: 16000

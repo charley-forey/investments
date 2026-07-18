@@ -1,0 +1,31 @@
+[project]
+name = "trading"
+version = "0.1.0"
+description = "Agentic AI trading system: multi-agent research/strategy/risk loop with a deterministic guardrail engine over Alpaca"
+requires-python = ">=3.12"
+dependencies = [
+    "alpaca-py>=0.33",
+    "anthropic>=0.40",
+    "apscheduler>=3.10",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+trading = "trading.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
