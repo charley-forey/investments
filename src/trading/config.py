@@ -131,6 +131,12 @@ class Paths(BaseModel):
 class AgentSettings(BaseModel):
     model: str = "claude-opus-4-8"
     max_tokens: int = 16000
+    max_proposals_per_cycle: int = 2
+    max_tool_iterations: int = 25
+    bars_lookback_days: int = 30
+    news_limit: int = 10
+    options_chain_strikes: int = 5
+    options_chain_max_dte: int = 60
 
 
 class Universe(BaseModel):

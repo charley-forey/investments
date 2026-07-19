@@ -1,0 +1,186 @@
+"""Orchestrator: one cycle = snapshot -> sync -> strategy agent -> risk review ->
+guardrail pipeline. This is the wiring that turns agents into (paper) trades.
+
+Dependency injection on the constructor keeps it fully testable with scripted
+agents and a stub broker.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .agents import risk as risk_mod
+from .agents import strategy as strategy_mod
+from .broker.sync import sync_fills
+from .config import Config
+from .data.journal import Journal
+from .guardrails.engine import OrderPipeline
+from .guardrails.models import OrderProposal
+
+
+@dataclass
+class CycleReport:
+    cycle: str
+    skipped: str | None = None
+    proposals: int = 0
+    vetoed: int = 0
+    submitted: int = 0
+    rejected: int = 0
+    pending_approval: int = 0
+    notes: list[str] = field(default_factory=list)
+
+    def summary(self) -> str:
+        if self.skipped:
+            return f"[{self.cycle}] skipped: {self.skipped}"
+        return (f"[{self.cycle}] proposals={self.proposals} vetoed={self.vetoed} "
+                f"submitted={self.submitted} rejected={self.rejected} "
+                f"pending={self.pending_approval}")
+
+
+class Orchestrator:
+    def __init__(
+        self,
+        config: Config,
+        journal: Journal,
+        broker,
+        client,
+        *,
+        strategy_runner=strategy_mod.run_strategy_session,
+        risk_reviewer=risk_mod.review_proposal,
+    ):
+        self.config = config
+        self.journal = journal
+        self.broker = broker
+        self.client = client
+        self.pipeline = OrderPipeline(config, journal, broker)
+        self._run_strategy = strategy_runner
+        self._review = risk_reviewer
+
+    def run_cycle(self, cycle: str = "intraday") -> CycleReport:
+        report = CycleReport(cycle=cycle)
+        self.journal.heartbeat(f"cycle:{cycle}", status="start")
+
+        # Truthful journal first (best-effort; a sync failure shouldn't abort EOD).
+        try:
+            sync_fills(self.config, self.journal, self.broker)
+        except Exception as e:
+            report.notes.append(f"sync failed: {e}")
+
+        if cycle in ("intraday",):
+            if self.journal.kill_switch_active():
+                report.skipped = "kill switch active"
+                self.journal.heartbeat(f"cycle:{cycle}", status="skip", detail=report.skipped)
+                return report
+            try:
+                if not self.broker.market_open():
+                    report.skipped = "market closed"
+                    self.journal.heartbeat(f"cycle:{cycle}", status="skip", detail=report.skipped)
+                    return report
+            except Exception as e:
+                report.notes.append(f"market check failed, proceeding: {e}")
+
+        account = self.broker.get_account_state(self.journal)
+
+        if cycle == "intraday":
+            self._trade_cycle(account, report)
+        else:
+            self._note_cycle(cycle, account, report)
+
+        self.journal.heartbeat(f"cycle:{cycle}", status="end", detail=report.summary())
+        return report
+
+    # -- intraday: propose -> risk -> execute --------------------------------
+
+    def _trade_cycle(self, account, report: CycleReport) -> None:
+        session = self._run_strategy(
+            self.client, self.config, self.journal, self.broker, account, cycle="intraday"
+        )
+        report.proposals = len(session.drafts)
+
+        market_open = True
+        try:
+            market_open = self.broker.market_open()
+        except Exception:
+            pass
+
+        for draft in session.drafts:
+            would_be_dt = self._would_be_day_trade(draft)
+            verdict = self._review(
+                self.client, self.config, self.journal, self.broker, account, draft
+            )
+            if verdict.verdict != "approve":
+                report.vetoed += 1
+                # Journal the veto against a lightweight proposal record.
+                pid = self.journal.record_proposal(
+                    agent=draft.agent, strategy_tag=draft.strategy_tag, symbol=draft.symbol,
+                    asset_class=draft.asset_class, side=draft.side, qty=draft.qty,
+                    order_type=draft.order_type, limit_price=draft.limit_price,
+                    stop_price=draft.stop_price,
+                    legs=[l.model_dump(mode="json") for l in draft.legs] or None,
+                    thesis=draft.thesis, expected_edge_usd=draft.expected_edge_usd,
+                    max_loss_usd=draft.max_loss_usd, confidence=draft.confidence,
+                )
+                self.journal.record_verdict(
+                    pid, source="risk_agent", verdict="veto",
+                    reason=verdict.reason + (f" | concerns: {'; '.join(verdict.concerns)}"
+                                             if verdict.concerns else ""),
+                )
+                self.journal.set_proposal_status(pid, "vetoed")
+                continue
+
+            # Approved by risk -> run the deterministic guardrail pipeline.
+            quote = self._quote_for(draft)
+            result = self.pipeline.process(
+                draft, account, quote,
+                market_is_open=market_open, would_be_day_trade=would_be_dt,
+            )
+            # Attach the risk approval to the same proposal record.
+            self.journal.record_verdict(
+                result.proposal_id, source="risk_agent", verdict="approve",
+                reason=verdict.reason,
+            )
+            if result.status == "submitted":
+                report.submitted += 1
+            elif result.status == "pending_approval":
+                report.pending_approval += 1
+            else:
+                report.rejected += 1
+
+    def _would_be_day_trade(self, draft: OrderProposal) -> bool:
+        if draft.side != "sell" or draft.asset_class != "stock":
+            return False
+        today = datetime.now(timezone.utc).date()
+        for lot in self.journal.open_lots(draft.symbol):
+            opened = datetime.fromisoformat(lot["open_ts"]).date()
+            if opened == today:
+                return True
+        return False
+
+    def _quote_for(self, draft: OrderProposal):
+        from .broker.models import Quote
+
+        if draft.asset_class == "option":
+            # Underlying quote is sufficient for the guardrail cost/notional model.
+            return self.broker.get_quote(draft.symbol)
+        try:
+            return self.broker.get_quote(draft.symbol)
+        except Exception:
+            price = draft.limit_price or 0.0
+            return Quote(symbol=draft.symbol, bid=price, ask=price)
+
+    # -- premarket / postclose: write a memory note --------------------------
+
+    def _note_cycle(self, cycle: str, account, report: CycleReport) -> None:
+        session = self._run_strategy(
+            self.client, self.config, self.journal, self.broker, account, cycle=cycle
+        )
+        fname = "watchlist.md" if cycle == "premarket" else "eod_review.md"
+        mem_dir = Path(self.config.settings.paths.memory_dir)
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).isoformat(timespec="minutes")
+        (mem_dir / fname).write_text(
+            f"# {cycle} note — {stamp}\n\n{session.final_text}\n", encoding="utf-8"
+        )
+        report.notes.append(f"wrote memory/{fname}")

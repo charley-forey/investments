@@ -1,0 +1,94 @@
+"""Generic manual agentic loop.
+
+We run the loop by hand (not the SDK tool runner) so every tool call is
+journaled and `propose_order` can only register drafts. The system prompt is
+frozen text with a cache_control breakpoint; all volatile data (account state,
+quotes) reaches the model through tool results.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+from ..data.journal import Journal
+from ..guardrails.models import OrderProposal
+from ..tools.registry import ToolRegistry
+
+
+@dataclass
+class AgentResult:
+    final_text: str
+    drafts: list[OrderProposal]
+    iterations: int
+    stop_reason: str
+
+
+def run_agent(
+    client,
+    *,
+    model: str,
+    max_tokens: int,
+    system_prompt: str,
+    registry: ToolRegistry,
+    user_message: str,
+    max_iterations: int,
+    journal: Journal | None = None,
+    agent_name: str = "agent",
+) -> AgentResult:
+    system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+    tools = registry.schemas()
+    messages: list[dict] = [{"role": "user", "content": user_message}]
+
+    stop_reason = "max_iterations"
+    iterations = 0
+    final_text = ""
+
+    while iterations < max_iterations:
+        iterations += 1
+        response = client.messages.create(
+            model=model,
+            max_tokens=max_tokens,
+            thinking={"type": "adaptive"},
+            system=system,
+            tools=tools,
+            messages=messages,
+        )
+
+        if response.stop_reason == "pause_turn":
+            messages.append({"role": "assistant", "content": response.content})
+            continue
+
+        text_parts = [b.text for b in response.content if b.type == "text"]
+        if text_parts:
+            final_text = "\n".join(text_parts)
+
+        if response.stop_reason != "tool_use":
+            stop_reason = response.stop_reason or "end_turn"
+            break
+
+        messages.append({"role": "assistant", "content": response.content})
+        tool_results = []
+        called = []
+        for block in response.content:
+            if block.type != "tool_use":
+                continue
+            result = registry.dispatch(block.name, block.input or {})
+            called.append(block.name)
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": result,
+                    "is_error": result.startswith("error:"),
+                }
+            )
+        messages.append({"role": "user", "content": tool_results})
+        if journal is not None:
+            journal.heartbeat(f"agent:{agent_name}", detail=f"tools: {', '.join(called)}")
+
+    return AgentResult(
+        final_text=final_text,
+        drafts=list(registry.ctx.drafts),
+        iterations=iterations,
+        stop_reason=stop_reason,
+    )

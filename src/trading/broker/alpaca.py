@@ -110,6 +110,35 @@ class AlpacaBroker:
         clock = self.trading.get_clock()
         return bool(clock.is_open)
 
+    def get_news(self, symbol: str, limit: int = 10) -> list[dict]:
+        from alpaca.data.historical.news import NewsClient
+        from alpaca.data.requests import NewsRequest
+
+        client = NewsClient(
+            self.config.secrets.alpaca_api_key, self.config.secrets.alpaca_secret_key
+        )
+        req = NewsRequest(symbols=symbol.upper(), limit=limit)
+        news = client.get_news(req)
+        items = []
+        for article in news.data.get("news", []):
+            items.append(
+                {
+                    "headline": article.headline,
+                    "summary": (article.summary or "")[:300],
+                    "created_at": str(article.created_at),
+                    "source": article.source,
+                }
+            )
+        return items
+
+    def list_orders_since(self, since: datetime):
+        """Orders updated after `since` (for fill sync)."""
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        req = GetOrdersRequest(status=QueryOrderStatus.ALL, after=since, limit=500)
+        return self.trading.get_orders(filter=req)
+
     # -- account snapshot -----------------------------------------------------
 
     def get_account_state(self, journal: Journal | None = None) -> AccountState:

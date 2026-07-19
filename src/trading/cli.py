@@ -115,6 +115,41 @@ def cmd_status(_args) -> int:
     return 0
 
 
+def cmd_run_once(args) -> int:
+    from .agents.client import make_client
+    from .orchestrator import Orchestrator
+
+    config = get_config()
+    journal = _journal()
+    broker = _broker()
+    client = make_client(config)
+    orch = Orchestrator(config, journal, broker, client)
+    report = orch.run_cycle(args.cycle)
+    print(report.summary())
+    for note in report.notes:
+        print(f"  note: {note}")
+    return 0
+
+
+def cmd_sync(_args) -> int:
+    from .broker.sync import sync_fills
+
+    config = get_config()
+    report = sync_fills(config, _journal(), _broker())
+    print(f"orders={report.orders_seen} fills={report.fills_recorded} "
+          f"lots+{report.lots_opened}/-{report.lots_closed} "
+          f"day_trades={report.day_trades_flagged}")
+    for w in report.reconciliation_warnings:
+        print(f"  WARN reconcile: {w}")
+    return 0
+
+
+def cmd_daemon(_args) -> int:
+    from .scheduler import run_daemon
+
+    return run_daemon()
+
+
 def cmd_reset_kill_switch(_args) -> int:
     journal = _journal()
     journal.reset_kill_switch()
@@ -149,6 +184,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = sub.add_parser("approve", help="approve a pending live order")
     ap.add_argument("proposal_id", type=int)
     ap.set_defaults(fn=cmd_approve)
+
+    ro = sub.add_parser("run-once", help="run a single orchestrator cycle")
+    ro.add_argument("--cycle", choices=["premarket", "intraday", "postclose"],
+                    default="intraday")
+    ro.set_defaults(fn=cmd_run_once)
+
+    sub.add_parser("sync", help="sync fills and tax lots from the broker").set_defaults(fn=cmd_sync)
+    sub.add_parser("daemon", help="run the scheduled trading daemon").set_defaults(fn=cmd_daemon)
 
     sub.add_parser("status", help="kill switch / budgets / queue").set_defaults(fn=cmd_status)
     sub.add_parser("reset-kill-switch", help="manually reset the kill switch").set_defaults(
