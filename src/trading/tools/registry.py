@@ -134,6 +134,20 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "properties": {"symbol": {"type": "string"}},
         },
     },
+    "get_market_intel": {
+        "description": "The latest curated market-intelligence digest (what's moving the "
+                       "market and why, from continuously ingested news + social).",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "recall_similar": {
+        "description": "Semantic recall: retrieve past news, lessons, or decisions similar "
+                       "to a query — 'have we seen this setup before, and what happened?'",
+        "input_schema": {
+            "type": "object",
+            "properties": {"query": {"type": "string"}},
+            "required": ["query"],
+        },
+    },
     "propose_order": {
         "description": "Register a trade proposal for independent risk review. It is NOT "
                        "executed by this call. Every proposal needs a falsifiable thesis, "
@@ -309,6 +323,38 @@ class ToolRegistry:
         from .market_context import market_regime
 
         return market_regime(self.ctx.broker).summary()
+
+    def _t_get_market_intel(self, _inp: dict) -> str:
+        import os
+
+        from ..data.intel import IntelStore
+
+        path = self.ctx.config.settings.paths.intel_db
+        if not os.path.exists(path):
+            return "no market-intel digest yet"
+        store = IntelStore(path)
+        try:
+            d = store.latest_digest()
+            return d["digest_md"] if d else "no market-intel digest yet"
+        finally:
+            store.close()
+
+    def _t_recall_similar(self, inp: dict) -> str:
+        import os
+
+        from ..data.vectors import VectorStore
+
+        path = self.ctx.config.settings.paths.vectors_db
+        if not os.path.exists(path):
+            return "no semantic memory yet"
+        store = VectorStore(path)
+        try:
+            hits = store.search(inp["query"], k=5)
+            if not hits:
+                return "no similar prior context found"
+            return "\n".join(f"[{h.kind} {h.score:.2f}] {h.text[:200]}" for h in hits)
+        finally:
+            store.close()
 
     def _t_get_features(self, inp: dict) -> str:
         from ..analytics.features import compute_features

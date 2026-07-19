@@ -358,6 +358,30 @@ def cmd_execution(_args) -> int:
     return 0
 
 
+def cmd_intel(args) -> int:
+    from .data.ingest import ingest_intel
+    from .data.intel import IntelStore
+
+    config = get_config()
+    store = IntelStore(config.settings.paths.intel_db)
+    if args.action == "ingest":
+        report = ingest_intel(config, store, _broker())
+        print(f"news +{report.news_saved}, sentiment snapshots +{report.sentiment_snapshots} "
+              f"across {report.symbols} symbols")
+        return 0
+    if args.action == "digest":
+        d = store.latest_digest()
+        print(d["digest_md"] if d else "no market-intel digest yet — run a cycle or ingest")
+        return 0
+    if args.action == "show":
+        for n in store.recent_news(args.symbol, limit=15):
+            print(f"  [{n['ts'][:16]}] {n['symbol']} {n['headline']} ({n['source']})")
+        for s in store.sentiment_history(args.symbol or "", days=7) if args.symbol else []:
+            print(f"  sentiment {s['ts'][:16]} {s['symbol']} polarity {s['polarity']:+.2f}")
+        return 0
+    return 1
+
+
 def cmd_sync(_args) -> int:
     from .broker.sync import sync_fills
 
@@ -453,6 +477,11 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("action", choices=["status", "approve"])
     sc.add_argument("--level", type=int, default=0)
     sc.set_defaults(fn=cmd_scale)
+
+    it = sub.add_parser("intel", help="market-intelligence ingestion + digest")
+    it.add_argument("action", choices=["ingest", "digest", "show"])
+    it.add_argument("--symbol", default=None)
+    it.set_defaults(fn=cmd_intel)
 
     sub.add_parser("execution", help="fill-quality / slippage report").set_defaults(
         fn=cmd_execution

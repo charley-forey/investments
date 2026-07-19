@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import cost, notify
+from .agents import intel as intel_mod
 from .agents import redteam as redteam_mod
 from .agents import risk as risk_mod
 from .agents import scoring as scoring_mod
@@ -123,6 +124,9 @@ class Orchestrator:
         stages = lifecycle.stages_summary(self.journal)
         perf = portfolio_summary(self.journal, self.config.settings.tax)
         extra = f"Strategy stages: {stages}\n{perf}"
+        digest = self._intel_digest()
+        if digest:
+            extra += f"\n\nMarket intelligence digest:\n{digest}"
         session = self._run_strategy(
             self.client, self.config, self.journal, self.broker, account,
             cycle="intraday", extra_context=extra,
@@ -258,12 +262,48 @@ class Orchestrator:
     # -- premarket: write a watchlist note -----------------------------------
 
     def _note_cycle(self, cycle: str, account, report: CycleReport) -> None:
+        # Refresh the market-intel digest at the start of the day.
+        if cycle == "premarket":
+            try:
+                if self._run_curation():
+                    report.notes.append("refreshed market-intel digest")
+            except Exception as e:
+                report.notes.append(f"intel curation failed: {e}")
         session = self._run_strategy(
             self.client, self.config, self.journal, self.broker, account, cycle=cycle
         )
         self._record_usage(cycle, "strategy", session.usage, report)
         self._write_memory("watchlist.md", cycle, session.final_text)
         report.notes.append("wrote memory/watchlist.md")
+
+    def _intel_digest(self) -> str:
+        import os
+
+        from .data.intel import IntelStore
+
+        path = self.config.settings.paths.intel_db
+        if not os.path.exists(path):
+            return ""
+        store = IntelStore(path)
+        try:
+            d = store.latest_digest()
+            return d["digest_md"] if d else ""
+        finally:
+            store.close()
+
+    def _run_curation(self) -> str:
+        import os
+
+        from .data.intel import IntelStore
+
+        path = self.config.settings.paths.intel_db
+        if not os.path.exists(path) or self.client is None:
+            return ""
+        store = IntelStore(path)
+        try:
+            return intel_mod.run_intel_session(self.client, self.config, store)
+        finally:
+            store.close()
 
     # -- weekend: weekly rollup + playbook research --------------------------
 

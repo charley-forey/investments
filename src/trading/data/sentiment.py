@@ -130,6 +130,21 @@ class LexiconSentimentProvider(SentimentProvider):
         return get_symbol_sentiment(config, broker, symbol)
 
 
+class ModelSentimentProvider(SentimentProvider):
+    """Placeholder for a finance-tuned sentiment model (e.g. FinBERT) or a sentiment
+    API. Until the model/credentials are available it falls back to the lexicon, so
+    callers never break — swapping in the real scorer is a one-method change here.
+    BLOCKED: the actual model weights / API key (see ROADMAP M15)."""
+
+    def __init__(self):
+        self._fallback = LexiconSentimentProvider()
+
+    def score(self, config: Config, broker, symbol: str) -> SentimentSignal:
+        # TODO: load a FinBERT-style model or call a sentiment API; for now defer.
+        return self._fallback.score(config, broker, symbol)
+
+
 def get_provider(config: Config) -> SentimentProvider:
-    # A real-model provider would be selected here based on config/credentials.
+    # A real-model provider is selected here once configured/credentialed; the
+    # lexicon is the safe default for tests and no-credential runs.
     return LexiconSentimentProvider()

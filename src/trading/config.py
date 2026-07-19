@@ -120,6 +120,7 @@ class Schedule(BaseModel):
     postclose_review: str = "16:30"
     weekend_research_day: str = "sat"
     weekend_research_time: str = "10:00"
+    intel_every_minutes: int = 10          # continuous market-intelligence ingestion
 
 
 class TaxRates(BaseModel):
@@ -140,6 +141,8 @@ class Paths(BaseModel):
     journal_db: str = "data/journal.db"
     bars_dir: str = "data/bars"
     bars_db: str = "data/bars.db"
+    intel_db: str = "data/intel.db"
+    vectors_db: str = "data/vectors.db"
     memory_dir: str = "memory"
     playbooks_dir: str = "playbooks"
     calendar_file: str = "data/calendar.json"  # user-provided events feed (optional)
@@ -149,6 +152,8 @@ class Paths(BaseModel):
             journal_db=str(root / self.journal_db),
             bars_dir=str(root / self.bars_dir),
             bars_db=str(root / self.bars_db),
+            intel_db=str(root / self.intel_db),
+            vectors_db=str(root / self.vectors_db),
             memory_dir=str(root / self.memory_dir),
             playbooks_dir=str(root / self.playbooks_dir),
             calendar_file=str(root / self.calendar_file),

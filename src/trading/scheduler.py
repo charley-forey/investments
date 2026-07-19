@@ -73,6 +73,23 @@ def run_backup_safe() -> None:
         log.exception("backup failed")
 
 
+def run_intel_safe() -> None:
+    from .broker.alpaca import AlpacaBroker
+    from .data.ingest import ingest_intel
+    from .data.intel import IntelStore
+
+    config = get_config()
+    store = IntelStore(config.settings.paths.intel_db)
+    try:
+        report = ingest_intel(config, store, AlpacaBroker(config))
+        log.info("intel ingest: news+%d sentiment+%d", report.news_saved,
+                 report.sentiment_snapshots)
+    except Exception:
+        log.exception("intel ingest failed")
+    finally:
+        store.close()
+
+
 def build_scheduler():
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -111,6 +128,12 @@ def build_scheduler():
                       id="daily_summary", max_instances=1)
     scheduler.add_job(run_backup_safe, CronTrigger(hour="23", minute="30"),
                       id="backup", max_instances=1)
+    # Continuous market-intelligence ingestion during extended market hours.
+    scheduler.add_job(
+        run_intel_safe,
+        CronTrigger(day_of_week="mon-fri", hour="8-17",
+                    minute=f"*/{sched.intel_every_minutes}"),
+        id="intel", max_instances=1)
     return scheduler
 
 
