@@ -139,10 +139,18 @@ position-management pass proposes correct closes.
 
 ---
 
-## Milestone 5 — Unattended 24/7 Operation
+## Milestone 5 — Unattended 24/7 Operation  ✅ (VPS migration + inbound bot remain)
 
 **Goal:** the daemon runs for weeks without babysitting and recovers from
-failures on its own.
+failures on its own. **Built (commit pending):** retry/backoff (`resilience.py`),
+per-cycle Anthropic cost tracking (`cost.py` + `usage` table), watchdog + health
++ daily summary (`monitoring.py`), nightly rotated journal backup (`backup.py`),
+real-time fill websocket (`broker/stream.py`), scheduler jobs (watchdog/summary/
+backup), extended `trading status` + `watchdog`/`backup`/`stream` commands, and
+`docs/DEPLOY.md` (NSSM + systemd). **Remaining:** actually provisioning the VPS
+(operational, not code) and the inbound approval bot (needs a Discord bot token).
+
+Original design notes:
 
 ### 5.1 Service-ification
 - **Phase A (this PC):** NSSM wraps `trading daemon` as a Windows service

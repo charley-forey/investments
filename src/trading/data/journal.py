@@ -105,6 +105,18 @@ CREATE TABLE IF NOT EXISTS heartbeats (
     status TEXT NOT NULL,
     detail TEXT
 );
+
+CREATE TABLE IF NOT EXISTS usage (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    cycle TEXT,
+    agent TEXT,
+    model TEXT,
+    input_tokens INTEGER NOT NULL DEFAULT 0,
+    output_tokens INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+    cost_usd REAL NOT NULL DEFAULT 0
+);
 """
 
 
@@ -366,6 +378,41 @@ class Journal:
             (utcnow(), job, status, detail),
         )
         self.conn.commit()
+
+    def recent_heartbeats(self, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM heartbeats ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def last_successful_cycle(self) -> dict | None:
+        row = self.conn.execute(
+            "SELECT * FROM heartbeats WHERE job LIKE 'cycle:%' AND status='end' "
+            "ORDER BY id DESC LIMIT 1"
+        ).fetchone()
+        return dict(row) if row else None
+
+    # -- usage / cost ---------------------------------------------------------
+
+    def record_usage(
+        self, *, cycle: str | None, agent: str, model: str,
+        input_tokens: int, output_tokens: int, cache_read_tokens: int, cost_usd: float,
+    ) -> None:
+        self.conn.execute(
+            """INSERT INTO usage
+               (ts, cycle, agent, model, input_tokens, output_tokens,
+                cache_read_tokens, cost_usd)
+               VALUES (?,?,?,?,?,?,?,?)""",
+            (utcnow(), cycle, agent, model, input_tokens, output_tokens,
+             cache_read_tokens, cost_usd),
+        )
+        self.conn.commit()
+
+    def cost_since(self, since_iso: str) -> float:
+        row = self.conn.execute(
+            "SELECT COALESCE(SUM(cost_usd), 0) AS c FROM usage WHERE ts >= ?", (since_iso,)
+        ).fetchone()
+        return float(row["c"])
 
     def last_heartbeat(self, job: str | None = None) -> dict | None:
         if job:

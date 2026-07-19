@@ -112,6 +112,46 @@ def cmd_status(_args) -> int:
     print(f"trades this week: {journal.trades_since(week_start)}/{config.limits.orders.max_new_trades_per_week}")
     print(f"day trades (5d, journal): {journal.day_trades_last_n_days(5)}")
     print(f"pending approvals: {len(journal.pending_approvals())}")
+
+    # Liveness + cost.
+    from datetime import datetime, timezone
+
+    from .monitoring import check_health
+
+    health = check_health(journal)
+    print(f"health: {health.summary()}")
+    last = journal.last_successful_cycle()
+    if last:
+        print(f"last successful cycle: {last['ts']} ({last['detail']})")
+    day_ago = (now - timedelta(days=1)).isoformat()
+    print(f"Anthropic cost (24h): ${journal.cost_since(day_ago):.2f}")
+    return 0
+
+
+def cmd_watchdog(_args) -> int:
+    from .monitoring import run_watchdog
+
+    health = run_watchdog(get_config(), _journal())
+    print(health.summary())
+    return 0 if health.healthy else 1
+
+
+def cmd_backup(_args) -> int:
+    from .backup import backup_journal
+
+    dest = backup_journal(get_config())
+    print(f"journal backed up to {dest}")
+    return 0
+
+
+def cmd_stream(_args) -> int:
+    import logging
+
+    from .broker.stream import run_trade_stream
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    run_trade_stream(get_config())
     return 0
 
 
@@ -229,6 +269,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("sync", help="sync fills and tax lots from the broker").set_defaults(fn=cmd_sync)
     sub.add_parser("daemon", help="run the scheduled trading daemon").set_defaults(fn=cmd_daemon)
+    sub.add_parser("stream", help="run the real-time fill websocket").set_defaults(fn=cmd_stream)
+    sub.add_parser("watchdog", help="check daemon health, alert if stale").set_defaults(
+        fn=cmd_watchdog
+    )
+    sub.add_parser("backup", help="back up the journal database").set_defaults(fn=cmd_backup)
 
     sub.add_parser("status", help="kill switch / budgets / queue").set_defaults(fn=cmd_status)
     sub.add_parser("reset-kill-switch", help="manually reset the kill switch").set_defaults(

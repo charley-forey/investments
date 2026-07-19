@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import notify
+from . import cost, notify
 from .agents import risk as risk_mod
 from .agents import scoring as scoring_mod
 from .agents import strategy as strategy_mod
@@ -34,6 +34,7 @@ class CycleReport:
     submitted: int = 0
     rejected: int = 0
     pending_approval: int = 0
+    cost_usd: float = 0.0
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
@@ -41,7 +42,7 @@ class CycleReport:
             return f"[{self.cycle}] skipped: {self.skipped}"
         return (f"[{self.cycle}] proposals={self.proposals} vetoed={self.vetoed} "
                 f"submitted={self.submitted} rejected={self.rejected} "
-                f"pending={self.pending_approval}")
+                f"pending={self.pending_approval} cost=${self.cost_usd:.3f}")
 
 
 class Orchestrator:
@@ -115,6 +116,7 @@ class Orchestrator:
             self.client, self.config, self.journal, self.broker, account,
             cycle="intraday", extra_context=extra,
         )
+        self._record_usage("intraday", "strategy", session.usage, report)
         report.proposals = len(session.drafts)
 
         market_open = True
@@ -166,6 +168,16 @@ class Orchestrator:
             else:
                 report.rejected += 1
 
+    def _record_usage(self, cycle: str, agent: str, usage, report: CycleReport) -> None:
+        model = self.config.settings.agents.model
+        cost_usd = cost.estimate_cost(usage, model)
+        report.cost_usd += cost_usd
+        self.journal.record_usage(
+            cycle=cycle, agent=agent, model=model,
+            input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
+            cache_read_tokens=usage.cache_read_tokens, cost_usd=cost_usd,
+        )
+
     def _would_be_day_trade(self, draft: OrderProposal) -> bool:
         if draft.side != "sell" or draft.asset_class != "stock":
             return False
@@ -216,6 +228,7 @@ class Orchestrator:
         session = self._run_strategy(
             self.client, self.config, self.journal, self.broker, account, cycle=cycle
         )
+        self._record_usage(cycle, "strategy", session.usage, report)
         self._write_memory("watchlist.md", cycle, session.final_text)
         report.notes.append("wrote memory/watchlist.md")
 
@@ -230,6 +243,7 @@ class Orchestrator:
         session = self._run_strategy(
             self.client, self.config, self.journal, self.broker, account, cycle="weekend"
         )
+        self._record_usage("weekend", "research", session.usage, report)
         self._write_memory("weekend_research.md", "weekend", session.final_text)
         report.notes.append(f"weekly: {len(weekly.changes)} stage changes; "
                             "wrote memory/weekend_research.md")

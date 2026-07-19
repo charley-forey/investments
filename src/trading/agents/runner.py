@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from ..cost import Usage, usage_from_response
 from ..data.journal import Journal
 from ..guardrails.models import OrderProposal
+from ..resilience import RetryConfig, with_retry
 from ..tools.registry import ToolRegistry
 
 
@@ -21,6 +23,11 @@ class AgentResult:
     drafts: list[OrderProposal]
     iterations: int
     stop_reason: str
+    usage: Usage = None  # accumulated token usage across the loop
+
+    def __post_init__(self):
+        if self.usage is None:
+            self.usage = Usage()
 
 
 def run_agent(
@@ -42,17 +49,22 @@ def run_agent(
     stop_reason = "max_iterations"
     iterations = 0
     final_text = ""
+    total_usage = Usage()
 
     while iterations < max_iterations:
         iterations += 1
-        response = client.messages.create(
-            model=model,
-            max_tokens=max_tokens,
-            thinking={"type": "adaptive"},
-            system=system,
-            tools=tools,
-            messages=messages,
+        response = with_retry(
+            lambda: client.messages.create(
+                model=model,
+                max_tokens=max_tokens,
+                thinking={"type": "adaptive"},
+                system=system,
+                tools=tools,
+                messages=messages,
+            ),
+            config=RetryConfig(retries=2),
         )
+        total_usage.add(usage_from_response(response))
 
         if response.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": response.content})
@@ -91,4 +103,5 @@ def run_agent(
         drafts=list(registry.ctx.drafts),
         iterations=iterations,
         stop_reason=stop_reason,
+        usage=total_usage,
     )

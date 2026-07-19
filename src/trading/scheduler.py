@@ -36,6 +36,43 @@ def run_cycle_safe(cycle: str) -> None:
         journal.close()
 
 
+def run_watchdog_safe() -> None:
+    from .monitoring import run_watchdog
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        run_watchdog(config, journal)
+    except Exception:
+        log.exception("watchdog failed")
+    finally:
+        journal.close()
+
+
+def run_daily_summary_safe() -> None:
+    from .monitoring import daily_summary
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        daily_summary(config, journal)
+    except Exception:
+        log.exception("daily summary failed")
+    finally:
+        journal.close()
+
+
+def run_backup_safe() -> None:
+    from .backup import backup_journal
+
+    config = get_config()
+    try:
+        dest = backup_journal(config)
+        log.info("journal backed up to %s", dest)
+    except Exception:
+        log.exception("backup failed")
+
+
 def build_scheduler():
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -66,6 +103,14 @@ def build_scheduler():
         CronTrigger(day_of_week=sched.weekend_research_day, hour=wk_h, minute=wk_m),
         args=["weekend"], id="weekend", max_instances=1,
     )
+    # Liveness: watchdog every 30 min; daily summary after the close; nightly backup.
+    scheduler.add_job(run_watchdog_safe, CronTrigger(minute="*/30"),
+                      id="watchdog", max_instances=1)
+    scheduler.add_job(run_daily_summary_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="16", minute="45"),
+                      id="daily_summary", max_instances=1)
+    scheduler.add_job(run_backup_safe, CronTrigger(hour="23", minute="30"),
+                      id="backup", max_instances=1)
     return scheduler
 
 

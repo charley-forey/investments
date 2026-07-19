@@ -30,8 +30,15 @@ Autonomous cycles:
 ```powershell
 .venv\Scripts\trading run-once --cycle intraday   # one full propose->risk->execute cycle
 .venv\Scripts\trading sync                         # pull fills/lots from the broker
-.venv\Scripts\trading daemon                       # scheduled premarket/intraday/postclose loop
+.venv\Scripts\trading stats                        # per-strategy performance + lifecycle stages
+.venv\Scripts\trading backtest AAPL --strategy sma # backtest a reference signal
+.venv\Scripts\trading daemon                       # scheduled loop (premarket/intraday/postclose/weekend/watchdog/backup)
+.venv\Scripts\trading stream                       # real-time fill websocket
+.venv\Scripts\trading watchdog                     # one-shot health check
+.venv\Scripts\trading backup                        # snapshot the journal DB
 ```
+
+Run it unattended (Windows service via NSSM, or Linux VPS via systemd): see `docs/DEPLOY.md`.
 
 Run tests: `.venv\Scripts\python -m pytest`
 
