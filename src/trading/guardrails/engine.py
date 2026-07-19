@@ -55,12 +55,28 @@ class GuardrailEngine:
         market_is_open: bool | None = None,
         would_be_day_trade: bool = False,
         option_leg_spreads: dict[str, float] | None = None,
+        regime_gross_scale: float = 1.0,
+        max_holding_correlation: float | None = None,
     ) -> GuardrailResult:
         limits = self.config.limits
         violations: list[Violation] = []
 
         def fail(rule: str, message: str) -> None:
             violations.append(Violation(rule=rule, message=message))
+
+        # Portfolio drawdown circuit breaker: track the equity high-water mark and
+        # trip the kill switch on a peak-to-trough decline past the threshold. This
+        # catches slow bleeds that the single-day loss kill switch misses.
+        dd_pct = limits.portfolio.drawdown_circuit_pct
+        if dd_pct > 0 and account.equity > 0:
+            peak = float(self.journal.get_state("equity_peak", "0") or 0)
+            peak = max(peak, account.equity)
+            self.journal.set_state("equity_peak", str(peak))
+            if peak > 0 and 100.0 * (peak - account.equity) / peak > dd_pct:
+                if not self.journal.kill_switch_active():
+                    self.journal.trip_kill_switch(
+                        f"drawdown {(peak - account.equity) / peak * 100:.1f}% from peak "
+                        f"${peak:,.0f} breached {dd_pct}% circuit breaker")
 
         # Reconciliation halt: a broker/journal position mismatch blocks new
         # entries (position-reducing orders are still allowed).
@@ -189,20 +205,32 @@ class GuardrailEngine:
             fail("max_open_positions",
                  f"already at max open positions ({limits.position.max_open_positions})")
 
-        # 7b. Portfolio-level risk: gross exposure and per-underlying concentration.
+        # 7b. Portfolio-level risk: gross exposure (regime-scaled), per-underlying
+        # concentration, and return-correlation concentration.
         if not proposal.reduces_position:
             gross = sum(abs(p.market_value) for p in account.positions) + notional
-            gross_cap = account.equity * limits.portfolio.max_gross_exposure_pct / 100.0
+            gross_cap = (account.equity * limits.portfolio.max_gross_exposure_pct / 100.0
+                         * regime_gross_scale)
             if account.equity > 0 and gross > gross_cap:
+                scale_note = "" if regime_gross_scale >= 1.0 else \
+                    f" (tightened x{regime_gross_scale} for regime)"
                 fail("max_gross_exposure",
-                     f"gross exposure ${gross:,.2f} > cap ${gross_cap:,.2f} "
-                     f"({limits.portfolio.max_gross_exposure_pct}% of equity)")
+                     f"gross exposure ${gross:,.2f} > cap ${gross_cap:,.2f}"
+                     f"{scale_note}")
 
             per_underlying = _count_underlying(account, sym)
             if existing is None and per_underlying >= limits.portfolio.max_positions_per_underlying:
                 fail("max_per_underlying",
                      f"already {per_underlying} position(s) in {sym}; cap is "
                      f"{limits.portfolio.max_positions_per_underlying}")
+
+            corr_cap = limits.portfolio.max_position_correlation
+            if (max_holding_correlation is not None and corr_cap < 1.0
+                    and existing is None and max_holding_correlation > corr_cap):
+                fail("correlation_concentration",
+                     f"return correlation {max_holding_correlation:.2f} to an existing "
+                     f"holding exceeds cap {corr_cap:.2f} — too correlated to add as a "
+                     f"separate position")
 
         # 8. Options rules — recompute risk independently from the legs.
         computed_max_loss: float | None = None
@@ -294,11 +322,14 @@ class OrderPipeline:
         )
 
         option_leg_spreads = self._option_leg_spreads(proposal)
+        regime_scale, holding_corr = self._portfolio_context(proposal, account)
         result = self.engine.evaluate(
             proposal, account, quote,
             market_is_open=market_is_open,
             would_be_day_trade=would_be_day_trade,
             option_leg_spreads=option_leg_spreads,
+            regime_gross_scale=regime_scale,
+            max_holding_correlation=holding_corr,
         )
 
         if not result.approved:
@@ -324,6 +355,54 @@ class OrderPipeline:
                 )
 
         return self._submit(pid, proposal, result)
+
+    def _portfolio_context(self, proposal, account) -> tuple[float, float | None]:
+        """Best-effort regime gross-scale and correlation-to-holdings. Both degrade
+        to no-ops (scale 1.0, corr None) if data or the bar store isn't available —
+        so this never blocks a decision on missing data, and never creates files."""
+        import os
+
+        regime_scale = 1.0
+        holding_corr = None
+        if self.broker is None:
+            return regime_scale, holding_corr
+
+        # Regime: tighten gross exposure in an elevated-volatility tape.
+        try:
+            from ..tools.market_context import market_regime
+
+            regime = market_regime(self.broker)
+            if regime.vol_state == "elevated":
+                regime_scale = self.config.limits.portfolio.elevated_vol_gross_scale
+        except Exception:
+            pass
+
+        # Correlation: only if the bar store already exists (never create it here).
+        try:
+            corr_cap = self.config.limits.portfolio.max_position_correlation
+            bars_db = self.config.settings.paths.bars_db
+            holdings = [p.symbol for p in account.positions if account.position_for(p.symbol)]
+            if (corr_cap < 1.0 and not proposal.reduces_position and holdings
+                    and os.path.exists(bars_db)):
+                from ..analytics.risk import max_correlation_to_holdings
+                from ..data.bars import BarStore
+
+                store = BarStore(bars_db)
+                cand = [b.close for b in store.load_bars(proposal.symbol)]
+                if cand:
+                    holdings_closes = {
+                        s: [b.close for b in store.load_bars(s)]
+                        for s in holdings if s != proposal.symbol
+                    }
+                    holdings_closes = {s: c for s, c in holdings_closes.items() if c}
+                    if holdings_closes:
+                        holding_corr = max_correlation_to_holdings(
+                            cand, holdings_closes).max_correlation
+                store.close()
+        except Exception:
+            pass
+
+        return regime_scale, holding_corr
 
     def _option_leg_spreads(self, proposal: OrderProposal) -> dict[str, float] | None:
         """Best-effort real per-leg option spreads for the cost hurdle. Falls back

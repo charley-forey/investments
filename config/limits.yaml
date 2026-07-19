@@ -20,6 +20,11 @@ orders:
 portfolio:
   max_gross_exposure_pct: 150.0     # sum of |position value| as % of equity
   max_positions_per_underlying: 2   # cap concentration in one name
+  drawdown_circuit_pct: 15.0        # peak-to-trough equity drawdown halt (0 = off)
+  elevated_vol_gross_scale: 0.5     # scale the gross-exposure cap in high-vol regimes
+  max_position_correlation: 0.9     # reject a new name too correlated with holdings (>=1 off)
+  vol_target_annual: 0.0            # 0 = fixed-risk sizing; else target portfolio vol
+  kelly_cap: 0.25                   # fractional-Kelly ceiling
 
 reconciliation:
   halt_on_mismatch: true            # block new entries when broker/journal drift

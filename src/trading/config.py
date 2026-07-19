@@ -33,6 +33,11 @@ class OrderLimits(BaseModel):
 class PortfolioLimits(BaseModel):
     max_gross_exposure_pct: float = Field(default=150.0, gt=0)
     max_positions_per_underlying: int = Field(default=2, gt=0)
+    drawdown_circuit_pct: float = Field(default=15.0, ge=0)   # peak-to-trough halt; 0=off
+    elevated_vol_gross_scale: float = Field(default=0.5, gt=0)  # gross cap x this in high-vol
+    max_position_correlation: float = Field(default=0.9, ge=0)  # >=1 disables the check
+    vol_target_annual: float = Field(default=0.0, ge=0)         # 0 = fixed-risk sizing
+    kelly_cap: float = Field(default=0.25, ge=0)
 
 
 class Reconciliation(BaseModel):

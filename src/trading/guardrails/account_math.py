@@ -39,6 +39,35 @@ def size_stock_position(
     return max(0, min(shares, max_shares_by_cap))
 
 
+def vol_target_size(
+    *, equity: float, entry_price: float, annual_vol: float,
+    target_annual_vol: float, max_position_usd: float, max_position_pct: float,
+) -> int:
+    """Size a position so its standalone volatility contributes about
+    `target_annual_vol` of equity. Higher-vol names get smaller positions.
+    Returns a share count clamped by the position caps."""
+    if entry_price <= 0 or annual_vol <= 0 or target_annual_vol <= 0 or equity <= 0:
+        return 0
+    # target $ vol = equity * target; position $ = target$vol / asset_vol
+    target_dollar_vol = equity * target_annual_vol
+    position_dollars = target_dollar_vol / annual_vol
+    cap_usd = min(max_position_usd, equity * max_position_pct / 100.0)
+    position_dollars = min(position_dollars, cap_usd)
+    return max(0, math.floor(position_dollars / entry_price))
+
+
+def kelly_fraction(win_rate: float, win_loss_ratio: float, *, cap: float = 0.25) -> float:
+    """Fractional-Kelly bet size as a fraction of equity. Kelly f* = W - (1-W)/R.
+    Capped (default quarter-Kelly ceiling) because full Kelly is too aggressive for
+    real, estimation-error-prone edges. Never returns negative (no edge -> 0)."""
+    if win_loss_ratio <= 0:
+        return 0.0
+    f = win_rate - (1.0 - win_rate) / win_loss_ratio
+    if f <= 0:
+        return 0.0
+    return min(f, cap)
+
+
 # -- cost model ---------------------------------------------------------------
 
 def friction_cost(notional_usd: float, spread_usd: float, slippage_bps: float) -> float:
