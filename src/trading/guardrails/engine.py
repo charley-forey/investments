@@ -23,6 +23,24 @@ LEVERAGED_ETFS = {
 }
 
 
+def _count_underlying(account: AccountState, underlying: str) -> int:
+    """How many current positions share this underlying (options resolve their
+    OCC symbol back to the underlying)."""
+    from ..broker.occ import parse_occ
+
+    underlying = underlying.upper()
+    n = 0
+    for p in account.positions:
+        u = p.symbol.upper()
+        try:
+            u = parse_occ(p.symbol).underlying
+        except ValueError:
+            pass
+        if u == underlying:
+            n += 1
+    return n
+
+
 class GuardrailEngine:
     def __init__(self, config: Config, journal: Journal):
         self.config = config
@@ -44,16 +62,30 @@ class GuardrailEngine:
         def fail(rule: str, message: str) -> None:
             violations.append(Violation(rule=rule, message=message))
 
-        # Live-only: strategy must be cleared for live capital, and its stage
-        # scales the position cap (small-live trades at a fraction of full size).
+        # Reconciliation halt: a broker/journal position mismatch blocks new
+        # entries (position-reducing orders are still allowed).
+        if not proposal.reduces_position and self.journal.get_state("reconcile_halt"):
+            fail("reconcile_halt",
+                 f"position reconciliation mismatch — new entries blocked until resolved "
+                 f"({self.journal.get_state('reconcile_halt')})")
+
+        # Strategy lifecycle stage. A candidate/backtest tag (sizing fraction 0)
+        # cannot trade in any mode. In live mode only small-live/scaled may trade,
+        # and the stage's fraction scales the position cap.
+        stage = lifecycle.get_stage(self.journal, proposal.strategy_tag)
+        stage_frac = lifecycle.STAGE_SIZING.get(stage, 0.0)
         live_size_scale = 1.0
-        if self.config.is_live and not proposal.reduces_position:
-            stage = lifecycle.get_stage(self.journal, proposal.strategy_tag)
-            live_size_scale = lifecycle.STAGE_SIZING.get(stage, 0.0)
-            if stage not in ("small-live", "scaled"):
+        if not proposal.reduces_position:
+            if stage_frac <= 0:
                 fail("strategy_stage",
                      f"strategy '{proposal.strategy_tag}' at stage '{stage}' is not "
-                     f"cleared for live trading (needs small-live or scaled)")
+                     f"cleared to trade (needs a passing backtest to reach paper)")
+            elif self.config.is_live:
+                live_size_scale = stage_frac
+                if stage not in ("small-live", "scaled"):
+                    fail("strategy_stage",
+                         f"strategy '{proposal.strategy_tag}' at stage '{stage}' is not "
+                         f"cleared for live trading (needs small-live or scaled)")
 
         # 0. Kill switch — check first, and trip it if today's loss breaches the cap.
         if (
@@ -154,6 +186,21 @@ class GuardrailEngine:
         ):
             fail("max_open_positions",
                  f"already at max open positions ({limits.position.max_open_positions})")
+
+        # 7b. Portfolio-level risk: gross exposure and per-underlying concentration.
+        if not proposal.reduces_position:
+            gross = sum(abs(p.market_value) for p in account.positions) + notional
+            gross_cap = account.equity * limits.portfolio.max_gross_exposure_pct / 100.0
+            if account.equity > 0 and gross > gross_cap:
+                fail("max_gross_exposure",
+                     f"gross exposure ${gross:,.2f} > cap ${gross_cap:,.2f} "
+                     f"({limits.portfolio.max_gross_exposure_pct}% of equity)")
+
+            per_underlying = _count_underlying(account, sym)
+            if existing is None and per_underlying >= limits.portfolio.max_positions_per_underlying:
+                fail("max_per_underlying",
+                     f"already {per_underlying} position(s) in {sym}; cap is "
+                     f"{limits.portfolio.max_positions_per_underlying}")
 
         # 8. Options rules — recompute risk independently from the legs.
         computed_max_loss: float | None = None
@@ -340,6 +387,18 @@ class OrderPipeline:
         if proposal.is_option:
             return self._submit_option(pid, proposal, result)
 
+        # Protective bracket: opening long positions with a stop attach a stop-loss
+        # (and a take-profit at N x risk if no explicit target) atomically.
+        stop_loss = take_profit = None
+        if not proposal.reduces_position and proposal.side == "buy" and proposal.stop_price:
+            stop_loss = proposal.stop_price
+            take_profit = proposal.target_price
+            if take_profit is None and proposal.limit_price:
+                risk = proposal.limit_price - proposal.stop_price
+                r_mult = self.config.limits.orders.bracket_default_target_r
+                if risk > 0 and r_mult > 0:
+                    take_profit = round(proposal.limit_price + r_mult * risk, 2)
+
         broker_order_id = None
         if self.broker is not None:
             broker_order_id = self.broker.submit_order(
@@ -348,6 +407,9 @@ class OrderPipeline:
                 qty=proposal.qty,
                 order_type=proposal.order_type,
                 limit_price=proposal.limit_price,
+                stop_loss_price=stop_loss,
+                take_profit_price=take_profit,
+                client_order_id=f"prop-{pid}",  # idempotent + exact attribution
             )
         order_id = self.journal.record_order(
             proposal_id=pid,
@@ -388,6 +450,7 @@ class OrderPipeline:
         if self.broker is not None:
             broker_order_id = self.broker.submit_option_order(
                 legs=legs, net_limit_price=net_limit, underlying=proposal.symbol,
+                client_order_id=f"prop-{pid}",
             )
         total_contracts = sum(l.qty for l in proposal.legs)
         order_id = self.journal.record_order(

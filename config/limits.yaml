@@ -14,6 +14,16 @@ orders:
   max_new_trades_per_day: 5
   max_new_trades_per_week: 15
   allow_market_orders: false    # limit orders only unless explicitly allowed
+  stale_order_ttl_minutes: 30   # cancel unfilled working orders older than this
+  bracket_default_target_r: 2.0 # take-profit at N x risk when no target given
+
+portfolio:
+  max_gross_exposure_pct: 150.0     # sum of |position value| as % of equity
+  max_positions_per_underlying: 2   # cap concentration in one name
+
+reconciliation:
+  halt_on_mismatch: true            # block new entries when broker/journal drift
+  tolerance_shares: 1.0             # ignore drift at or below this many shares
 
 loss_kill_switch:
   max_daily_loss_pct: 3.0       # realized + unrealized; breach cancels open orders and blocks new proposals

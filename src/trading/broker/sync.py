@@ -67,6 +67,15 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
         price = float(getattr(order, "filled_avg_price", 0) or 0)
         fees = float(getattr(order, "commission", 0) or 0)
 
+        # Exact strategy attribution via the deterministic client_order_id we set
+        # at submission (prop-<proposal_id>); fall back to the symbol heuristic.
+        tag = _tag_from_client_order_id(journal, getattr(order, "client_order_id", None))
+        if tag is None:
+            tag = journal.recent_strategy_tag_for(symbol)
+
+        # Option orders carry an OCC symbol -> 100x multiplier, tracked per contract.
+        asset_class, multiplier, lot_symbol = _classify(symbol)
+
         order_id = journal.record_order(
             proposal_id=None, mode=config.limits.mode, symbol=symbol, side=side,
             qty=filled_qty, order_type="limit", limit_price=price,
@@ -76,13 +85,13 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
         report.fills_recorded += 1
 
         if side == "buy":
-            tag = journal.recent_strategy_tag_for(symbol)
-            journal.open_lot(symbol=symbol, qty=filled_qty, price=price, strategy_tag=tag)
+            journal.open_lot(symbol=lot_symbol, qty=filled_qty, price=price,
+                             strategy_tag=tag, multiplier=multiplier, asset_class=asset_class)
             report.lots_opened += 1
         else:
-            closed_same_day = _close_lots_hifo(journal, symbol, filled_qty, price, updated)
-            report.lots_closed += closed_same_day["closed"]
-            if closed_same_day["day_trade"]:
+            closed = _close_lots_hifo(journal, lot_symbol, filled_qty, price, updated)
+            report.lots_closed += closed["closed"]
+            if closed["day_trade"]:
                 journal.conn.execute(
                     "UPDATE orders SET is_day_trade=1 WHERE id=?", (order_id,)
                 )
@@ -93,7 +102,7 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
 
     journal.set_state("last_fill_sync", newest.isoformat())
 
-    _reconcile(journal, broker, report)
+    _reconcile(config, journal, broker, report)
     detail = (f"orders={report.orders_seen} fills={report.fills_recorded} "
               f"lots+{report.lots_opened}/-{report.lots_closed} "
               f"daytrades={report.day_trades_flagged}")
@@ -101,44 +110,112 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
     return report
 
 
+def _tag_from_client_order_id(journal: Journal, client_order_id) -> str | None:
+    """Map an Alpaca order back to its originating proposal's strategy_tag using
+    the prop-<id> client_order_id we set at submission."""
+    if not client_order_id or not str(client_order_id).startswith("prop-"):
+        return None
+    try:
+        pid = int(str(client_order_id).split("-", 1)[1])
+    except (ValueError, IndexError):
+        return None
+    proposal = journal.get_proposal(pid)
+    return proposal["strategy_tag"] if proposal else None
+
+
+def _classify(symbol: str) -> tuple[str, float, str]:
+    """Return (asset_class, multiplier, lot_symbol). Options (OCC symbols) get a
+    100x contract multiplier and are keyed by their full OCC symbol."""
+    from .occ import parse_occ
+
+    try:
+        parse_occ(symbol)
+        return "option", 100.0, symbol.upper()
+    except ValueError:
+        return "stock", 1.0, symbol.upper()
+
+
 def _close_lots_hifo(journal: Journal, symbol: str, qty: float, price: float,
                      close_dt: datetime) -> dict:
-    """Close open lots highest-cost-first to minimize realized gain. Returns
-    count closed and whether any closed lot was opened the same day (day trade)."""
+    """Close open lots highest-cost-first to minimize realized gain, splitting the
+    final lot if the sell quantity doesn't consume it whole. Returns the count of
+    lot-closings and whether any closed lot was opened the same day (day trade)."""
     lots = journal.open_lots(symbol)
     lots.sort(key=lambda lot: lot["open_price"], reverse=True)  # HIFO
     remaining = qty
     closed = 0
     day_trade = False
     for lot in lots:
-        if remaining <= 0:
+        if remaining <= 1e-9:
             break
         opened = _parse_ts(lot["open_ts"])
         if opened.date() == close_dt.date():
             day_trade = True
-        # Full-lot close (partial-lot splitting is a M3 refinement).
-        journal.close_lot(lot["id"], price=price, ts=close_dt.isoformat())
-        remaining -= lot["qty"]
+        take = min(remaining, lot["qty"])
+        journal.close_lot_qty(lot["id"], qty=take, price=price, ts=close_dt.isoformat())
+        remaining -= take
         closed += 1
     return {"closed": closed, "day_trade": day_trade}
 
 
-def _reconcile(journal: Journal, broker, report: SyncReport) -> None:
-    """Warn if journal open-lot quantities disagree with broker positions."""
+def cancel_stale_orders(config: Config, journal: Journal, broker) -> int:
+    """Cancel working (unfilled) orders older than the configured TTL, so stale
+    limit orders don't sit all day. Returns the number cancelled."""
+    ttl = config.limits.orders.stale_order_ttl_minutes
+    if ttl <= 0:
+        return 0
+    cutoff = datetime.now(timezone.utc) - timedelta(minutes=ttl)
+    cancelled = 0
+    try:
+        orders = broker.list_open_orders()
+    except Exception as e:
+        journal.heartbeat("cancel_stale", status="error", detail=str(e))
+        return 0
+    for order in orders:
+        submitted = _parse_ts(getattr(order, "submitted_at", None)
+                              or getattr(order, "created_at", None))
+        if submitted <= cutoff:
+            try:
+                broker.cancel_order(str(order.id))
+                cancelled += 1
+            except Exception:
+                continue
+    if cancelled:
+        journal.heartbeat("cancel_stale", detail=f"cancelled {cancelled} stale order(s)")
+    return cancelled
+
+
+def _reconcile(config: Config, journal: Journal, broker, report: SyncReport) -> None:
+    """Compare journal open-lot quantities to broker positions. Drift beyond the
+    tolerance is a warning and — if configured — trips a halt flag that blocks new
+    opening trades until resolved (closes remain allowed)."""
     try:
         state = broker.get_account_state(journal)
     except Exception as e:  # reconciliation is best-effort
         report.reconciliation_warnings.append(f"could not fetch positions: {e}")
         return
+    tol = config.limits.reconciliation.tolerance_shares
     broker_qty = {p.symbol: p.qty for p in state.positions}
     journal_qty: dict[str, float] = {}
     for lot in journal.open_lots():
         journal_qty[lot["symbol"]] = journal_qty.get(lot["symbol"], 0) + lot["qty"]
 
+    mismatches = []
     for symbol in set(broker_qty) | set(journal_qty):
         b = broker_qty.get(symbol, 0)
         j = journal_qty.get(symbol, 0)
-        if abs(b - j) > 1e-6:
+        if abs(b - j) > tol:
             msg = f"{symbol}: broker={b:g} journal_lots={j:g}"
+            mismatches.append(msg)
             report.reconciliation_warnings.append(msg)
+
+    if mismatches and config.limits.reconciliation.halt_on_mismatch:
+        journal.set_state("reconcile_halt", "; ".join(mismatches))
+        journal.heartbeat("reconcile", status="warn",
+                          detail=f"HALT: {len(mismatches)} mismatch(es)")
+    else:
+        # Clean sync clears any prior halt.
+        if journal.get_state("reconcile_halt"):
+            journal.set_state("reconcile_halt", "")
+        for msg in mismatches:
             journal.heartbeat("reconcile", status="warn", detail=msg)

@@ -18,7 +18,7 @@ from .agents import strategy as strategy_mod
 from .analytics import lifecycle
 from .analytics.scorer import score_closed_trades
 from .analytics.stats import portfolio_summary
-from .broker.sync import sync_fills
+from .broker.sync import cancel_stale_orders, sync_fills
 from .config import Config
 from .data.journal import Journal
 from .guardrails.engine import OrderPipeline
@@ -109,6 +109,14 @@ class Orchestrator:
     # -- intraday: propose -> risk -> execute --------------------------------
 
     def _trade_cycle(self, account, report: CycleReport) -> None:
+        # Clear out stale working orders before proposing anything new.
+        try:
+            n = cancel_stale_orders(self.config, self.journal, self.broker)
+            if n:
+                report.notes.append(f"cancelled {n} stale order(s)")
+        except Exception as e:
+            report.notes.append(f"stale-order cancel failed: {e}")
+
         stages = lifecycle.stages_summary(self.journal)
         perf = portfolio_summary(self.journal, self.config.settings.tax)
         extra = f"Strategy stages: {stages}\n{perf}"

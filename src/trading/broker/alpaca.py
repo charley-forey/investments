@@ -194,30 +194,50 @@ class AlpacaBroker:
         qty: float,
         order_type: str,
         limit_price: float | None,
+        stop_loss_price: float | None = None,
+        take_profit_price: float | None = None,
+        client_order_id: str | None = None,
     ) -> str:
-        from alpaca.trading.enums import OrderSide, TimeInForce
-        from alpaca.trading.requests import LimitOrderRequest, MarketOrderRequest
+        from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
+        from alpaca.trading.requests import (
+            LimitOrderRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest,
+        )
 
         side_enum = OrderSide.BUY if side == "buy" else OrderSide.SELL
+        # A protective stop (optionally a target) turns this into an atomic bracket
+        # so the position is protected the instant the entry fills.
+        bracket_kwargs = {}
+        if stop_loss_price is not None:
+            bracket_kwargs["order_class"] = OrderClass.BRACKET
+            bracket_kwargs["stop_loss"] = StopLossRequest(
+                stop_price=round(float(stop_loss_price), 2)
+            )
+            if take_profit_price is not None:
+                bracket_kwargs["take_profit"] = TakeProfitRequest(
+                    limit_price=round(float(take_profit_price), 2)
+                )
+
+        common = dict(symbol=symbol.upper(), qty=qty, side=side_enum,
+                      time_in_force=TimeInForce.DAY, client_order_id=client_order_id)
         if order_type == "limit":
             if limit_price is None:
                 raise ValueError("limit order requires limit_price")
-            req = LimitOrderRequest(
-                symbol=symbol.upper(),
-                qty=qty,
-                side=side_enum,
-                time_in_force=TimeInForce.DAY,
-                limit_price=round(float(limit_price), 2),
-            )
+            req = LimitOrderRequest(limit_price=round(float(limit_price), 2),
+                                    **common, **bracket_kwargs)
         else:
-            req = MarketOrderRequest(
-                symbol=symbol.upper(),
-                qty=qty,
-                side=side_enum,
-                time_in_force=TimeInForce.DAY,
-            )
+            req = MarketOrderRequest(**common, **bracket_kwargs)
         order = self.trading.submit_order(order_data=req)
         return str(order.id)
+
+    def list_open_orders(self):
+        from alpaca.trading.enums import QueryOrderStatus
+        from alpaca.trading.requests import GetOrdersRequest
+
+        req = GetOrdersRequest(status=QueryOrderStatus.OPEN, limit=500)
+        return self.trading.get_orders(filter=req)
+
+    def cancel_order(self, order_id: str) -> None:
+        self.trading.cancel_order_by_id(order_id)
 
     def submit_option_order(
         self,
@@ -225,6 +245,7 @@ class AlpacaBroker:
         legs: list[dict],
         net_limit_price: float | None,
         underlying: str,
+        client_order_id: str | None = None,
     ) -> str:
         """Submit a single- or multi-leg option order. `legs` items:
         {occ_symbol, side ('buy'|'sell'), qty (contracts)}. A multi-leg order
@@ -244,13 +265,13 @@ class AlpacaBroker:
             if net_limit_price is not None:
                 req = LimitOrderRequest(
                     symbol=leg["occ_symbol"], qty=leg["qty"], side=_side(leg["side"]),
-                    time_in_force=TimeInForce.DAY,
+                    time_in_force=TimeInForce.DAY, client_order_id=client_order_id,
                     limit_price=round(abs(float(net_limit_price)), 2),
                 )
             else:
                 req = MarketOrderRequest(
                     symbol=leg["occ_symbol"], qty=leg["qty"], side=_side(leg["side"]),
-                    time_in_force=TimeInForce.DAY,
+                    time_in_force=TimeInForce.DAY, client_order_id=client_order_id,
                 )
         else:
             order_legs = [
@@ -265,6 +286,7 @@ class AlpacaBroker:
                 qty=1,
                 order_class=OrderClass.MLEG,
                 time_in_force=TimeInForce.DAY,
+                client_order_id=client_order_id,
                 limit_price=round(float(net_limit_price or 0.0), 2),
                 legs=order_legs,
             )

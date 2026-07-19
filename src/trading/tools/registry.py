@@ -109,6 +109,12 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "required": ["symbol"],
         },
     },
+    "get_market_context": {
+        "description": "Broad-market regime read (SPY trend + realized volatility). Check it "
+                       "before proposing directional trades — a name's setup means less "
+                       "when the tape disagrees.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
     "propose_order": {
         "description": "Register a trade proposal for independent risk review. It is NOT "
                        "executed by this call. Every proposal needs a falsifiable thesis, "
@@ -122,6 +128,7 @@ TOOL_SCHEMAS: dict[str, dict] = {
                 "qty": {"type": "number", "minimum": 0},
                 "limit_price": {"type": "number"},
                 "stop_price": {"type": "number"},
+                "target_price": {"type": "number", "description": "take-profit for the bracket"},
                 "legs": {"type": "array", "items": LEG_SCHEMA},
                 "thesis": {"type": "string"},
                 "expected_edge_usd": {"type": "number"},
@@ -279,6 +286,11 @@ class ToolRegistry:
         signal = get_symbol_sentiment(self.ctx.config, self.ctx.broker, inp["symbol"])
         return signal.summary()
 
+    def _t_get_market_context(self, _inp: dict) -> str:
+        from .market_context import market_regime
+
+        return market_regime(self.ctx.broker).summary()
+
     def _t_propose_order(self, inp: dict) -> str:
         max_props = self.ctx.config.settings.agents.max_proposals_per_cycle
         if len(self.ctx.drafts) >= max_props:
@@ -294,6 +306,7 @@ class ToolRegistry:
             order_type="limit",
             limit_price=inp.get("limit_price"),
             stop_price=inp.get("stop_price"),
+            target_price=inp.get("target_price"),
             legs=legs,
             thesis=inp["thesis"],
             expected_edge_usd=inp["expected_edge_usd"],

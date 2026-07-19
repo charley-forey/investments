@@ -142,6 +142,10 @@ class Journal:
             self.conn.execute("ALTER TABLE tax_lots ADD COLUMN strategy_tag TEXT")
         if "scored" not in cols:
             self.conn.execute("ALTER TABLE tax_lots ADD COLUMN scored INTEGER NOT NULL DEFAULT 0")
+        if "multiplier" not in cols:
+            self.conn.execute("ALTER TABLE tax_lots ADD COLUMN multiplier REAL NOT NULL DEFAULT 1")
+        if "asset_class" not in cols:
+            self.conn.execute("ALTER TABLE tax_lots ADD COLUMN asset_class TEXT NOT NULL DEFAULT 'stock'")
 
     def close(self) -> None:
         self.conn.close()
@@ -276,11 +280,13 @@ class Journal:
     def open_lot(
         self, *, symbol: str, qty: float, price: float,
         ts: str | None = None, strategy_tag: str | None = None,
+        multiplier: float = 1.0, asset_class: str = "stock",
     ) -> int:
         cur = self.conn.execute(
-            "INSERT INTO tax_lots (symbol, qty, open_ts, open_price, strategy_tag) "
-            "VALUES (?,?,?,?,?)",
-            (symbol.upper(), qty, ts or utcnow(), price, strategy_tag),
+            "INSERT INTO tax_lots (symbol, qty, open_ts, open_price, strategy_tag, "
+            "multiplier, asset_class) VALUES (?,?,?,?,?,?,?)",
+            (symbol.upper(), qty, ts or utcnow(), price, strategy_tag,
+             multiplier, asset_class),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -317,13 +323,57 @@ class Journal:
         closed = datetime.fromisoformat(close_ts)
         holding_days = (closed - opened).days
         term = "long" if holding_days > long_term_days else "short"
-        realized = (price - row["open_price"]) * row["qty"]
+        mult = row["multiplier"] if "multiplier" in row.keys() else 1.0
+        realized = (price - row["open_price"]) * row["qty"] * (mult or 1.0)
         self.conn.execute(
             "UPDATE tax_lots SET close_ts=?, close_price=?, realized_pnl=?, term=? WHERE id=?",
             (close_ts, price, realized, term, lot_id),
         )
         self.conn.commit()
         return {"realized_pnl": realized, "term": term, "holding_days": holding_days}
+
+    def close_lot_qty(
+        self, lot_id: int, *, qty: float, price: float, ts: str | None = None,
+        long_term_days: int = 365,
+    ) -> dict:
+        """Close `qty` units of a lot. If qty >= the lot's size, closes it fully;
+        otherwise splits off a closed child lot and reduces the remainder — so
+        partial exits produce correct per-lot basis and realized P&L."""
+        row = self.conn.execute("SELECT * FROM tax_lots WHERE id=?", (lot_id,)).fetchone()
+        if row is None or row["close_ts"] is not None:
+            raise ValueError(f"lot {lot_id} not open")
+        lot_qty = row["qty"]
+        close_ts = ts or utcnow()
+        opened = datetime.fromisoformat(row["open_ts"])
+        holding_days = (datetime.fromisoformat(close_ts) - opened).days
+        term = "long" if holding_days > long_term_days else "short"
+        mult = (row["multiplier"] if "multiplier" in row.keys() else 1.0) or 1.0
+
+        if qty >= lot_qty - 1e-9:
+            realized = (price - row["open_price"]) * lot_qty * mult
+            self.conn.execute(
+                "UPDATE tax_lots SET close_ts=?, close_price=?, realized_pnl=?, term=? WHERE id=?",
+                (close_ts, price, realized, term, lot_id),
+            )
+            self.conn.commit()
+            return {"realized_pnl": realized, "term": term, "qty_closed": lot_qty,
+                    "child_lot_id": lot_id}
+
+        # Partial: closed child row for `qty`, parent keeps the remainder.
+        realized = (price - row["open_price"]) * qty * mult
+        cur = self.conn.execute(
+            """INSERT INTO tax_lots
+               (symbol, qty, open_ts, open_price, close_ts, close_price, realized_pnl,
+                term, strategy_tag, multiplier, asset_class)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+            (row["symbol"], qty, row["open_ts"], row["open_price"], close_ts, price,
+             realized, term, row["strategy_tag"], mult,
+             row["asset_class"] if "asset_class" in row.keys() else "stock"),
+        )
+        self.conn.execute("UPDATE tax_lots SET qty=? WHERE id=?", (lot_qty - qty, lot_id))
+        self.conn.commit()
+        return {"realized_pnl": realized, "term": term, "qty_closed": qty,
+                "child_lot_id": int(cur.lastrowid)}
 
     def open_lots(self, symbol: str | None = None) -> list[dict]:
         q = "SELECT * FROM tax_lots WHERE close_ts IS NULL"

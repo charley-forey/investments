@@ -47,6 +47,21 @@ def sizing_fraction(journal: Journal, tag: str) -> float:
     return STAGE_SIZING.get(get_stage(journal, tag), 0.0)
 
 
+def promote_after_backtest(
+    journal: Journal, tag: str, expectancy: float, *, min_expectancy: float = 0.0
+) -> StageChange | None:
+    """A candidate/backtest strategy that clears the backtest expectancy bar is
+    promoted to `paper` (where it may trade paper capital). No-op otherwise."""
+    stage = get_stage(journal, tag)
+    if stage in ("candidate", "backtest") and expectancy > min_expectancy:
+        set_stage(journal, tag, "paper")
+        change = StageChange(tag, stage, "paper",
+                             f"backtest expectancy ${expectancy:+.2f} > ${min_expectancy:.2f}")
+        journal.heartbeat("lifecycle", detail=f"{tag}: {stage}->paper (backtest)")
+        return change
+    return None
+
+
 def _next_stage(stage: str) -> str:
     i = STAGES.index(stage)
     return STAGES[min(i + 1, len(STAGES) - 1)]

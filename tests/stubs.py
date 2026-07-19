@@ -41,10 +41,21 @@ class StubBroker:
     def list_orders_since(self, since):
         return self._orders
 
-    def submit_order(self, *, symbol, side, qty, order_type, limit_price):
+    def submit_order(self, *, symbol, side, qty, order_type, limit_price,
+                     stop_loss_price=None, take_profit_price=None, client_order_id=None):
         self.submitted.append(dict(symbol=symbol, side=side, qty=qty,
-                                   order_type=order_type, limit_price=limit_price))
+                                   order_type=order_type, limit_price=limit_price,
+                                   stop_loss_price=stop_loss_price,
+                                   take_profit_price=take_profit_price,
+                                   client_order_id=client_order_id))
         return f"stub-order-{len(self.submitted)}"
+
+    def list_open_orders(self):
+        return getattr(self, "_open_orders", [])
+
+    def cancel_order(self, order_id):
+        self.canceled = getattr(self, "canceled", [])
+        self.canceled.append(order_id)
 
 
 @dataclass
@@ -56,6 +67,7 @@ class StubOrder:
     filled_avg_price: float
     status: str = "filled"
     commission: float = 0.0
+    client_order_id: str | None = None
     updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     submitted_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

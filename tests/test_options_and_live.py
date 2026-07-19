@@ -59,9 +59,10 @@ class OptionBroker(StubBroker):
         super().__init__(account, **kw)
         self.option_orders = []
 
-    def submit_option_order(self, *, legs, net_limit_price, underlying):
+    def submit_option_order(self, *, legs, net_limit_price, underlying, client_order_id=None):
         self.option_orders.append(
-            dict(legs=legs, net_limit_price=net_limit_price, underlying=underlying)
+            dict(legs=legs, net_limit_price=net_limit_price, underlying=underlying,
+                 client_order_id=client_order_id)
         )
         return f"opt-order-{len(self.option_orders)}"
 

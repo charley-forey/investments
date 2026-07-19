@@ -26,6 +26,18 @@ class OrderLimits(BaseModel):
     max_new_trades_per_day: int = Field(ge=0)
     max_new_trades_per_week: int = Field(ge=0)
     allow_market_orders: bool = False
+    stale_order_ttl_minutes: int = Field(default=30, ge=0)
+    bracket_default_target_r: float = Field(default=2.0, ge=0)
+
+
+class PortfolioLimits(BaseModel):
+    max_gross_exposure_pct: float = Field(default=150.0, gt=0)
+    max_positions_per_underlying: int = Field(default=2, gt=0)
+
+
+class Reconciliation(BaseModel):
+    halt_on_mismatch: bool = True
+    tolerance_shares: float = Field(default=1.0, ge=0)
 
 
 class LossKillSwitch(BaseModel):
@@ -88,6 +100,8 @@ class Limits(BaseModel):
     cost_hurdle: CostHurdle
     live: LiveGate
     lifecycle: LifecycleGates
+    portfolio: PortfolioLimits = PortfolioLimits()
+    reconciliation: Reconciliation = Reconciliation()
 
 
 class Schedule(BaseModel):

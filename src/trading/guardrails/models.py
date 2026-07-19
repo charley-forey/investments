@@ -28,7 +28,8 @@ class OrderProposal(BaseModel):
     qty: float = Field(default=0, ge=0)    # shares for stocks; 0 for options (qty on legs)
     order_type: Literal["limit", "market"] = "limit"
     limit_price: float | None = Field(default=None, gt=0)
-    stop_price: float | None = Field(default=None, gt=0)   # planned stop, used for sizing
+    stop_price: float | None = Field(default=None, gt=0)   # protective stop (bracket + sizing)
+    target_price: float | None = Field(default=None, gt=0)  # take-profit (bracket)
     legs: list[OptionLeg] = []
     thesis: str | None = None
     expected_edge_usd: float | None = None  # agent's stated expected profit

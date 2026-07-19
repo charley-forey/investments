@@ -195,6 +195,16 @@ def cmd_backtest(args) -> int:
     signal = sma_crossover() if args.strategy == "sma" else breakout()
     result = run_backtest(bars, signal)
     print(f"{args.symbol} {args.strategy} over {len(bars)} bars: {result.summary()}")
+
+    if args.promote and args.tag:
+        from .analytics.lifecycle import promote_after_backtest
+
+        change = promote_after_backtest(_journal(), args.tag, result.expectancy)
+        if change:
+            print(f"  promoted {change.tag}: {change.old_stage} -> {change.new_stage} "
+                  f"({change.reason})")
+        else:
+            print(f"  no promotion for '{args.tag}' (stage unchanged or expectancy <= 0)")
     return 0
 
 
@@ -265,6 +275,9 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("symbol")
     bt.add_argument("--strategy", choices=["sma", "breakout"], default="sma")
     bt.add_argument("--days", type=int, default=365)
+    bt.add_argument("--tag", default=None, help="strategy tag to promote on a passing backtest")
+    bt.add_argument("--promote", action="store_true",
+                    help="promote candidate->paper if expectancy is positive")
     bt.set_defaults(fn=cmd_backtest)
 
     sub.add_parser("sync", help="sync fills and tax lots from the broker").set_defaults(fn=cmd_sync)

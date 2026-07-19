@@ -193,12 +193,70 @@ in the local guarded daemon that holds the broker keys. This removes the VPS for
 the "thinking" half. Deferred deliberately — prove the local loop first; it's an
 optimization, not a prerequisite.
 
-## Cross-cutting hardening (fold in as milestones progress)
+## Cross-cutting hardening (folded into M6)
 
-- **Partial-lot closes:** M2 fill sync closes whole lots; add proportional
-  splitting for accurate per-lot basis and wash-sale precision.
-- **Idempotency everywhere:** fill sync is idempotent; extend the same
-  discipline to any new external-effect path (order submission dedupe on
-  client-side order IDs).
-- **Reconciliation as a gate, not just a warning:** once trusted, a hard
-  broker/journal mismatch should block new trading until resolved.
+The items formerly listed here (partial-lot closes, idempotency, reconciliation
+gate) are now part of Milestone 6 below.
+
+---
+
+## Milestone 6 — Production Hardening ("sealed tight")
+
+**Goal:** close every gap between "correct in simulation" and "safe to fund."
+Grouped by how much money a gap can lose or mislead. **Build-now** items are
+implemented in this milestone; **M7** items are documented but deferred (they need
+external data feeds, a bot token, or heavier infra).
+
+### 6.1 Money-critical (build now)
+- **Real protective orders.** Stops were computed for sizing but never placed.
+  Opening long-stock orders with a `stop_price` (and optional `target_price`)
+  now submit as **Alpaca bracket orders** (entry + stop-loss + take-profit,
+  atomic) so a position is protected the instant it fills — not on the next scan.
+- **Option fills tracked as tax lots.** `sync_fills` detects OCC option orders and
+  records lots with a 100x contract multiplier, so options P&L flows into scoring,
+  the lifecycle, and tax accounting instead of being invisible.
+- **Partial-lot closes.** Selling part of a lot now splits it (a closed portion +
+  a reduced remainder) for accurate per-lot basis and realized P&L, instead of
+  closing the whole lot.
+- **Working-order lifecycle.** Stale unfilled limit orders are cancelled after a
+  configurable TTL at the start of each intraday cycle (`cancel_stale_orders`).
+
+### 6.2 Correctness (build now)
+- **Exact strategy attribution.** Orders submit with `client_order_id = prop-<id>`;
+  sync maps a fill back to its proposal (and thus its `strategy_tag`) exactly,
+  replacing the "most recent proposal for this symbol" heuristic that misattributed
+  P&L when strategies shared a ticker.
+- **Idempotent submission.** The deterministic `client_order_id` also makes order
+  submission safe to retry — a crash mid-submit can't double-send.
+- **Reconciliation as a gate.** A broker/journal position mismatch beyond tolerance
+  sets a halt flag that blocks *opening* trades (closes still allowed) until
+  resolved — no longer just a warning.
+- **Backtest gate enforced.** A strategy at `candidate`/`backtest` stage (sizing
+  fraction 0) is now rejected by the guardrails in every mode; a passing backtest
+  promotes `candidate → paper`. Un-vetted strategies can't trade.
+
+### 6.3 Intelligence & capability (build now)
+- **Portfolio-level risk.** New guardrails beyond per-position: max gross exposure
+  (Σ|market value| / equity) and max concurrent positions per underlying — so the
+  book can't quietly become one concentrated bet.
+- **Market-context tool.** `get_market_context` gives agents a computed regime read
+  (SPY trend + realized volatility) so proposals account for the tape, not just the
+  single name.
+
+### 6.4 Deferred to M7 (need external data / infra / tokens)
+- **Wash-sale cost-basis deferral** (currently blocks the re-buy; full treatment
+  defers the disallowed loss into the replacement lot's basis) + broker lot
+  instructions on close + year-end realized-gains / 1099 reconciliation export.
+- **Sector/correlation risk** (needs a sector/industry data feed).
+- **Fill-quality analytics** (estimated vs. realized slippage trend dashboards).
+- **Bar-history persistence** (Parquet + DuckDB store) so backtests don't re-fetch,
+  plus walk-forward and benchmark-relative backtesting of the agents' *actual*
+  proposed strategies and option structures.
+- **Richer sentiment** (a real model instead of the keyword lexicon; optional X/Twitter).
+- **Inbound approval bot** (Discord bot token) for phone-reply approvals.
+- **Secrets manager** for live VPS deployment; structured metrics/observability.
+
+**M6 exit:** a funded position always carries a live stop; option trades appear in
+`stats`; partial exits report correct P&L; a candidate strategy is refused until
+backtested; a position-concentration attempt is rejected; a seeded reconciliation
+mismatch halts new entries. All verified by unit tests.
