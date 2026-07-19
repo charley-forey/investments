@@ -11,8 +11,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import notify
 from .agents import risk as risk_mod
+from .agents import scoring as scoring_mod
 from .agents import strategy as strategy_mod
+from .analytics import lifecycle
+from .analytics.scorer import score_closed_trades
+from .analytics.stats import portfolio_summary
 from .broker.sync import sync_fills
 from .config import Config
 from .data.journal import Journal
@@ -57,6 +62,7 @@ class Orchestrator:
         self.pipeline = OrderPipeline(config, journal, broker)
         self._run_strategy = strategy_runner
         self._review = risk_reviewer
+        self._score = scoring_mod.run_scoring_session
 
     def run_cycle(self, cycle: str = "intraday") -> CycleReport:
         report = CycleReport(cycle=cycle)
@@ -85,17 +91,29 @@ class Orchestrator:
 
         if cycle == "intraday":
             self._trade_cycle(account, report)
+        elif cycle == "postclose":
+            self._postclose_cycle(account, report)
+        elif cycle == "weekend":
+            self._weekend_cycle(account, report)
         else:
             self._note_cycle(cycle, account, report)
 
         self.journal.heartbeat(f"cycle:{cycle}", status="end", detail=report.summary())
+        try:
+            notify.notify_cycle(self.config, self.journal, report)
+        except Exception as e:  # notifications never break a cycle
+            report.notes.append(f"notify failed: {e}")
         return report
 
     # -- intraday: propose -> risk -> execute --------------------------------
 
     def _trade_cycle(self, account, report: CycleReport) -> None:
+        stages = lifecycle.stages_summary(self.journal)
+        perf = portfolio_summary(self.journal, self.config.settings.tax)
+        extra = f"Strategy stages: {stages}\n{perf}"
         session = self._run_strategy(
-            self.client, self.config, self.journal, self.broker, account, cycle="intraday"
+            self.client, self.config, self.journal, self.broker, account,
+            cycle="intraday", extra_context=extra,
         )
         report.proposals = len(session.drafts)
 
@@ -170,17 +188,56 @@ class Orchestrator:
             price = draft.limit_price or 0.0
             return Quote(symbol=draft.symbol, bid=price, ask=price)
 
-    # -- premarket / postclose: write a memory note --------------------------
+    # -- postclose: deterministic scoring + qualitative lessons --------------
+
+    def _postclose_cycle(self, account, report: CycleReport) -> None:
+        # 1. Deterministic numeric scoring of every closed-but-unscored trade.
+        score_report = score_closed_trades(self.journal)
+        report.notes.append(
+            f"scored {score_report.scored} trades (gross ${score_report.gross_pnl:+.2f})"
+        )
+        # 2. Qualitative lessons from the scoring agent -> memory/lessons.md.
+        try:
+            lessons = self._score(
+                self.client, self.config, self.journal, self.broker, account
+            )
+            report.notes.append(f"{len(lessons)} lessons recorded")
+        except Exception as e:
+            report.notes.append(f"scoring agent failed: {e}")
+        # 3. EOD performance snapshot into memory.
+        perf = portfolio_summary(self.journal, self.config.settings.tax)
+        self._write_memory("eod_review.md", "postclose",
+                           f"{perf}\n\nStages: {lifecycle.stages_summary(self.journal)}")
+        report.notes.append("wrote memory/eod_review.md")
+
+    # -- premarket: write a watchlist note -----------------------------------
 
     def _note_cycle(self, cycle: str, account, report: CycleReport) -> None:
         session = self._run_strategy(
             self.client, self.config, self.journal, self.broker, account, cycle=cycle
         )
-        fname = "watchlist.md" if cycle == "premarket" else "eod_review.md"
+        self._write_memory("watchlist.md", cycle, session.final_text)
+        report.notes.append("wrote memory/watchlist.md")
+
+    # -- weekend: weekly rollup + playbook research --------------------------
+
+    def _weekend_cycle(self, account, report: CycleReport) -> None:
+        from .analytics.scorer import run_weekly
+
+        weekly = run_weekly(self.journal, self.config)
+        for ch in weekly.changes:
+            report.notes.append(f"lifecycle: {ch.tag} {ch.old_stage}->{ch.new_stage}")
+        session = self._run_strategy(
+            self.client, self.config, self.journal, self.broker, account, cycle="weekend"
+        )
+        self._write_memory("weekend_research.md", "weekend", session.final_text)
+        report.notes.append(f"weekly: {len(weekly.changes)} stage changes; "
+                            "wrote memory/weekend_research.md")
+
+    def _write_memory(self, fname: str, cycle: str, body: str) -> None:
         mem_dir = Path(self.config.settings.paths.memory_dir)
         mem_dir.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now(timezone.utc).isoformat(timespec="minutes")
         (mem_dir / fname).write_text(
-            f"# {cycle} note — {stamp}\n\n{session.final_text}\n", encoding="utf-8"
+            f"# {cycle} note — {stamp}\n\n{body}\n", encoding="utf-8"
         )
-        report.notes.append(f"wrote memory/{fname}")

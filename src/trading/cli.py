@@ -131,6 +131,33 @@ def cmd_run_once(args) -> int:
     return 0
 
 
+def cmd_stats(_args) -> int:
+    from .analytics.lifecycle import stages_summary
+    from .analytics.stats import portfolio_summary
+
+    config = get_config()
+    journal = _journal()
+    print(portfolio_summary(journal, config.settings.tax))
+    print("\nStrategy stages: " + stages_summary(journal))
+    return 0
+
+
+def cmd_backtest(args) -> int:
+    from backtest.engine import bars_from_alpaca_df, run_backtest
+    from backtest.strategies import breakout, sma_crossover
+
+    broker = _broker()
+    df = broker.get_bars(args.symbol, days=args.days)
+    if df is None or len(df) == 0:
+        print(f"no bars for {args.symbol}")
+        return 1
+    bars = bars_from_alpaca_df(df)
+    signal = sma_crossover() if args.strategy == "sma" else breakout()
+    result = run_backtest(bars, signal)
+    print(f"{args.symbol} {args.strategy} over {len(bars)} bars: {result.summary()}")
+    return 0
+
+
 def cmd_sync(_args) -> int:
     from .broker.sync import sync_fills
 
@@ -186,9 +213,19 @@ def main(argv: list[str] | None = None) -> int:
     ap.set_defaults(fn=cmd_approve)
 
     ro = sub.add_parser("run-once", help="run a single orchestrator cycle")
-    ro.add_argument("--cycle", choices=["premarket", "intraday", "postclose"],
+    ro.add_argument("--cycle", choices=["premarket", "intraday", "postclose", "weekend"],
                     default="intraday")
     ro.set_defaults(fn=cmd_run_once)
+
+    sub.add_parser("stats", help="per-strategy performance and lifecycle stages").set_defaults(
+        fn=cmd_stats
+    )
+
+    bt = sub.add_parser("backtest", help="backtest a reference strategy on a symbol")
+    bt.add_argument("symbol")
+    bt.add_argument("--strategy", choices=["sma", "breakout"], default="sma")
+    bt.add_argument("--days", type=int, default=365)
+    bt.set_defaults(fn=cmd_backtest)
 
     sub.add_parser("sync", help="sync fills and tax lots from the broker").set_defaults(fn=cmd_sync)
     sub.add_parser("daemon", help="run the scheduled trading daemon").set_defaults(fn=cmd_daemon)

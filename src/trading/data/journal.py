@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS tax_lots (
     close_price REAL,
     realized_pnl REAL,
     term TEXT,                          -- 'short' | 'long' (at close)
-    wash_sale_flag INTEGER NOT NULL DEFAULT 0
+    wash_sale_flag INTEGER NOT NULL DEFAULT 0,
+    strategy_tag TEXT,                  -- attributed strategy for per-tag stats
+    scored INTEGER NOT NULL DEFAULT 0   -- 1 once the scorer has recorded it
 );
 
 CREATE TABLE IF NOT EXISTS scores (
@@ -118,7 +120,16 @@ class Journal:
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.executescript(SCHEMA)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Additive migrations for DBs created by an earlier schema version."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tax_lots)")}
+        if "strategy_tag" not in cols:
+            self.conn.execute("ALTER TABLE tax_lots ADD COLUMN strategy_tag TEXT")
+        if "scored" not in cols:
+            self.conn.execute("ALTER TABLE tax_lots ADD COLUMN scored INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self.conn.close()
@@ -250,13 +261,37 @@ class Journal:
 
     # -- tax lots / wash sale -------------------------------------------------
 
-    def open_lot(self, *, symbol: str, qty: float, price: float, ts: str | None = None) -> int:
+    def open_lot(
+        self, *, symbol: str, qty: float, price: float,
+        ts: str | None = None, strategy_tag: str | None = None,
+    ) -> int:
         cur = self.conn.execute(
-            "INSERT INTO tax_lots (symbol, qty, open_ts, open_price) VALUES (?,?,?,?)",
-            (symbol.upper(), qty, ts or utcnow(), price),
+            "INSERT INTO tax_lots (symbol, qty, open_ts, open_price, strategy_tag) "
+            "VALUES (?,?,?,?,?)",
+            (symbol.upper(), qty, ts or utcnow(), price, strategy_tag),
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def recent_strategy_tag_for(self, symbol: str) -> str | None:
+        """Best-effort attribution: the strategy_tag of the most recent submitted
+        proposal for this symbol. Used to tag lots opened via broker sync."""
+        row = self.conn.execute(
+            "SELECT strategy_tag FROM proposals WHERE symbol=? AND status='submitted' "
+            "ORDER BY id DESC LIMIT 1",
+            (symbol.upper(),),
+        ).fetchone()
+        return row["strategy_tag"] if row else None
+
+    def unscored_closed_lots(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM tax_lots WHERE close_ts IS NOT NULL AND scored=0 ORDER BY close_ts"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_lot_scored(self, lot_id: int) -> None:
+        self.conn.execute("UPDATE tax_lots SET scored=1 WHERE id=?", (lot_id,))
+        self.conn.commit()
 
     def close_lot(
         self, lot_id: int, *, price: float, ts: str | None = None,
@@ -331,3 +366,46 @@ class Journal:
             (utcnow(), job, status, detail),
         )
         self.conn.commit()
+
+    def last_heartbeat(self, job: str | None = None) -> dict | None:
+        if job:
+            row = self.conn.execute(
+                "SELECT * FROM heartbeats WHERE job=? ORDER BY id DESC LIMIT 1", (job,)
+            ).fetchone()
+        else:
+            row = self.conn.execute(
+                "SELECT * FROM heartbeats ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    # -- scores ---------------------------------------------------------------
+
+    def record_score(
+        self, *, strategy_tag: str | None, pnl_usd: float, term: str,
+        proposal_id: int | None = None, grade: str | None = None,
+        thesis_adherence: float | None = None, notes: str | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO scores
+               (proposal_id, ts, strategy_tag, grade, thesis_adherence, pnl_usd, notes)
+               VALUES (?,?,?,?,?,?,?)""",
+            (proposal_id, utcnow(), strategy_tag, grade, thesis_adherence, pnl_usd,
+             (notes or "") + f" [term={term}]"),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def scores_for_tag(self, strategy_tag: str) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM scores WHERE strategy_tag=? ORDER BY id", (strategy_tag,)
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def all_scores(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute("SELECT * FROM scores ORDER BY id")]
+
+    def distinct_strategy_tags(self) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT DISTINCT strategy_tag FROM scores WHERE strategy_tag IS NOT NULL"
+        ).fetchall()
+        return [r["strategy_tag"] for r in rows]

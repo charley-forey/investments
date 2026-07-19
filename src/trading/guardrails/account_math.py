@@ -41,6 +41,13 @@ def size_stock_position(
 
 # -- cost model ---------------------------------------------------------------
 
+def friction_cost(notional_usd: float, spread_usd: float, slippage_bps: float) -> float:
+    """Core stock friction model, shared by live guardrails and the backtester so
+    backtests never use a rosier cost assumption than production."""
+    slippage = notional_usd * slippage_bps / 10_000.0
+    return spread_usd + slippage
+
+
 def estimate_cost_usd(
     proposal: OrderProposal,
     quote: Quote,
@@ -62,8 +69,7 @@ def estimate_cost_usd(
         spread_cost = quote.spread * proposal.qty
         fees = 0.0
         notional = (proposal.limit_price or quote.mid) * proposal.qty
-    slippage = notional * hurdle.slippage_bps / 10_000.0
-    return spread_cost + fees + slippage
+    return fees + friction_cost(notional, spread_cost, hurdle.slippage_bps)
 
 
 def proposal_notional_usd(proposal: OrderProposal, quote: Quote) -> float:

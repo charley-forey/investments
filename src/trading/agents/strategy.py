@@ -18,6 +18,7 @@ def run_strategy_session(
     account: AccountState,
     *,
     cycle: str = "intraday",
+    extra_context: str = "",
 ) -> AgentResult:
     ctx = ToolContext(
         config=config, journal=journal, broker=broker,
@@ -30,12 +31,16 @@ def run_strategy_session(
         user_message = f"{prompts.WATCHLIST_PROMPT}\nUniverse: {universe}"
     elif cycle == "postclose":
         user_message = prompts.EOD_PROMPT
+    elif cycle == "weekend":
+        user_message = f"{prompts.WEEKEND_RESEARCH_PROMPT}\nUniverse: {universe}"
     else:
         user_message = (
             f"Intraday scan. Universe: {universe}. "
             f"You may register at most {config.settings.agents.max_proposals_per_cycle} "
             f"proposals this cycle. Begin by reading memory, journal, and account state."
         )
+    if extra_context:
+        user_message += f"\n\n{extra_context}"
 
     return run_agent(
         client,

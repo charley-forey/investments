@@ -95,6 +95,20 @@ TOOL_SCHEMAS: dict[str, dict] = {
                        "Call this at the start of a session.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    "read_playbook": {
+        "description": "Read the strategy playbooks (rules, filters, known failure modes "
+                       "per strategy tag). Consult before trading a tagged setup.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    "get_sentiment": {
+        "description": "Crude sentiment signal for a symbol: news + Reddit mention volume "
+                       "and a headline polarity lean. A signal to weigh, not a decision.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
     "propose_order": {
         "description": "Register a trade proposal for independent risk review. It is NOT "
                        "executed by this call. Every proposal needs a falsifiable thesis, "
@@ -245,13 +259,26 @@ class ToolRegistry:
         return "\n".join(out)
 
     def _t_read_memory(self, _inp: dict) -> str:
-        mem_dir = Path(self.ctx.config.settings.paths.memory_dir)
-        if not mem_dir.exists():
-            return "no memory files yet"
+        return self._read_dir(self.ctx.config.settings.paths.memory_dir, "memory")
+
+    def _t_read_playbook(self, _inp: dict) -> str:
+        return self._read_dir(self.ctx.config.settings.paths.playbooks_dir, "playbook")
+
+    @staticmethod
+    def _read_dir(dir_path: str, label: str) -> str:
+        d = Path(dir_path)
+        if not d.exists():
+            return f"no {label} files yet"
         chunks = []
-        for f in sorted(mem_dir.glob("*.md")):
+        for f in sorted(d.glob("*.md")):
             chunks.append(f"=== {f.name} ===\n{f.read_text(encoding='utf-8').strip()}")
-        return "\n\n".join(chunks) or "no memory files yet"
+        return "\n\n".join(chunks) or f"no {label} files yet"
+
+    def _t_get_sentiment(self, inp: dict) -> str:
+        from ..data.sentiment import get_symbol_sentiment
+
+        signal = get_symbol_sentiment(self.ctx.config, self.ctx.broker, inp["symbol"])
+        return signal.summary()
 
     def _t_propose_order(self, inp: dict) -> str:
         max_props = self.ctx.config.settings.agents.max_proposals_per_cycle

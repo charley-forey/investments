@@ -60,6 +60,12 @@ def build_scheduler():
         run_cycle_safe, CronTrigger(day_of_week="mon-fri", hour=post_h, minute=post_m),
         args=["postclose"], id="postclose", max_instances=1,
     )
+    wk_h, wk_m = sched.weekend_research_time.split(":")
+    scheduler.add_job(
+        run_cycle_safe,
+        CronTrigger(day_of_week=sched.weekend_research_day, hour=wk_h, minute=wk_m),
+        args=["weekend"], id="weekend", max_instances=1,
+    )
     return scheduler
 
 

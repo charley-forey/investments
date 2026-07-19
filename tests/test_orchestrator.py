@@ -28,7 +28,7 @@ def make_orch(tmp_path, drafts, verdict, market_open=True, kill=False):
         journal.trip_kill_switch("test")
     broker = StubBroker(make_account(), market_open=market_open)
 
-    def strategy_runner(client, cfg, jnl, brk, acct, cycle="intraday"):
+    def strategy_runner(client, cfg, jnl, brk, acct, cycle="intraday", extra_context=""):
         return AgentResult(final_text="scan done", drafts=drafts, iterations=1,
                            stop_reason="end_turn")
 

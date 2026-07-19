@@ -76,7 +76,8 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
         report.fills_recorded += 1
 
         if side == "buy":
-            journal.open_lot(symbol=symbol, qty=filled_qty, price=price)
+            tag = journal.recent_strategy_tag_for(symbol)
+            journal.open_lot(symbol=symbol, qty=filled_qty, price=price, strategy_tag=tag)
             report.lots_opened += 1
         else:
             closed_same_day = _close_lots_hifo(journal, symbol, filled_qty, price, updated)
