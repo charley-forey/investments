@@ -115,6 +115,25 @@ TOOL_SCHEMAS: dict[str, dict] = {
                        "when the tape disagrees.",
         "input_schema": {"type": "object", "properties": {}},
     },
+    "get_features": {
+        "description": "Computed technical features for a symbol (momentum, SMA gap, "
+                       "realized vol, ATR%, distance from high) — a consistent feature set "
+                       "shared with backtests.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    "get_calendar": {
+        "description": "Upcoming scheduled events (earnings, economic releases) for a symbol "
+                       "from the configured calendar feed. Use it for event-risk awareness — "
+                       "avoid holding through a binary event unless that's the thesis.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+        },
+    },
     "propose_order": {
         "description": "Register a trade proposal for independent risk review. It is NOT "
                        "executed by this call. Every proposal needs a falsifiable thesis, "
@@ -290,6 +309,41 @@ class ToolRegistry:
         from .market_context import market_regime
 
         return market_regime(self.ctx.broker).summary()
+
+    def _t_get_features(self, inp: dict) -> str:
+        from ..analytics.features import compute_features
+
+        days = self.ctx.config.settings.agents.bars_lookback_days
+        df = self.ctx.broker.get_bars(inp["symbol"], days=max(days, 40))
+        if df is None or len(df) == 0:
+            return f"no bars for {inp['symbol']}"
+        rows = [type("B", (), {"open": float(r["open"]), "high": float(r["high"]),
+                               "low": float(r["low"]), "close": float(r["close"])})()
+                for _, r in df.iterrows()]
+        feats = compute_features(rows)
+        return feats.summary() if feats else f"insufficient history for {inp['symbol']}"
+
+    def _t_get_calendar(self, inp: dict) -> str:
+        import json
+        from datetime import date
+        from pathlib import Path
+
+        path = Path(self.ctx.config.settings.paths.calendar_file)
+        if not path.exists():
+            return "no calendar feed configured (data/calendar.json)"
+        try:
+            events = json.loads(path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            return "calendar feed is unreadable"
+        today = date.today().isoformat()
+        sym = (inp.get("symbol") or "").upper()
+        upcoming = [e for e in events if e.get("date", "") >= today
+                    and (not sym or e.get("symbol", "").upper() == sym)]
+        upcoming.sort(key=lambda e: e.get("date", ""))
+        if not upcoming:
+            return f"no upcoming events{(' for ' + sym) if sym else ''}"
+        return "\n".join(f"{e['date']} {e.get('symbol', '')} {e.get('event', '')}"
+                         for e in upcoming[:20])
 
     def _t_propose_order(self, inp: dict) -> str:
         max_props = self.ctx.config.settings.agents.max_proposals_per_cycle

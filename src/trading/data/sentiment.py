@@ -112,3 +112,24 @@ def get_symbol_sentiment(
         polarity=round(_polarity(texts), 3),
         top_headlines=headlines,
     )
+
+
+class SentimentProvider:
+    """Pluggable sentiment backend. The default is the keyword-lexicon provider
+    below; a finance-tuned model or a sentiment API drops in by subclassing this and
+    returning it from `get_provider`, with no change to callers (the get_sentiment
+    tool and any agent). The external model/API is the M10 blocked dependency; this
+    seam is what makes swapping it a one-file change."""
+
+    def score(self, config: Config, broker, symbol: str) -> SentimentSignal:
+        raise NotImplementedError
+
+
+class LexiconSentimentProvider(SentimentProvider):
+    def score(self, config: Config, broker, symbol: str) -> SentimentSignal:
+        return get_symbol_sentiment(config, broker, symbol)
+
+
+def get_provider(config: Config) -> SentimentProvider:
+    # A real-model provider would be selected here based on config/credentials.
+    return LexiconSentimentProvider()

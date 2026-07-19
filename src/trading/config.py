@@ -142,6 +142,7 @@ class Paths(BaseModel):
     bars_db: str = "data/bars.db"
     memory_dir: str = "memory"
     playbooks_dir: str = "playbooks"
+    calendar_file: str = "data/calendar.json"  # user-provided events feed (optional)
 
     def resolve(self, root: Path) -> "Paths":
         return Paths(
@@ -150,6 +151,7 @@ class Paths(BaseModel):
             bars_db=str(root / self.bars_db),
             memory_dir=str(root / self.memory_dir),
             playbooks_dir=str(root / self.playbooks_dir),
+            calendar_file=str(root / self.calendar_file),
         )
 
 
