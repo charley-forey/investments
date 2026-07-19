@@ -1,4 +1,20 @@
-# Roadmap — Milestones 3–14
+# Roadmap — Milestones 3–16
+
+> **M15–M16 built (commits `04f3e85`, `d46476a`; 219 tests green):**
+> **M15 Market Intelligence & Continuous Research** — persistent news/social/sentiment
+> store (`data/intel.py`) with dedup + ticker-linking, continuous ingestion job,
+> a curation agent producing a "what's moving the market" digest injected into the
+> strategy agent, a sentiment-model seam (real model = blocked drop-in), social→price
+> signal research, and a dependency-free semantic vector memory (`recall_similar`).
+> **M16 Transparency, Reasoning Capture & Observability** — the agents' summarized
+> reasoning + tool calls captured and stored per proposal; a unified **Decision
+> Record** (`trading why <id>`) tying thesis→reasoning→verdicts→order→fill→score; and
+> a localhost **observability dashboard** (`trading dashboard`) with live metrics,
+> decisions-with-reasoning, performance, the intel digest, a "why did you…" query,
+> and human-only config view/validate. Blocked (external): X/Twitter + premium feeds,
+> production sentiment/embedding models, dashboard auth for remote use.
+
+
 
 Design and strategy for the phases beyond the foundation. Milestones 1–6 are
 **complete and committed** (`41e9abf`, `28ecef8`, `8bf1bec`, `e7aab76`, `1a7f185`,
