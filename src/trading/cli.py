@@ -299,6 +299,17 @@ def cmd_tax(args) -> int:
     return 1
 
 
+def cmd_execution(_args) -> int:
+    from .execution import fill_quality_report
+
+    config = get_config()
+    q = fill_quality_report(_journal())
+    print(q.summary())
+    print(f"(current cost-hurdle slippage assumption: "
+          f"{config.limits.cost_hurdle.slippage_bps} bps)")
+    return 0
+
+
 def cmd_sync(_args) -> int:
     from .broker.sync import sync_fills
 
@@ -386,6 +397,9 @@ def main(argv: list[str] | None = None) -> int:
     tx.add_argument("--min-loss", type=float, default=100.0, dest="min_loss")
     tx.set_defaults(fn=cmd_tax)
 
+    sub.add_parser("execution", help="fill-quality / slippage report").set_defaults(
+        fn=cmd_execution
+    )
     sub.add_parser("sync", help="sync fills and tax lots from the broker").set_defaults(fn=cmd_sync)
     sub.add_parser("daemon", help="run the scheduled trading daemon").set_defaults(fn=cmd_daemon)
     sub.add_parser("stream", help="run the real-time fill websocket").set_defaults(fn=cmd_stream)

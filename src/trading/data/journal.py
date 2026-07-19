@@ -150,6 +150,9 @@ class Journal:
             self.conn.execute("ALTER TABLE tax_lots ADD COLUMN wash_disallowed REAL NOT NULL DEFAULT 0")
         if "wash_adjusted" not in cols:
             self.conn.execute("ALTER TABLE tax_lots ADD COLUMN wash_adjusted INTEGER NOT NULL DEFAULT 0")
+        fill_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(fills)")}
+        if "slippage_bps" not in fill_cols:
+            self.conn.execute("ALTER TABLE fills ADD COLUMN slippage_bps REAL")
 
     def close(self) -> None:
         self.conn.close()
@@ -256,13 +259,21 @@ class Journal:
     def record_fill(
         self, order_id: int, *, qty: float, price: float,
         fees_usd: float = 0.0, est_cost_usd: float | None = None,
+        slippage_bps: float | None = None,
     ) -> int:
         cur = self.conn.execute(
-            "INSERT INTO fills (order_id, ts, qty, price, fees_usd, est_cost_usd) VALUES (?,?,?,?,?,?)",
-            (order_id, utcnow(), qty, price, fees_usd, est_cost_usd),
+            "INSERT INTO fills (order_id, ts, qty, price, fees_usd, est_cost_usd, "
+            "slippage_bps) VALUES (?,?,?,?,?,?,?)",
+            (order_id, utcnow(), qty, price, fees_usd, est_cost_usd, slippage_bps),
         )
         self.conn.commit()
         return int(cur.lastrowid)
+
+    def recorded_slippage(self) -> list[float]:
+        rows = self.conn.execute(
+            "SELECT slippage_bps FROM fills WHERE slippage_bps IS NOT NULL"
+        ).fetchall()
+        return [r["slippage_bps"] for r in rows]
 
     def trades_since(self, since: datetime) -> int:
         row = self.conn.execute(

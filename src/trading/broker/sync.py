@@ -69,9 +69,15 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
 
         # Exact strategy attribution via the deterministic client_order_id we set
         # at submission (prop-<proposal_id>); fall back to the symbol heuristic.
-        tag = _tag_from_client_order_id(journal, getattr(order, "client_order_id", None))
-        if tag is None:
-            tag = journal.recent_strategy_tag_for(symbol)
+        coid = getattr(order, "client_order_id", None)
+        proposal = _proposal_from_client_order_id(journal, coid)
+        tag = proposal["strategy_tag"] if proposal else journal.recent_strategy_tag_for(symbol)
+
+        # Realized slippage vs the proposal's intended (reference) price.
+        slippage = None
+        if proposal and proposal.get("limit_price"):
+            from ..execution import realized_slippage_bps
+            slippage = round(realized_slippage_bps(proposal["limit_price"], price, side), 2)
 
         # Option orders carry an OCC symbol -> 100x multiplier, tracked per contract.
         asset_class, multiplier, lot_symbol = _classify(symbol)
@@ -81,7 +87,8 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
             qty=filled_qty, order_type="limit", limit_price=price,
             broker_order_id=broker_id,
         )
-        journal.record_fill(order_id, qty=filled_qty, price=price, fees_usd=fees)
+        journal.record_fill(order_id, qty=filled_qty, price=price, fees_usd=fees,
+                            slippage_bps=slippage)
         report.fills_recorded += 1
 
         if side == "buy":
@@ -110,17 +117,16 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
     return report
 
 
-def _tag_from_client_order_id(journal: Journal, client_order_id) -> str | None:
-    """Map an Alpaca order back to its originating proposal's strategy_tag using
-    the prop-<id> client_order_id we set at submission."""
+def _proposal_from_client_order_id(journal: Journal, client_order_id) -> dict | None:
+    """Map an Alpaca order back to its originating proposal via the prop-<id>
+    client_order_id we set at submission."""
     if not client_order_id or not str(client_order_id).startswith("prop-"):
         return None
     try:
         pid = int(str(client_order_id).split("-", 1)[1])
     except (ValueError, IndexError):
         return None
-    proposal = journal.get_proposal(pid)
-    return proposal["strategy_tag"] if proposal else None
+    return journal.get_proposal(pid)
 
 
 def _classify(symbol: str) -> tuple[str, float, str]:
