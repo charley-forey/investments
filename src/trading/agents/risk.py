@@ -69,10 +69,14 @@ def review_proposal(
     broker,
     account: AccountState,
     proposal: OrderProposal,
+    *,
+    system_prompt: str | None = None,
+    model: str | None = None,
+    agent_name: str = "risk",
 ) -> RiskVerdict:
     ctx = ToolContext(
         config=config, journal=journal, broker=broker,
-        account_state=account, agent_name="risk",
+        account_state=account, agent_name=agent_name,
     )
     registry = ToolRegistry(ctx, READ_ONLY_TOOLS)
 
@@ -86,14 +90,15 @@ def review_proposal(
     )
 
     # Manual tool loop, then a final constrained-output call for the verdict.
-    system = [{"type": "text", "text": prompts.RISK_SYSTEM,
+    system = [{"type": "text", "text": system_prompt or prompts.RISK_SYSTEM,
                "cache_control": {"type": "ephemeral"}}]
+    review_model = model or config.settings.agents.model_for("risk")
     messages: list[dict] = [{"role": "user", "content": user_message}]
     tools = registry.schemas()
 
     for _ in range(config.settings.agents.max_tool_iterations):
         response = client.messages.create(
-            model=config.settings.agents.model,
+            model=review_model,
             max_tokens=config.settings.agents.max_tokens,
             thinking={"type": "adaptive"},
             system=system,
@@ -122,7 +127,7 @@ def review_proposal(
         "content": "Now output your final verdict as JSON matching the schema.",
     })
     final = client.messages.create(
-        model=config.settings.agents.model,
+        model=review_model,
         max_tokens=2000,
         system=system,
         messages=messages,

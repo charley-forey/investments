@@ -28,7 +28,7 @@ def run_scoring_session(
     registry = ToolRegistry(ctx, READ_ONLY_TOOLS)
     result = run_agent(
         client,
-        model=config.settings.agents.model,
+        model=config.settings.agents.model_for("scoring"),
         max_tokens=config.settings.agents.max_tokens,
         system_prompt=prompts.SCORING_SYSTEM,
         registry=registry,

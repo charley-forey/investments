@@ -47,7 +47,7 @@ def run_strategy_session(
 
     return run_agent(
         client,
-        model=config.settings.agents.model,
+        model=config.settings.agents.model_for("strategy"),
         max_tokens=config.settings.agents.max_tokens,
         system_prompt=prompts.STRATEGY_SYSTEM,
         registry=registry,

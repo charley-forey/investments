@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import cost, notify
+from .agents import redteam as redteam_mod
 from .agents import risk as risk_mod
 from .agents import scoring as scoring_mod
 from .agents import strategy as strategy_mod
@@ -55,6 +56,7 @@ class Orchestrator:
         *,
         strategy_runner=strategy_mod.run_strategy_session,
         risk_reviewer=risk_mod.review_proposal,
+        red_team_reviewer=redteam_mod.red_team,
     ):
         self.config = config
         self.journal = journal
@@ -63,6 +65,7 @@ class Orchestrator:
         self.pipeline = OrderPipeline(config, journal, broker)
         self._run_strategy = strategy_runner
         self._review = risk_reviewer
+        self._red_team = red_team_reviewer
         self._score = scoring_mod.run_scoring_session
 
     def run_cycle(self, cycle: str = "intraday") -> CycleReport:
@@ -140,23 +143,19 @@ class Orchestrator:
             )
             if verdict.verdict != "approve":
                 report.vetoed += 1
-                # Journal the veto against a lightweight proposal record.
-                pid = self.journal.record_proposal(
-                    agent=draft.agent, strategy_tag=draft.strategy_tag, symbol=draft.symbol,
-                    asset_class=draft.asset_class, side=draft.side, qty=draft.qty,
-                    order_type=draft.order_type, limit_price=draft.limit_price,
-                    stop_price=draft.stop_price,
-                    legs=[l.model_dump(mode="json") for l in draft.legs] or None,
-                    thesis=draft.thesis, expected_edge_usd=draft.expected_edge_usd,
-                    max_loss_usd=draft.max_loss_usd, confidence=draft.confidence,
-                )
-                self.journal.record_verdict(
-                    pid, source="risk_agent", verdict="veto",
-                    reason=verdict.reason + (f" | concerns: {'; '.join(verdict.concerns)}"
-                                             if verdict.concerns else ""),
-                )
-                self.journal.set_proposal_status(pid, "vetoed")
+                self._journal_veto(draft, "risk_agent", verdict)
                 continue
+
+            # High-conviction trades get an adversarial red-team pass; a veto here
+            # skips the trade even though risk approved it.
+            if redteam_mod.should_red_team(self.config, draft):
+                rt = self._red_team(
+                    self.client, self.config, self.journal, self.broker, account, draft
+                )
+                if rt.verdict != "approve":
+                    report.vetoed += 1
+                    self._journal_veto(draft, "redteam", rt)
+                    continue
 
             # Approved by risk -> run the deterministic guardrail pipeline.
             quote = self._quote_for(draft)
@@ -185,6 +184,23 @@ class Orchestrator:
             input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens, cost_usd=cost_usd,
         )
+
+    def _journal_veto(self, draft: OrderProposal, source: str, verdict) -> None:
+        pid = self.journal.record_proposal(
+            agent=draft.agent, strategy_tag=draft.strategy_tag, symbol=draft.symbol,
+            asset_class=draft.asset_class, side=draft.side, qty=draft.qty,
+            order_type=draft.order_type, limit_price=draft.limit_price,
+            stop_price=draft.stop_price,
+            legs=[l.model_dump(mode="json") for l in draft.legs] or None,
+            thesis=draft.thesis, expected_edge_usd=draft.expected_edge_usd,
+            max_loss_usd=draft.max_loss_usd, confidence=draft.confidence,
+        )
+        self.journal.record_verdict(
+            pid, source=source, verdict="veto",
+            reason=verdict.reason + (f" | concerns: {'; '.join(verdict.concerns)}"
+                                     if verdict.concerns else ""),
+        )
+        self.journal.set_proposal_status(pid, "vetoed")
 
     def _would_be_day_trade(self, draft: OrderProposal) -> bool:
         if draft.side != "sell" or draft.asset_class != "stock":

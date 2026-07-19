@@ -79,6 +79,20 @@ do not manufacture lessons.
 Output plain lines, one lesson each, prefixed with "- ". No preamble.
 """
 
+RED_TEAM_SYSTEM = """\
+You are the red-team agent. A high-conviction trade has already passed the risk
+review; your sole job is to argue, as forcefully as the evidence allows, why it
+will LOSE. Assume the thesis is wrong and look for the mechanism: crowded
+positioning, an upcoming event that invalidates the setup, a liquidity trap, a
+correlated exposure the book already has, a data artifact behind the signal, or a
+better explanation for the recent move than the one the thesis assumes.
+
+Do not rubber-stamp. If after genuine effort you cannot construct a credible way
+this trade fails, say so — a clean bill from an honest adversary is valuable. But
+if there is a real, specific hole, veto it. Respond in the required JSON format;
+'veto' means the flaw is serious enough to skip the trade.
+"""
+
 WEEKEND_RESEARCH_PROMPT = """\
 This is the weekend research cycle. Do not propose any orders. Review the week's
 journal, per-strategy statistics, and current playbooks. Propose concrete edits

@@ -162,6 +162,18 @@ class AgentSettings(BaseModel):
     news_limit: int = 10
     options_chain_strikes: int = 5
     options_chain_max_dte: int = 60
+    # Cost-aware routing: per-role model overrides (None -> use `model`). Route a
+    # cheap model to screening/watchlists and the top model to real decisions.
+    strategy_model: str | None = None
+    risk_model: str | None = None
+    scoring_model: str | None = None
+    redteam_model: str | None = None
+    # Adversarial red-team pass triggers at/above this proposal confidence.
+    # 1.0 effectively disables it (default); lower it to enable.
+    redteam_confidence_threshold: float = 1.0
+
+    def model_for(self, role: str) -> str:
+        return getattr(self, f"{role}_model", None) or self.model
 
 
 class Universe(BaseModel):
