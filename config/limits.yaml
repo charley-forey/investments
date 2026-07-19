@@ -48,7 +48,8 @@ pdt:
 
 wash_sale:
   enforce: true
-  window_days: 30               # block re-buys within N days of a realized loss in the same symbol
+  window_days: 30               # window around a realized loss in the same security
+  mode: block                   # block | defer (defer = allow re-buy, adjust basis per IRS)
 
 cost_hurdle:
   enforce: true

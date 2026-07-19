@@ -147,8 +147,10 @@ class GuardrailEngine:
                     f"${account.equity:,.0f} < ${limits.pdt.equity_threshold_usd:,.0f}",
                 )
 
-        # 6. Wash sale (buying back after a recent realized loss).
-        if limits.wash_sale.enforce and proposal.side == "buy" and not proposal.reduces_position:
+        # 6. Wash sale (buying back after a recent realized loss). In "defer" mode
+        # the re-buy is allowed and the tax module adjusts basis instead of blocking.
+        if (limits.wash_sale.enforce and limits.wash_sale.mode == "block"
+                and proposal.side == "buy" and not proposal.reduces_position):
             loss = self.journal.last_realized_loss(sym, limits.wash_sale.window_days)
             if loss is not None:
                 fail(

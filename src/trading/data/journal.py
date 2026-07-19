@@ -146,6 +146,10 @@ class Journal:
             self.conn.execute("ALTER TABLE tax_lots ADD COLUMN multiplier REAL NOT NULL DEFAULT 1")
         if "asset_class" not in cols:
             self.conn.execute("ALTER TABLE tax_lots ADD COLUMN asset_class TEXT NOT NULL DEFAULT 'stock'")
+        if "wash_disallowed" not in cols:
+            self.conn.execute("ALTER TABLE tax_lots ADD COLUMN wash_disallowed REAL NOT NULL DEFAULT 0")
+        if "wash_adjusted" not in cols:
+            self.conn.execute("ALTER TABLE tax_lots ADD COLUMN wash_adjusted INTEGER NOT NULL DEFAULT 0")
 
     def close(self) -> None:
         self.conn.close()
@@ -300,6 +304,43 @@ class Journal:
             (symbol.upper(),),
         ).fetchone()
         return row["strategy_tag"] if row else None
+
+    def all_closed_lots(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM tax_lots WHERE close_ts IS NOT NULL ORDER BY close_ts"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def loss_lots_needing_wash_check(self) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM tax_lots WHERE close_ts IS NOT NULL AND realized_pnl < 0 "
+            "AND wash_sale_flag = 0 ORDER BY close_ts"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def lots_opened_between(self, symbol: str, start_iso: str, end_iso: str,
+                            exclude_id: int | None = None) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM tax_lots WHERE symbol=? AND open_ts >= ? AND open_ts <= ? "
+            "ORDER BY open_ts",
+            (symbol.upper(), start_iso, end_iso),
+        ).fetchall()
+        return [dict(r) for r in rows if exclude_id is None or r["id"] != exclude_id]
+
+    def apply_basis_adjustment(self, lot_id: int, *, new_open_price: float,
+                               new_open_ts: str) -> None:
+        self.conn.execute(
+            "UPDATE tax_lots SET open_price=?, open_ts=?, wash_adjusted=1 WHERE id=?",
+            (new_open_price, new_open_ts, lot_id),
+        )
+        self.conn.commit()
+
+    def flag_wash_sale(self, lot_id: int, disallowed: float) -> None:
+        self.conn.execute(
+            "UPDATE tax_lots SET wash_sale_flag=1, wash_disallowed=? WHERE id=?",
+            (disallowed, lot_id),
+        )
+        self.conn.commit()
 
     def unscored_closed_lots(self) -> list[dict]:
         rows = self.conn.execute(

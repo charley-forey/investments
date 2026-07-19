@@ -211,6 +211,15 @@ class Orchestrator:
     # -- postclose: deterministic scoring + qualitative lessons --------------
 
     def _postclose_cycle(self, account, report: CycleReport) -> None:
+        # 0. Keep tax basis current: apply any wash-sale deferrals before scoring.
+        from .analytics.tax import apply_wash_sale_adjustments
+
+        adj = apply_wash_sale_adjustments(
+            self.journal, self.config.limits.wash_sale.window_days
+        )
+        if adj:
+            report.notes.append(f"{len(adj)} wash-sale adjustment(s)")
+
         # 1. Deterministic numeric scoring of every closed-but-unscored trade.
         score_report = score_closed_trades(self.journal)
         report.notes.append(

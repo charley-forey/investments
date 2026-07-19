@@ -68,6 +68,10 @@ class PdtLimits(BaseModel):
 class WashSaleLimits(BaseModel):
     enforce: bool = True
     window_days: int = 30
+    # "block": guardrail refuses the re-buy (avoids wash sales entirely, default).
+    # "defer": allow the re-buy; the tax module defers the disallowed loss into the
+    #          replacement lot's basis (the actual IRS treatment).
+    mode: Literal["block", "defer"] = "block"
 
 
 class CostHurdle(BaseModel):

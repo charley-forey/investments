@@ -208,6 +208,51 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def cmd_tax(args) -> int:
+    from .analytics.tax import (
+        apply_wash_sale_adjustments, export_realized_gains_csv, harvest_candidates,
+        realized_gains_report, realized_totals,
+    )
+
+    config = get_config()
+    journal = _journal()
+
+    if args.action == "wash":
+        adj = apply_wash_sale_adjustments(journal, config.limits.wash_sale.window_days)
+        print(f"applied {len(adj)} wash-sale adjustment(s)")
+        for a in adj:
+            print(f"  loss lot#{a.loss_lot_id} {a.symbol}: ${a.disallowed_usd:,.2f} "
+                  f"deferred into lot#{a.replacement_lot_id}")
+        return 0
+
+    if args.action == "report":
+        rows = realized_gains_report(journal, args.year)
+        t = realized_totals(rows)
+        for r in rows:
+            print(f"{r.close_ts[:10]} {r.symbol:<12} {r.term:<5} "
+                  f"realized ${r.allowed_pnl:+,.2f}"
+                  + (f" (wash ${r.wash_disallowed:,.2f} deferred)" if r.wash_disallowed else ""))
+        print(f"\nShort-term ${t['short_term']:+,.2f}  Long-term ${t['long_term']:+,.2f}  "
+              f"Total ${t['total']:+,.2f}  Wash-deferred ${t['wash_disallowed']:,.2f}  "
+              f"({t['trades']} trades)")
+        return 0
+
+    if args.action == "export":
+        path = args.path or f"data/realized_gains_{args.year or 'all'}.csv"
+        n = export_realized_gains_csv(journal, path, args.year)
+        print(f"exported {n} rows to {path}")
+        return 0
+
+    if args.action == "harvest":
+        cands = harvest_candidates(_broker().get_account_state(journal), args.min_loss)
+        if not cands:
+            print("no tax-loss-harvest candidates")
+        for c in cands:
+            print("  " + c.summary())
+        return 0
+    return 1
+
+
 def cmd_sync(_args) -> int:
     from .broker.sync import sync_fills
 
@@ -279,6 +324,13 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--promote", action="store_true",
                     help="promote candidate->paper if expectancy is positive")
     bt.set_defaults(fn=cmd_backtest)
+
+    tx = sub.add_parser("tax", help="tax accounting: wash sales, realized gains, harvesting")
+    tx.add_argument("action", choices=["wash", "report", "export", "harvest"])
+    tx.add_argument("--year", type=int, default=None)
+    tx.add_argument("--path", default=None, help="output path for export")
+    tx.add_argument("--min-loss", type=float, default=100.0, dest="min_loss")
+    tx.set_defaults(fn=cmd_tax)
 
     sub.add_parser("sync", help="sync fills and tax lots from the broker").set_defaults(fn=cmd_sync)
     sub.add_parser("daemon", help="run the scheduled trading daemon").set_defaults(fn=cmd_daemon)
