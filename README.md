@@ -25,7 +25,18 @@ copy .env.example .env   # then fill in Alpaca paper keys + Anthropic key
 .venv\Scripts\trading status           # kill switch / trade budget / journal summary
 ```
 
+Autonomous cycles:
+
+```powershell
+.venv\Scripts\trading run-once --cycle intraday   # one full propose->risk->execute cycle
+.venv\Scripts\trading sync                         # pull fills/lots from the broker
+.venv\Scripts\trading daemon                       # scheduled premarket/intraday/postclose loop
+```
+
 Run tests: `.venv\Scripts\python -m pytest`
+
+Roadmap for the next phases (M3 learning loop, M4 options+live, M5 unattended):
+see `docs/ROADMAP.md`.
 
 ## Layout
 
