@@ -1,9 +1,17 @@
-# Roadmap — Milestones 3–5
+# Roadmap — Milestones 3–14
 
-Design and strategy for the remaining phases. Milestones 1 (foundation) and 2
-(agent loop + autonomous paper trading) are complete and committed (`41e9abf`,
-`28ecef8`). This document is the reference for what comes next; treat it as a
-living spec, refined as each milestone begins.
+Design and strategy for the phases beyond the foundation. Milestones 1–6 are
+**complete and committed** (`41e9abf`, `28ecef8`, `8bf1bec`, `e7aab76`, `1a7f185`,
+`bc27d30`): foundation → autonomous paper trading → learning loop → options+live →
+unattended operation → production hardening. This document is the reference for
+what's built (M3–M6 below) and what comes next (M7–M14); treat it as a living
+spec, refined as each milestone begins.
+
+**Status at a glance:** the system is functionally complete and "sealed tight" for
+paper trading — but every milestone below M7 is about turning a correct, safe
+single-account bot into a **best-in-class, enterprise-grade platform**. Nothing has
+yet run against a real market or LLM; the first live paper run (keys in `.env`,
+`trading run-once --cycle intraday`) gates the start of M7+.
 
 Guiding principle throughout, unchanged: **the LLM proposes, deterministic code
 disposes.** Learning, capital allocation, and execution decisions that can be
@@ -260,3 +268,187 @@ external data feeds, a bot token, or heavier infra).
 `stats`; partial exits report correct P&L; a candidate strategy is refused until
 backtested; a position-concentration attempt is rejected; a seeded reconciliation
 mismatch halts new entries. All verified by unit tests.
+
+---
+
+# Phase Two — Milestones 7–14 (best-in-class / enterprise)
+
+Sequencing principle: each milestone must leave the system **shippable and safe**,
+and the "LLM proposes, deterministic code disposes" invariant holds throughout —
+every new capability is either a computed guardrail/analytic (deterministic) or a
+new tool/context the agents *weigh* within hard boundaries. Rough dependency order,
+but M7 (tax) and M8 (data/backtest) can proceed in parallel; M9–M12 build on M8;
+M13–M14 are the enterprise/scale layer.
+
+## Milestone 7 — Tax & Compliance Completeness
+
+**Goal:** the system's tax accounting matches the broker's and survives an audit.
+Closes the M6-deferred tax items.
+
+- **Wash-sale cost-basis deferral.** Today the wash-sale rule only *blocks* a re-buy
+  (`guardrails/engine.py` § wash_sale). Full treatment: when a loss is disallowed,
+  defer it into the replacement lot's cost basis and extend its holding period —
+  implemented in the `tax_lots` layer (`data/journal.py`), with a `wash_sale_flag`
+  already on the schema. Handle the 30-day window in both directions and
+  substantially-identical securities (incl. options on the same underlying).
+- **Broker lot instructions on close.** The journal already selects HIFO lots; send
+  those lot IDs to Alpaca on the closing order so the broker's 1099 matches our
+  books (extend `broker/alpaca.py` order submission).
+- **Year-end exports.** Realized-gains CSV (short/long term) and a 1099
+  reconciliation report that diffs our `tax_lots` against the broker's realized
+  activity; a December tax-loss-harvesting review job (new `analytics/tax.py`).
+- **After-tax everything.** Already have after-tax expectancy; extend the daily
+  summary and `trading stats` with realized-tax-drag and harvesting opportunities.
+
+**Exit:** a full simulated year of trades produces a realized-gains export whose
+totals reconcile to the (paper) broker; a wash sale correctly defers basis rather
+than just blocking; unit tests cover both-direction windows and options.
+
+## Milestone 8 — Data & Backtesting Platform
+
+**Goal:** replace the toy backtester with a real research platform so strategy
+promotion (`candidate → backtest → paper`) is driven by rigorous evidence.
+
+- **Bar-history persistence.** Parquet store + DuckDB query layer (deps noted in
+  the original plan) under `data/bars/`; an ingestion job that caches daily (and
+  later intraday) bars so backtests and features don't re-fetch.
+- **Strategy-faithful backtesting.** Today `backtest/` replays only SMA/breakout on
+  equities. Build an engine that backtests the **agents' actual proposed strategy
+  logic** and **option structures**, using the same guardrail cost model
+  (`friction_cost`) and the same sizing rules — so a backtest is a faithful
+  simulation of the live path, not a different code path.
+- **Rigor:** walk-forward / out-of-sample splits, parameter-stability checks, and
+  benchmark-relative metrics (alpha, beta, Sharpe/Sortino, max drawdown vs SPY).
+- **Auto-gate wiring.** A passing walk-forward result auto-calls
+  `lifecycle.promote_after_backtest`; a failing one demotes — the research loop
+  becomes self-driving within hard thresholds.
+
+**Exit:** a strategy the agent invents is backtested end-to-end on cached history,
+scored against SPY with walk-forward, and promoted or rejected automatically.
+
+## Milestone 9 — Advanced Risk & Portfolio Construction
+
+**Goal:** move from per-position limits to portfolio-theory-grade risk.
+
+- **Sector/industry/correlation data** (needs a data feed — GICS or similar) to
+  power correlation-aware concentration limits (beyond M6's per-underlying count).
+- **Risk-based sizing upgrades:** volatility targeting, fractional-Kelly, and
+  correlation-adjusted position sizing in `guardrails/account_math.py`.
+- **Portfolio risk metrics:** value-at-risk / expected shortfall, gross/net/beta
+  exposure by regime (using M6's `get_market_context`), and factor exposure.
+- **Dynamic guardrails:** tighten gross exposure and per-trade risk automatically in
+  elevated-volatility regimes; a portfolio-level drawdown circuit breaker layered
+  above the daily kill switch.
+
+**Exit:** sizing reflects volatility and correlation; a correlated cluster of
+positions is capped as one bet; risk limits tighten in a stressed regime — all
+deterministic and tested.
+
+## Milestone 10 — Signal & Alpha Expansion
+
+**Goal:** widen the opportunity set with better inputs (all delivered to agents as
+tools/context, never as autonomous decisions).
+
+- **Real sentiment model** replacing the keyword lexicon (`data/sentiment.py`):
+  a transformer/finance-tuned classifier or a sentiment API; optional X/Twitter.
+- **New signal tools:** options-flow / unusual-activity, fundamentals (earnings,
+  margins, valuation), an earnings/economic-calendar tool (event-risk awareness),
+  and multi-timeframe technical features.
+- **Feature store:** computed features persisted alongside bars (M8) so backtests
+  and live decisions read identical feature definitions.
+- **Strategy universe growth:** the weekend research agent proposes new tagged
+  candidate strategies from these signals; M8's backtester vets them.
+
+**Exit:** the agent can cite a fundamentals + options-flow + calendar-aware thesis;
+new candidate strategies enter the lifecycle from research and get backtested.
+
+## Milestone 11 — Multi-Agent Intelligence Upgrade
+
+**Goal:** deepen the "multi-agent" system from the original brief and cut cost.
+
+- **Specialized agents:** macro/regime, sector-rotation, options-strategist, and an
+  execution-trader, coordinated by the orchestrator — the roster the resources.txt
+  brainstorm envisioned.
+- **Debate/critique loops:** strategy ↔ risk already exist; add an adversarial
+  "red-team" pass on high-conviction ideas, and the **advisor tool** pattern (a
+  stronger model advising a cheaper executor) for hard calls.
+- **Cost-aware model routing:** cheap model for screening/watchlists, top model for
+  final decisions (config-driven per agent/cycle — the `cost.py` hooks exist).
+  Prompt-caching audit + tool-search for the growing tool set to keep context lean.
+- **Optional:** move research/scoring to **Managed Agents scheduled deployments**
+  (cloud, persistent memory stores) while execution stays in the guarded local
+  daemon that holds the keys.
+
+**Exit:** a measurable cost-per-decision drop with equal-or-better decision quality;
+specialized agents contribute distinct, attributable proposals.
+
+## Milestone 12 — Execution Quality & Microstructure
+
+**Goal:** stop leaking edge at the point of execution.
+
+- **Smart limit placement:** price inside the spread, adaptive repricing of working
+  orders (extends M6's stale-order handling), and liquidity-aware sizing.
+- **Order slicing:** TWAP/VWAP for orders large relative to average volume.
+- **Fill-quality analytics:** the M6-deferred est-vs-realized slippage tracking —
+  record it per fill, trend it in a dashboard, and feed realized costs back into the
+  cost hurdle so the model tightens over time.
+- **Partial-fill & rejection handling:** first-class states in the order lifecycle.
+
+**Exit:** measured slippage vs. arrival price is tracked and trending down; large
+orders are sliced; the cost hurdle self-calibrates from realized fills.
+
+## Milestone 13 — Observability, Ops & Reliability at Scale
+
+**Goal:** enterprise-grade operations and the deferred human-in-the-loop pieces.
+
+- **Structured logging + metrics** (Prometheus/Grafana or a hosted dashboard) beyond
+  the heartbeats table; alert escalation beyond a single Discord webhook.
+- **Secrets manager** (Vault / cloud KMS) replacing plaintext `.env` for live.
+- **Inbound approval bot** (Discord bot token): turn a phone reply into
+  `trading approve <id>` — the last piece of true async phone approval.
+- **Datastore scaling:** migrate the journal from SQLite to Postgres if write
+  concurrency (daemon + stream + workers) demands it; keep the repository interface
+  (`data/journal.py`) stable so the swap is contained.
+- **HA / DR:** redundant deployment, automated failover, tested restore from the
+  nightly backups, and immutable audit/compliance logging.
+
+**Exit:** a metrics dashboard is live; a leaked-key drill and a DB-restore drill both
+pass; approvals happen from a phone; the daemon runs multi-region.
+
+## Milestone 14 — Governance, Live Scaling & Continuous Improvement
+
+**Goal:** run a *portfolio of strategies* with real, growing capital under formal
+governance — the end-state the whole project points at.
+
+- **Capital allocation across strategies:** allocate equity by proven, risk-adjusted
+  after-tax expectancy (extends the M3 lifecycle); rebalance on the weekly job.
+- **Automated strategy A/B & versioning:** playbook versions (already git-tracked)
+  run head-to-head; winners scale, losers retire — governed by hard statistical
+  thresholds, not vibes.
+- **Performance attribution:** decompose P&L by strategy, signal, regime, and
+  execution so you know *why* it's making money.
+- **Graduated live-scaling policy:** an explicit, code-enforced ladder for raising
+  the guardrail ceilings as the track record lengthens — the only place a human
+  raises limits, with a required review gate.
+- **Continuous research pipeline:** research → backtest (M8) → paper → small-live →
+  scaled runs as a standing loop, expanding and pruning the strategy universe
+  autonomously within its boundaries.
+
+**Exit:** capital is allocated across multiple proven strategies by the numbers;
+P&L is fully attributable; scaling live size requires a documented, gated human
+review; the research pipeline runs continuously and self-prunes.
+
+---
+
+## Cross-cutting, always-on (apply within every milestone)
+
+- **Safety invariant:** the guardrail engine remains the sole path to the broker;
+  no new feature lets the LLM bypass it. New risk controls are code, not prompts.
+- **Test-first:** every deterministic component ships with unit tests; the suite
+  stays green at each milestone (currently 117 tests).
+- **Paper-before-live:** capability lands in paper, earns its lifecycle stage, and
+  only then touches live capital — enforced by the `strategy_stage` guardrail.
+- **Cost discipline:** track Anthropic spend per cycle (M5) and per decision (M11);
+  route models by task.
+- **Auditability:** the journal is the immutable record of every proposal, verdict,
+  order, fill, score, and tax lot — extend it, never bypass it.
