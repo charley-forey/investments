@@ -182,29 +182,75 @@ def cmd_stats(_args) -> int:
     return 0
 
 
+def _load_bars_for(symbol, days):
+    """Prefer the persisted bar store; fall back to a live broker fetch."""
+    from backtest.engine import Bar
+    from trading.data.bars import BarStore
+
+    config = get_config()
+    store = BarStore(config.settings.paths.bars_db)
+    rows = store.load_bars(symbol)
+    if rows:
+        return [Bar(date=b.date, open=b.open, high=b.high, low=b.low,
+                    close=b.close, volume=b.volume) for b in rows]
+    from backtest.engine import bars_from_alpaca_df
+
+    df = _broker().get_bars(symbol, days=days)
+    return bars_from_alpaca_df(df) if df is not None else []
+
+
+def cmd_ingest(args) -> int:
+    from trading.data.bars import BarStore, ingest_symbol
+
+    config = get_config()
+    store = BarStore(config.settings.paths.bars_db)
+    broker = _broker()
+    symbols = args.symbols or config.settings.universe.core
+    total = 0
+    for sym in symbols:
+        n = ingest_symbol(store, broker, sym, days=args.days)
+        total += n
+        print(f"  {sym}: {n} bars")
+    print(f"ingested {total} bars for {len(symbols)} symbol(s)")
+    return 0
+
+
 def cmd_backtest(args) -> int:
-    from backtest.engine import bars_from_alpaca_df, run_backtest
+    from backtest.engine import run_backtest
     from backtest.strategies import breakout, sma_crossover
 
-    broker = _broker()
-    df = broker.get_bars(args.symbol, days=args.days)
-    if df is None or len(df) == 0:
+    bars = _load_bars_for(args.symbol, args.days)
+    if not bars:
         print(f"no bars for {args.symbol}")
         return 1
-    bars = bars_from_alpaca_df(df)
     signal = sma_crossover() if args.strategy == "sma" else breakout()
+
+    if args.walkforward:
+        from backtest.walkforward import gate_strategy, walk_forward
+
+        wf = walk_forward(bars, signal)
+        print(f"{args.symbol} {args.strategy} walk-forward: {wf.summary()} "
+              f"-> {'PASS' if wf.passed() else 'FAIL'}")
+        if args.tag:
+            print("  " + gate_strategy(_journal(), args.tag, wf))
+        return 0
+
     result = run_backtest(bars, signal)
     print(f"{args.symbol} {args.strategy} over {len(bars)} bars: {result.summary()}")
+
+    if args.benchmark:
+        from backtest.metrics import compute_metrics
+
+        bench_bars = _load_bars_for(args.benchmark, args.days)
+        bench_curve = run_backtest(bench_bars, signal).equity_curve if bench_bars else None
+        m = compute_metrics(result.equity_curve, bench_curve)
+        print(f"  metrics: {m.summary()}")
 
     if args.promote and args.tag:
         from .analytics.lifecycle import promote_after_backtest
 
         change = promote_after_backtest(_journal(), args.tag, result.expectancy)
-        if change:
-            print(f"  promoted {change.tag}: {change.old_stage} -> {change.new_stage} "
-                  f"({change.reason})")
-        else:
-            print(f"  no promotion for '{args.tag}' (stage unchanged or expectancy <= 0)")
+        print(f"  {'promoted ' + change.tag + ': ' + change.old_stage + ' -> ' + change.new_stage if change else 'no promotion for ' + str(args.tag)}")
     return 0
 
 
@@ -320,10 +366,18 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("symbol")
     bt.add_argument("--strategy", choices=["sma", "breakout"], default="sma")
     bt.add_argument("--days", type=int, default=365)
-    bt.add_argument("--tag", default=None, help="strategy tag to promote on a passing backtest")
+    bt.add_argument("--tag", default=None, help="strategy tag to gate/promote")
     bt.add_argument("--promote", action="store_true",
                     help="promote candidate->paper if expectancy is positive")
+    bt.add_argument("--walkforward", action="store_true",
+                    help="run out-of-sample walk-forward validation + auto-gate")
+    bt.add_argument("--benchmark", default=None, help="benchmark symbol for alpha/beta")
     bt.set_defaults(fn=cmd_backtest)
+
+    ing = sub.add_parser("ingest", help="fetch and persist bar history")
+    ing.add_argument("symbols", nargs="*", help="symbols (default: configured universe)")
+    ing.add_argument("--days", type=int, default=365)
+    ing.set_defaults(fn=cmd_ingest)
 
     tx = sub.add_parser("tax", help="tax accounting: wash sales, realized gains, harvesting")
     tx.add_argument("action", choices=["wash", "report", "export", "harvest"])

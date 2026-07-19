@@ -134,6 +134,7 @@ class TaxRates(BaseModel):
 class Paths(BaseModel):
     journal_db: str = "data/journal.db"
     bars_dir: str = "data/bars"
+    bars_db: str = "data/bars.db"
     memory_dir: str = "memory"
     playbooks_dir: str = "playbooks"
 
@@ -141,6 +142,7 @@ class Paths(BaseModel):
         return Paths(
             journal_db=str(root / self.journal_db),
             bars_dir=str(root / self.bars_dir),
+            bars_db=str(root / self.bars_db),
             memory_dir=str(root / self.memory_dir),
             playbooks_dir=str(root / self.playbooks_dir),
         )

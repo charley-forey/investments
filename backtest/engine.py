@@ -43,6 +43,11 @@ class Trade:
 @dataclass
 class BacktestResult:
     trades: list[Trade]
+    equity_curve: list[float] = None  # per-bar mark-to-market equity
+
+    def __post_init__(self):
+        if self.equity_curve is None:
+            self.equity_curve = []
 
     @property
     def n(self) -> int:
@@ -85,14 +90,23 @@ def run_backtest(
     qty: float = 1.0,
     spread_frac: float = 0.0005,   # assumed round-trip spread as fraction of price
     slippage_bps: float = 5.0,
+    starting_capital: float = 10_000.0,
 ) -> BacktestResult:
     """Long-flat backtest: enter long on a 0->1 signal transition (fill at close),
-    exit on 1->0 (fill at close). Costs applied per round trip via friction_cost."""
+    exit on 1->0 (fill at close). Costs applied per round trip via friction_cost.
+    Also produces a per-bar mark-to-market equity curve for risk metrics."""
     trades: list[Trade] = []
+    curve: list[float] = []
+    realized = 0.0
     in_pos = False
     entry_idx = 0
     entry_price = 0.0
     prev = 0
+
+    def _cost(a: float, b: float) -> float:
+        notional = (a + b) / 2 * qty
+        spread_usd = spread_frac * (a + b) / 2 * qty
+        return friction_cost(notional, spread_usd, slippage_bps)
 
     for i in range(len(bars)):
         sig = signal(bars, i)
@@ -103,24 +117,25 @@ def run_backtest(
         elif in_pos and sig == 0:
             exit_price = bars[i].close
             gross = (exit_price - entry_price) * qty
-            notional = (entry_price + exit_price) / 2 * qty
-            spread_usd = spread_frac * (entry_price + exit_price) / 2 * qty
-            cost = friction_cost(notional, spread_usd, slippage_bps)
+            cost = _cost(entry_price, exit_price)
             trades.append(Trade(entry_idx, i, entry_price, exit_price, qty, gross, cost))
+            realized += gross - cost
             in_pos = False
         prev = sig
+        unrealized = (bars[i].close - entry_price) * qty if in_pos else 0.0
+        curve.append(starting_capital + realized + unrealized)
 
     # Close any open position at the last bar.
     if in_pos and bars:
         i = len(bars) - 1
         exit_price = bars[i].close
         gross = (exit_price - entry_price) * qty
-        notional = (entry_price + exit_price) / 2 * qty
-        spread_usd = spread_frac * (entry_price + exit_price) / 2 * qty
-        cost = friction_cost(notional, spread_usd, slippage_bps)
+        cost = _cost(entry_price, exit_price)
         trades.append(Trade(entry_idx, i, entry_price, exit_price, qty, gross, cost))
+        realized += gross - cost
+        curve[-1] = starting_capital + realized
 
-    return BacktestResult(trades=trades)
+    return BacktestResult(trades=trades, equity_curve=curve)
 
 
 def bars_from_alpaca_df(df) -> list[Bar]:
