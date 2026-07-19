@@ -106,6 +106,15 @@ CREATE TABLE IF NOT EXISTS heartbeats (
     detail TEXT
 );
 
+CREATE TABLE IF NOT EXISTS reasoning (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    proposal_id INTEGER,
+    agent TEXT NOT NULL,
+    reasoning TEXT,
+    tool_calls_json TEXT
+);
+
 CREATE TABLE IF NOT EXISTS usage (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -558,3 +567,22 @@ class Journal:
             "SELECT DISTINCT strategy_tag FROM scores WHERE strategy_tag IS NOT NULL"
         ).fetchall()
         return [r["strategy_tag"] for r in rows]
+
+    # -- reasoning capture (transparency) ------------------------------------
+
+    def record_reasoning(self, *, proposal_id: int | None, agent: str,
+                         reasoning: str, tool_calls: list | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO reasoning (ts, proposal_id, agent, reasoning, tool_calls_json) "
+            "VALUES (?,?,?,?,?)",
+            (utcnow(), proposal_id, agent, reasoning,
+             json.dumps(tool_calls) if tool_calls else None),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def reasoning_for(self, proposal_id: int) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM reasoning WHERE proposal_id=? ORDER BY id", (proposal_id,)
+        ).fetchall()
+        return [dict(r) for r in rows]

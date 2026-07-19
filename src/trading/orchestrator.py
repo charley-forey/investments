@@ -147,7 +147,8 @@ class Orchestrator:
             )
             if verdict.verdict != "approve":
                 report.vetoed += 1
-                self._journal_veto(draft, "risk_agent", verdict)
+                pid = self._journal_veto(draft, "risk_agent", verdict)
+                self._record_reasoning(pid, session)
                 continue
 
             # High-conviction trades get an adversarial red-team pass; a veto here
@@ -158,7 +159,8 @@ class Orchestrator:
                 )
                 if rt.verdict != "approve":
                     report.vetoed += 1
-                    self._journal_veto(draft, "redteam", rt)
+                    pid = self._journal_veto(draft, "redteam", rt)
+                    self._record_reasoning(pid, session)
                     continue
 
             # Approved by risk -> run the deterministic guardrail pipeline.
@@ -167,11 +169,12 @@ class Orchestrator:
                 draft, account, quote,
                 market_is_open=market_open, would_be_day_trade=would_be_dt,
             )
-            # Attach the risk approval to the same proposal record.
+            # Attach the risk approval + captured strategy reasoning to the proposal.
             self.journal.record_verdict(
                 result.proposal_id, source="risk_agent", verdict="approve",
                 reason=verdict.reason,
             )
+            self._record_reasoning(result.proposal_id, session)
             if result.status == "submitted":
                 report.submitted += 1
             elif result.status == "pending_approval":
@@ -189,7 +192,7 @@ class Orchestrator:
             cache_read_tokens=usage.cache_read_tokens, cost_usd=cost_usd,
         )
 
-    def _journal_veto(self, draft: OrderProposal, source: str, verdict) -> None:
+    def _journal_veto(self, draft: OrderProposal, source: str, verdict) -> int:
         pid = self.journal.record_proposal(
             agent=draft.agent, strategy_tag=draft.strategy_tag, symbol=draft.symbol,
             asset_class=draft.asset_class, side=draft.side, qty=draft.qty,
@@ -205,6 +208,14 @@ class Orchestrator:
                                      if verdict.concerns else ""),
         )
         self.journal.set_proposal_status(pid, "vetoed")
+        return pid
+
+    def _record_reasoning(self, proposal_id: int, session) -> None:
+        if getattr(session, "reasoning", "") or getattr(session, "tool_calls", None):
+            self.journal.record_reasoning(
+                proposal_id=proposal_id, agent="strategy",
+                reasoning=session.reasoning, tool_calls=session.tool_calls,
+            )
 
     def _would_be_day_trade(self, draft: OrderProposal) -> bool:
         if draft.side != "sell" or draft.asset_class != "stock":

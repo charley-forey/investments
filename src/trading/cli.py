@@ -358,6 +358,25 @@ def cmd_execution(_args) -> int:
     return 0
 
 
+def cmd_decisions(_args) -> int:
+    from .analytics.decision_record import list_records
+
+    for rec in list_records(_journal(), limit=25):
+        print(rec.summary_line())
+    return 0
+
+
+def cmd_why(args) -> int:
+    from .analytics.decision_record import build_record
+
+    rec = build_record(_journal(), args.proposal_id)
+    if rec is None:
+        print(f"no decision record for proposal #{args.proposal_id}")
+        return 1
+    print(rec.full_text())
+    return 0
+
+
 def cmd_intel(args) -> int:
     from .data.ingest import ingest_intel
     from .data.intel import IntelStore
@@ -392,6 +411,19 @@ def cmd_sync(_args) -> int:
           f"day_trades={report.day_trades_flagged}")
     for w in report.reconciliation_warnings:
         print(f"  WARN reconcile: {w}")
+    return 0
+
+
+def cmd_dashboard(args) -> int:
+    try:
+        import uvicorn
+    except ImportError:
+        print("dashboard needs the web extra: pip install -e \".[web]\"")
+        return 2
+    from .web.app import create_app
+
+    print(f"observability dashboard on http://{args.host}:{args.port}")
+    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
     return 0
 
 
@@ -478,6 +510,13 @@ def main(argv: list[str] | None = None) -> int:
     sc.add_argument("--level", type=int, default=0)
     sc.set_defaults(fn=cmd_scale)
 
+    sub.add_parser("decisions", help="list recent decision records").set_defaults(
+        fn=cmd_decisions
+    )
+    wy = sub.add_parser("why", help="full decision record + reasoning for a proposal")
+    wy.add_argument("proposal_id", type=int)
+    wy.set_defaults(fn=cmd_why)
+
     it = sub.add_parser("intel", help="market-intelligence ingestion + digest")
     it.add_argument("action", choices=["ingest", "digest", "show"])
     it.add_argument("--symbol", default=None)
@@ -488,6 +527,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     sub.add_parser("sync", help="sync fills and tax lots from the broker").set_defaults(fn=cmd_sync)
     sub.add_parser("daemon", help="run the scheduled trading daemon").set_defaults(fn=cmd_daemon)
+
+    dash = sub.add_parser("dashboard", help="launch the local observability dashboard")
+    dash.add_argument("--host", default="127.0.0.1")  # localhost-only by default
+    dash.add_argument("--port", type=int, default=8787)
+    dash.set_defaults(fn=cmd_dashboard)
     sub.add_parser("stream", help="run the real-time fill websocket").set_defaults(fn=cmd_stream)
     sub.add_parser("metrics", help="dashboard-ready metrics snapshot (JSON)").set_defaults(
         fn=cmd_metrics

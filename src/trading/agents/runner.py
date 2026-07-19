@@ -23,11 +23,15 @@ class AgentResult:
     drafts: list[OrderProposal]
     iterations: int
     stop_reason: str
-    usage: Usage = None  # accumulated token usage across the loop
+    usage: Usage = None       # accumulated token usage across the loop
+    reasoning: str = ""       # accumulated summarized thinking (transparency)
+    tool_calls: list = None   # (name, input) tool calls made, in order
 
     def __post_init__(self):
         if self.usage is None:
             self.usage = Usage()
+        if self.tool_calls is None:
+            self.tool_calls = []
 
 
 def run_agent(
@@ -50,6 +54,8 @@ def run_agent(
     iterations = 0
     final_text = ""
     total_usage = Usage()
+    reasoning_parts: list[str] = []
+    tool_calls: list = []
 
     while iterations < max_iterations:
         iterations += 1
@@ -57,7 +63,9 @@ def run_agent(
             lambda: client.messages.create(
                 model=model,
                 max_tokens=max_tokens,
-                thinking={"type": "adaptive"},
+                # summarized thinking so the agent's reasoning can be captured for
+                # transparency (the raw chain of thought is never exposed).
+                thinking={"type": "adaptive", "display": "summarized"},
                 system=system,
                 tools=tools,
                 messages=messages,
@@ -65,6 +73,11 @@ def run_agent(
             config=RetryConfig(retries=2),
         )
         total_usage.add(usage_from_response(response))
+        for block in response.content:
+            if getattr(block, "type", None) == "thinking":
+                t = getattr(block, "thinking", "")
+                if t:
+                    reasoning_parts.append(t)
 
         if response.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": response.content})
@@ -86,6 +99,7 @@ def run_agent(
                 continue
             result = registry.dispatch(block.name, block.input or {})
             called.append(block.name)
+            tool_calls.append({"name": block.name, "input": block.input or {}})
             tool_results.append(
                 {
                     "type": "tool_result",
@@ -104,4 +118,6 @@ def run_agent(
         iterations=iterations,
         stop_reason=stop_reason,
         usage=total_usage,
+        reasoning="\n\n".join(reasoning_parts),
+        tool_calls=tool_calls,
     )
