@@ -192,6 +192,8 @@ class ToolRegistry:
     def _t_get_options_chain(self, inp: dict) -> str:
         from datetime import date
 
+        from ..broker.occ import parse_occ
+
         settings = self.ctx.config.settings.agents
         symbol = inp["symbol"].upper()
         chain = self.ctx.broker.get_options_chain(symbol)
@@ -203,13 +205,10 @@ class ToolRegistry:
         rows = []
         for occ, snap in chain.items():
             try:
-                # OCC symbol: ROOT + YYMMDD + C/P + strike*1000 (8 digits)
-                tail = occ[len(symbol):]
-                exp = date(2000 + int(tail[0:2]), int(tail[2:4]), int(tail[4:6]))
-                right = "call" if tail[6] == "C" else "put"
-                strike = int(tail[7:]) / 1000.0
-            except (ValueError, IndexError):
+                parts = parse_occ(occ, underlying=symbol)
+            except ValueError:
                 continue
+            exp, right, strike = parts.expiry, parts.right, parts.strike
             dte = (exp - date.today()).days
             if dte < 0 or dte > settings.options_chain_max_dte:
                 continue

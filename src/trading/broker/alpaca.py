@@ -218,3 +218,55 @@ class AlpacaBroker:
             )
         order = self.trading.submit_order(order_data=req)
         return str(order.id)
+
+    def submit_option_order(
+        self,
+        *,
+        legs: list[dict],
+        net_limit_price: float | None,
+        underlying: str,
+    ) -> str:
+        """Submit a single- or multi-leg option order. `legs` items:
+        {occ_symbol, side ('buy'|'sell'), qty (contracts)}. A multi-leg order
+        uses OrderClass.MLEG with a net limit price (positive = debit)."""
+        from alpaca.trading.enums import (
+            OrderClass, OrderSide, PositionIntent, TimeInForce,
+        )
+        from alpaca.trading.requests import (
+            LimitOrderRequest, MarketOrderRequest, OptionLegRequest,
+        )
+
+        def _side(s: str) -> "OrderSide":
+            return OrderSide.BUY if s == "buy" else OrderSide.SELL
+
+        if len(legs) == 1:
+            leg = legs[0]
+            if net_limit_price is not None:
+                req = LimitOrderRequest(
+                    symbol=leg["occ_symbol"], qty=leg["qty"], side=_side(leg["side"]),
+                    time_in_force=TimeInForce.DAY,
+                    limit_price=round(abs(float(net_limit_price)), 2),
+                )
+            else:
+                req = MarketOrderRequest(
+                    symbol=leg["occ_symbol"], qty=leg["qty"], side=_side(leg["side"]),
+                    time_in_force=TimeInForce.DAY,
+                )
+        else:
+            order_legs = [
+                OptionLegRequest(
+                    symbol=leg["occ_symbol"],
+                    side=_side(leg["side"]),
+                    ratio_qty=leg["qty"],
+                )
+                for leg in legs
+            ]
+            req = LimitOrderRequest(
+                qty=1,
+                order_class=OrderClass.MLEG,
+                time_in_force=TimeInForce.DAY,
+                limit_price=round(float(net_limit_price or 0.0), 2),
+                legs=order_legs,
+            )
+        order = self.trading.submit_order(order_data=req)
+        return str(order.id)

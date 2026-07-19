@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta, timezone
 
+from ..analytics import lifecycle
 from ..broker.models import AccountState, Quote
 from ..config import Config
 from ..data.journal import Journal
@@ -35,12 +36,24 @@ class GuardrailEngine:
         *,
         market_is_open: bool | None = None,
         would_be_day_trade: bool = False,
+        option_leg_spreads: dict[str, float] | None = None,
     ) -> GuardrailResult:
         limits = self.config.limits
         violations: list[Violation] = []
 
         def fail(rule: str, message: str) -> None:
             violations.append(Violation(rule=rule, message=message))
+
+        # Live-only: strategy must be cleared for live capital, and its stage
+        # scales the position cap (small-live trades at a fraction of full size).
+        live_size_scale = 1.0
+        if self.config.is_live and not proposal.reduces_position:
+            stage = lifecycle.get_stage(self.journal, proposal.strategy_tag)
+            live_size_scale = lifecycle.STAGE_SIZING.get(stage, 0.0)
+            if stage not in ("small-live", "scaled"):
+                fail("strategy_stage",
+                     f"strategy '{proposal.strategy_tag}' at stage '{stage}' is not "
+                     f"cleared for live trading (needs small-live or scaled)")
 
         # 0. Kill switch — check first, and trip it if today's loss breaches the cap.
         if (
@@ -124,7 +137,7 @@ class GuardrailEngine:
         pos_cap = min(
             limits.position.max_position_usd,
             account.equity * limits.position.max_position_pct / 100.0,
-        )
+        ) * live_size_scale
         existing = account.position_for(sym)
         existing_value = abs(existing.market_value) if existing else 0.0
         if not proposal.reduces_position and existing_value + notional > pos_cap:
@@ -174,7 +187,9 @@ class GuardrailEngine:
                          f"{dte} days to expiry < min {limits.options.min_days_to_expiry}")
 
         # 9. Cost hurdle — expected edge must clear estimated friction.
-        est_cost = account_math.estimate_cost_usd(proposal, quote, limits.cost_hurdle)
+        est_cost = account_math.estimate_cost_usd(
+            proposal, quote, limits.cost_hurdle, option_leg_spreads=option_leg_spreads
+        )
         if limits.cost_hurdle.enforce and not proposal.reduces_position:
             if proposal.expected_edge_usd is None:
                 fail("cost_hurdle", "no expected_edge_usd stated; cannot clear cost hurdle")
@@ -229,10 +244,12 @@ class OrderPipeline:
             confidence=proposal.confidence,
         )
 
+        option_leg_spreads = self._option_leg_spreads(proposal)
         result = self.engine.evaluate(
             proposal, account, quote,
             market_is_open=market_is_open,
             would_be_day_trade=would_be_day_trade,
+            option_leg_spreads=option_leg_spreads,
         )
 
         if not result.approved:
@@ -252,22 +269,67 @@ class OrderPipeline:
             notional = result.notional_usd or 0.0
             if threshold <= 0 or notional >= threshold:
                 self.journal.set_proposal_status(pid, "pending_approval")
+                self._notify_pending(pid, proposal, result)
                 return PipelineResult(
                     proposal_id=pid, status="pending_approval", result=result
                 )
 
         return self._submit(pid, proposal, result)
 
+    def _option_leg_spreads(self, proposal: OrderProposal) -> dict[str, float] | None:
+        """Best-effort real per-leg option spreads for the cost hurdle. Falls back
+        to the premium approximation (returns None) if quotes aren't available."""
+        if not proposal.is_option or self.broker is None:
+            return None
+        from ..broker.occ import build_occ
+
+        get_q = getattr(self.broker, "get_option_quote", None)
+        if get_q is None:
+            return None
+        spreads: dict[str, float] = {}
+        for leg in proposal.legs:
+            occ = leg.occ_symbol or build_occ(
+                proposal.symbol, leg.expiry, leg.right, leg.strike
+            )
+            try:
+                spreads[occ] = get_q(occ).spread
+            except Exception:
+                return None  # incomplete data -> use the conservative approximation
+        return spreads
+
+    def _notify_pending(self, pid: int, proposal: OrderProposal, result: GuardrailResult) -> None:
+        """Async approval ping (Discord). Best-effort; never blocks the pipeline."""
+        try:
+            from .. import notify
+
+            desc = (f"{proposal.side} {proposal.qty:g} {proposal.symbol} "
+                    f"({proposal.asset_class}, {proposal.strategy_tag})")
+            if proposal.is_option:
+                desc = "; ".join(f"{l.side} {l.qty} {l.right} {l.strike} {l.expiry}"
+                                 for l in proposal.legs)
+            msg = (f"**LIVE ORDER PENDING APPROVAL** #{pid}\n{desc}\n"
+                   f"notional ${result.notional_usd or 0:,.2f}\n"
+                   f"thesis: {proposal.thesis or 'n/a'}\n"
+                   f"Approve with: `trading approve {pid}`")
+            notify.send(self.config, msg)
+        except Exception:
+            pass
+
     def approve(self, proposal_id: int) -> PipelineResult:
         """Human approval of a pending live order (called from the CLI)."""
+        import json
+
+        from .models import OptionLeg
+
         row = self.journal.get_proposal(proposal_id)
         if row is None or row["status"] != "pending_approval":
             raise ValueError(f"proposal {proposal_id} is not pending approval")
         self.journal.record_verdict(proposal_id, source="human", verdict="approve")
+        legs = [OptionLeg(**leg) for leg in json.loads(row["legs_json"])] if row["legs_json"] else []
         proposal = OrderProposal(
             agent=row["agent"], strategy_tag=row["strategy_tag"], symbol=row["symbol"],
             asset_class=row["asset_class"], side=row["side"], qty=row["qty"],
-            order_type=row["order_type"], limit_price=row["limit_price"],
+            order_type=row["order_type"], limit_price=row["limit_price"], legs=legs,
         )
         result = GuardrailResult(approved=True, notional_usd=None)
         return self._submit(proposal_id, proposal, result)
@@ -276,20 +338,7 @@ class OrderPipeline:
         self, pid: int, proposal: OrderProposal, result: GuardrailResult
     ) -> PipelineResult:
         if proposal.is_option:
-            # Multi-leg option submission lands in milestone 4; validation already works.
-            self.journal.record_verdict(
-                pid, source="guardrail", verdict="reject", rule="options_execution",
-                reason="option order execution not yet enabled (milestone 4)",
-            )
-            self.journal.set_proposal_status(pid, "rejected")
-            result = result.model_copy(update={
-                "approved": False,
-                "violations": result.violations + [Violation(
-                    rule="options_execution",
-                    message="option order execution not yet enabled (milestone 4)",
-                )],
-            })
-            return PipelineResult(proposal_id=pid, status="rejected", result=result)
+            return self._submit_option(pid, proposal, result)
 
         broker_order_id = None
         if self.broker is not None:
@@ -308,6 +357,47 @@ class OrderPipeline:
             qty=proposal.qty,
             order_type=proposal.order_type,
             limit_price=proposal.limit_price,
+            broker_order_id=broker_order_id,
+        )
+        self.journal.set_proposal_status(pid, "submitted")
+        return PipelineResult(
+            proposal_id=pid, status="submitted", result=result,
+            order_id=order_id, broker_order_id=broker_order_id,
+        )
+
+    def _submit_option(
+        self, pid: int, proposal: OrderProposal, result: GuardrailResult
+    ) -> PipelineResult:
+        from ..broker.occ import build_occ
+
+        legs = []
+        for leg in proposal.legs:
+            occ = leg.occ_symbol or build_occ(
+                proposal.symbol, leg.expiry, leg.right, leg.strike
+            )
+            legs.append({"occ_symbol": occ, "side": leg.side, "qty": leg.qty})
+
+        # Net limit price: explicit proposal limit, else net debit from est premiums
+        # (buys pay, sells receive).
+        net_limit = proposal.limit_price
+        if net_limit is None:
+            net = sum((1 if l.side == "buy" else -1) * l.est_premium for l in proposal.legs)
+            net_limit = abs(net)
+
+        broker_order_id = None
+        if self.broker is not None:
+            broker_order_id = self.broker.submit_option_order(
+                legs=legs, net_limit_price=net_limit, underlying=proposal.symbol,
+            )
+        total_contracts = sum(l.qty for l in proposal.legs)
+        order_id = self.journal.record_order(
+            proposal_id=pid,
+            mode=self.config.limits.mode,
+            symbol=proposal.symbol,
+            side=proposal.side,
+            qty=total_contracts,
+            order_type="limit",
+            limit_price=net_limit,
             broker_order_id=broker_order_id,
         )
         self.journal.set_proposal_status(pid, "submitted")

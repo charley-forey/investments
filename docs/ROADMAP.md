@@ -108,15 +108,20 @@ tested; this milestone adds *execution* and the *live path*.
 - OCC symbol construction/validation helper (the chain tool already parses OCC
   symbols; factor that into a shared util).
 
-### 4.2 Live path + async approval
-- Live mode + `ALPACA_LIVE_*` keys (config already selects keys by mode). The
-  `pending_approval` queue and `cli.py approve` already exist from M1.
-- **New:** async approval delivery — Discord/Telegram message with the proposal
-  and an approve command (reply-command bot, or a tiny authenticated Flask/FastAPI
-  endpoint). `limits.live.auto_submit_below_usd` already lets small live orders
-  skip the gate.
-- Lifecycle gates from M3 now gate real capital: only `small-live`/`scaled` tags
-  may submit live; sizing ceilings enforced in code.
+### 4.2 Live path + async approval  ✅ (inbound bot deferred)
+- Live mode + `ALPACA_LIVE_*` keys (config selects by mode). The
+  `pending_approval` queue and `cli.py approve` exist from M1.
+- **Done:** outbound async approval delivery — a Discord ping with the proposal
+  details and the `trading approve <id>` command fires the moment a live order
+  queues (`engine._notify_pending`). `limits.live.auto_submit_below_usd` lets
+  small live orders skip the gate.
+- **Done:** lifecycle gates now gate real capital — only `small-live`/`scaled`
+  tags may submit live (`strategy_stage` guardrail), and the stage's sizing
+  fraction scales the position cap in code.
+- **Deferred to M5:** the *inbound* approval path (a Discord bot token or a tiny
+  authenticated endpoint that turns a phone reply into `approve`). Today approval
+  is the `trading approve <id>` CLI command; the outbound ping tells you what's
+  waiting. This needs a bot token, so it's grouped with M5's service work.
 
 ### 4.3 Position management
 - Exit/stop management for open positions (stops, profit targets, option expiry

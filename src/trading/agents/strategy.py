@@ -37,7 +37,10 @@ def run_strategy_session(
         user_message = (
             f"Intraday scan. Universe: {universe}. "
             f"You may register at most {config.settings.agents.max_proposals_per_cycle} "
-            f"proposals this cycle. Begin by reading memory, journal, and account state."
+            f"proposals this cycle. Begin by reading memory, journal, and account state. "
+            f"FIRST review every open position for exit conditions — hit stop, thesis "
+            f"invalidated, profit target reached, or an option nearing expiry — and "
+            f"propose closes with reduces_position=true before considering any new entry."
         )
     if extra_context:
         user_message += f"\n\n{extra_context}"

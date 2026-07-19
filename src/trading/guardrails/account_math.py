@@ -52,17 +52,21 @@ def estimate_cost_usd(
     proposal: OrderProposal,
     quote: Quote,
     hurdle: CostHurdle,
+    option_leg_spreads: dict[str, float] | None = None,
 ) -> float:
     """Estimated round-trip friction: half-spread each way (= full spread once),
-    regulatory/exchange fees, and slippage on notional."""
+    regulatory/exchange fees, and slippage on notional.
+
+    `option_leg_spreads` maps an OCC symbol to that leg's real per-share bid/ask
+    spread; when provided it replaces the premium-based approximation for
+    accurate hurdle checks."""
     if proposal.is_option:
         contracts = sum(l.qty for l in proposal.legs)
-        # Option quotes are per-share; each leg pays its own spread. We only have
-        # the underlying quote here, so approximate leg spread from est premiums
-        # if leg quotes are absent: assume 2% of premium per side as spread cost.
-        spread_cost = sum(
-            0.04 * l.est_premium * l.qty * CONTRACT_MULTIPLIER for l in proposal.legs
-        )
+        spread_cost = 0.0
+        for leg in proposal.legs:
+            real = (option_leg_spreads or {}).get(leg.occ_symbol or "")
+            per_share = real if real is not None else 0.04 * leg.est_premium
+            spread_cost += per_share * leg.qty * CONTRACT_MULTIPLIER
         fees = hurdle.option_fee_per_contract_usd * contracts * 2  # open + close
         notional = sum(l.est_premium * l.qty * CONTRACT_MULTIPLIER for l in proposal.legs)
     else:

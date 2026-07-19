@@ -184,9 +184,9 @@ def test_defined_risk_spread_passes_options_rules(pipeline):
         OptionLeg(side="sell", right="call", strike=105, expiry=far_expiry(), qty=1, est_premium=3.0),
     ]
     res = pipeline.process(option_proposal(legs), make_account(), make_quote(), market_is_open=True)
-    # Options validation passes; execution itself is milestone 4, so the pipeline
-    # rejects at the submission step with options_execution — and nothing else.
-    assert rules_fired(res) == {"options_execution"}
+    # Options validation passes and the order now executes (M4).
+    assert res.status == "submitted"
+    assert res.order_id is not None
 
 
 def test_options_max_loss_cap(pipeline):
@@ -207,7 +207,10 @@ def test_options_min_dte(pipeline):
 
 
 def test_live_mode_queues_for_approval(journal):
+    from trading.analytics import lifecycle
+
     config = make_config(mode="live")
+    lifecycle.set_stage(journal, "manual", "small-live")  # cleared for live capital
     pipeline = OrderPipeline(config, journal, broker=None)
     res = pipeline.process(base_proposal(), make_account(), make_quote(), market_is_open=True)
     assert res.status == "pending_approval"
