@@ -97,7 +97,10 @@ class GuardrailEngine:
                      f"strategy '{proposal.strategy_tag}' at stage '{stage}' is not "
                      f"cleared to trade (needs a passing backtest to reach paper)")
             elif self.config.is_live:
-                live_size_scale = stage_frac
+                # Stage fraction x the human-approved live-scaling ladder multiplier.
+                from ..analytics import scaling
+
+                live_size_scale = stage_frac * scaling.multiplier(self.journal)
                 if stage not in ("small-live", "scaled"):
                     fail("strategy_stage",
                          f"strategy '{proposal.strategy_tag}' at stage '{stage}' is not "

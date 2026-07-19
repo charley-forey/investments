@@ -273,6 +273,14 @@ class Orchestrator:
         weekly = run_weekly(self.journal, self.config)
         for ch in weekly.changes:
             report.notes.append(f"lifecycle: {ch.tag} {ch.old_stage}->{ch.new_stage}")
+
+        # Re-allocate capital across strategies by risk-adjusted after-tax expectancy.
+        from .analytics.allocation import allocate_capital, persist_allocations
+
+        allocations = allocate_capital(self.journal, self.config.settings.tax)
+        persist_allocations(self.journal, allocations)
+        top = ", ".join(f"{a.tag} {a.weight*100:.0f}%" for a in allocations[:3] if a.weight > 0)
+        report.notes.append(f"allocation: {top or 'no positive-expectancy strategies'}")
         session = self._run_strategy(
             self.client, self.config, self.journal, self.broker, account, cycle="weekend"
         )

@@ -299,6 +299,45 @@ def cmd_tax(args) -> int:
     return 1
 
 
+def cmd_allocate(_args) -> int:
+    from .analytics.allocation import allocate_capital, attribution_report
+
+    config = get_config()
+    journal = _journal()
+    print("Capital allocation (by risk-adjusted after-tax expectancy):")
+    for a in allocate_capital(journal, config.settings.tax):
+        print(f"  {a.tag:<16} weight {a.weight*100:5.1f}%  "
+              f"after-tax expectancy ${a.after_tax_expectancy:+.2f}  "
+              f"({a.trades} trades, conf {a.confidence})")
+    print("\nP&L attribution:")
+    for r in attribution_report(journal, config.settings.tax):
+        print(f"  {r.tag:<16} after-tax ${r.after_tax_pnl:+.2f}  "
+              f"({r.share*100:.0f}% of total, {r.trades} trades)")
+    return 0
+
+
+def cmd_scale(args) -> int:
+    from .analytics import scaling
+
+    config = get_config()
+    journal = _journal()
+    if args.action == "status":
+        print(scaling.status(journal))
+        for lvl in (1, 2, 3):
+            e = scaling.check_eligibility(journal, config.settings.tax, lvl)
+            print(f"  level {lvl} (x{scaling.LADDER[lvl]}): "
+                  f"{'ELIGIBLE' if e.eligible else 'not yet'} — {e.reason}")
+        return 0
+    if args.action == "approve":
+        e = scaling.approve_level(journal, config.settings.tax, args.level)
+        if e.eligible:
+            print(f"live-scaling level set to {args.level}. {scaling.status(journal)}")
+            return 0
+        print(f"refused: not eligible for level {args.level} — {e.reason}")
+        return 1
+    return 1
+
+
 def cmd_execution(_args) -> int:
     from .execution import fill_quality_report
 
@@ -396,6 +435,15 @@ def main(argv: list[str] | None = None) -> int:
     tx.add_argument("--path", default=None, help="output path for export")
     tx.add_argument("--min-loss", type=float, default=100.0, dest="min_loss")
     tx.set_defaults(fn=cmd_tax)
+
+    sub.add_parser("allocate", help="capital allocation + P&L attribution").set_defaults(
+        fn=cmd_allocate
+    )
+
+    sc = sub.add_parser("scale", help="live-scaling ladder (human-gated)")
+    sc.add_argument("action", choices=["status", "approve"])
+    sc.add_argument("--level", type=int, default=0)
+    sc.set_defaults(fn=cmd_scale)
 
     sub.add_parser("execution", help="fill-quality / slippage report").set_defaults(
         fn=cmd_execution
