@@ -128,6 +128,15 @@ def cmd_status(_args) -> int:
     return 0
 
 
+def cmd_metrics(_args) -> int:
+    import json
+
+    from .monitoring import metrics_snapshot
+
+    print(json.dumps(metrics_snapshot(get_config(), _journal()), indent=2))
+    return 0
+
+
 def cmd_watchdog(_args) -> int:
     from .monitoring import run_watchdog
 
@@ -451,6 +460,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("sync", help="sync fills and tax lots from the broker").set_defaults(fn=cmd_sync)
     sub.add_parser("daemon", help="run the scheduled trading daemon").set_defaults(fn=cmd_daemon)
     sub.add_parser("stream", help="run the real-time fill websocket").set_defaults(fn=cmd_stream)
+    sub.add_parser("metrics", help="dashboard-ready metrics snapshot (JSON)").set_defaults(
+        fn=cmd_metrics
+    )
     sub.add_parser("watchdog", help="check daemon health, alert if stale").set_defaults(
         fn=cmd_watchdog
     )

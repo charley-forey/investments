@@ -69,6 +69,32 @@ def run_watchdog(config: Config, journal: Journal, *, max_stale_minutes: float =
     return health
 
 
+def metrics_snapshot(config: Config, journal: Journal) -> dict:
+    """A dashboard-ready metrics feed (JSON-serializable) for observability. Pulls
+    liveness, cost, trade activity, and risk state from the journal."""
+    from datetime import datetime, timedelta, timezone
+
+    from .analytics import scaling
+
+    day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    health = check_health(journal)
+    cycles = [h for h in journal.recent_heartbeats(200)
+              if h["job"].startswith("cycle:") and h["status"] == "end"
+              and (h["ts"] or "") >= day_ago]
+    return {
+        "mode": config.limits.mode,
+        "healthy": health.healthy,
+        "health": health.summary(),
+        "kill_switch": journal.kill_switch_active(),
+        "cycles_24h": len(cycles),
+        "cost_24h_usd": round(journal.cost_since(day_ago), 4),
+        "pending_approvals": len(journal.pending_approvals()),
+        "equity_peak": float(journal.get_state("equity_peak", "0") or 0),
+        "live_scale_level": scaling.current_level(journal),
+        "last_successful_cycle": (journal.last_successful_cycle() or {}).get("ts"),
+    }
+
+
 def daily_summary(config: Config, journal: Journal) -> str:
     """Compose (and send) a daily 'I'm alive + what I did' summary."""
     day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
