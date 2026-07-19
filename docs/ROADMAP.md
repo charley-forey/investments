@@ -273,6 +273,20 @@ mismatch halts new entries. All verified by unit tests.
 
 # Phase Two — Milestones 7–14 (best-in-class / enterprise)
 
+**Build status (all committed, 198 tests green):**
+- **M7 Tax & Compliance** — ✅ built (wash-sale deferral, realized-gains export, harvesting)
+- **M8 Data & Backtesting** — ✅ built (bar store, benchmark metrics, walk-forward auto-gate)
+- **M9 Advanced Risk** — ✅ built (vol-target/Kelly sizing, VaR/ES, drawdown circuit breaker, regime scaling, correlation concentration)
+- **M10 Signal & Alpha** — ◑ scaffolding built (features, pluggable sentiment seam, calendar tool); **blocked** on external paid data feeds (fundamentals, options-flow, real sentiment model)
+- **M11 Multi-Agent Intelligence** — ✅ built (cost-aware model routing, adversarial red-team pass)
+- **M12 Execution Quality** — ✅ built (limit placement, slicing, slippage tracking + self-calibrating hurdle)
+- **M13 Observability & Ops** — ◑ scaffolding built (JSON logging, metrics snapshot, approval-command handler); **blocked** on a Discord bot token, secrets-manager backend, Postgres instance
+- **M14 Governance & Scaling** — ✅ built (capital allocation, P&L attribution, human-gated live-scaling ladder)
+
+Remaining is external, not code: the M10/M13 data feeds, tokens, and infra above,
+plus the first live paper run (keys in `.env`). Everything is verified against
+mocked Anthropic/Alpaca clients.
+
 Sequencing principle: each milestone must leave the system **shippable and safe**,
 and the "LLM proposes, deterministic code disposes" invariant holds throughout —
 every new capability is either a computed guardrail/analytic (deterministic) or a
