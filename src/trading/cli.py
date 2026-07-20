@@ -253,6 +253,12 @@ def cmd_backtest(args) -> int:
     result = run_backtest(bars, signal)
     print(f"{args.symbol} {args.strategy} over {len(bars)} bars: {result.summary()}")
 
+    if args.montecarlo:
+        from backtest.montecarlo import bootstrap
+
+        mc = bootstrap([t.net_pnl for t in result.trades])
+        print("  " + mc.summary())
+
     if args.benchmark:
         from backtest.metrics import compute_metrics
 
@@ -312,6 +318,26 @@ def cmd_tax(args) -> int:
             print("  " + c.summary())
         return 0
     return 1
+
+
+def cmd_edge(_args) -> int:
+    from .analytics.edge import benchmark_comparison, portfolio_edge, strategy_edges
+
+    config = get_config()
+    journal = _journal()
+    print("Proof of alpha — per-strategy realized edge (paper track record):")
+    for e in strategy_edges(journal):
+        print("  " + e.summary())
+    pe = portfolio_edge(journal)
+    print(f"\n{pe['verdict']} ({pe['total_scored_trades']} scored trades)")
+    bc = benchmark_comparison(journal, config.settings.paths.bars_db)
+    if bc.get("available"):
+        line = f"Account return {bc['account_return']*100:+.2f}%"
+        if bc.get("benchmark_return") is not None:
+            line += (f" vs {bc['benchmark']} {bc['benchmark_return']*100:+.2f}%"
+                     f" (excess {bc['excess_return']*100:+.2f}%)")
+        print(line)
+    return 0
 
 
 def cmd_allocate(_args) -> int:
@@ -502,6 +528,8 @@ def main(argv: list[str] | None = None) -> int:
                     help="promote candidate->paper if expectancy is positive")
     bt.add_argument("--walkforward", action="store_true",
                     help="run out-of-sample walk-forward validation + auto-gate")
+    bt.add_argument("--montecarlo", action="store_true",
+                    help="bootstrap the trade P&Ls for an expectancy confidence interval")
     bt.add_argument("--benchmark", default=None, help="benchmark symbol for alpha/beta")
     bt.set_defaults(fn=cmd_backtest)
 
@@ -517,6 +545,9 @@ def main(argv: list[str] | None = None) -> int:
     tx.add_argument("--min-loss", type=float, default=100.0, dest="min_loss")
     tx.set_defaults(fn=cmd_tax)
 
+    sub.add_parser("edge", help="proof of alpha: statistical edge + benchmark vs SPY").set_defaults(
+        fn=cmd_edge
+    )
     sub.add_parser("allocate", help="capital allocation + P&L attribution").set_defaults(
         fn=cmd_allocate
     )

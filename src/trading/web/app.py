@@ -150,6 +150,16 @@ def create_app(get_config_fn=get_config, broker_factory=None):
             "attribution": [asdict(a) for a in attribution_report(j, config.settings.tax)],
         }
 
+    @app.get("/api/edge")
+    def edge():
+        from ..analytics.edge import benchmark_comparison, portfolio_edge, strategy_edges
+        from dataclasses import asdict as _asdict
+        c = cfg()
+        j = journal()
+        return {"strategies": [_asdict(e) for e in strategy_edges(j)],
+                "portfolio": portfolio_edge(j),
+                "benchmark": benchmark_comparison(j, c.settings.paths.bars_db)}
+
     @app.get("/api/decisions")
     def decisions(limit: int = 25):
         from ..analytics.decision_record import list_records

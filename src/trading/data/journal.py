@@ -541,10 +541,10 @@ class Journal:
     # -- equity history (for the dashboard curve) ----------------------------
 
     def record_equity(self, *, equity: float, cash: float | None = None,
-                      buying_power: float | None = None) -> int:
+                      buying_power: float | None = None, ts: str | None = None) -> int:
         cur = self.conn.execute(
             "INSERT INTO equity_snapshots (ts, equity, cash, buying_power) VALUES (?,?,?,?)",
-            (utcnow(), equity, cash, buying_power),
+            (ts or utcnow(), equity, cash, buying_power),
         )
         self.conn.commit()
         return int(cur.lastrowid)
