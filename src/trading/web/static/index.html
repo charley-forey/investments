@@ -81,6 +81,7 @@
   </section>
 
   <section id="positions" class="tab">
+    <div class="card"><h3>Portfolio risk</h3><div class="kpis" id="riskKpis"></div></div>
     <div class="card"><h3>Open positions</h3><div id="posTable">…</div></div>
     <div class="card"><h3>Tax lots</h3><div id="lotsTable">…</div></div>
   </section>
@@ -191,6 +192,12 @@ function tbl(cols,rows){return `<table><thead><tr>${cols.map(c=>`<th>${c[0]}</th
  rows.map(r=>`<tr>${cols.map(c=>c[1](r)).join('')}</tr>`).join('')||`<tr><td colspan="${cols.length}" class="muted">none</td></tr>`}</tbody></table>`}
 
 async function loadPositions(){const d=await j('/api/positions');
+ try{const r=await j('/api/portfolio_risk');const rk=document.getElementById('riskKpis');
+  if(r.available){const items=[['Net Δ (delta $)',usd(r.net_delta_dollars)],['Portfolio β',fmt(r.portfolio_beta)],
+    ['Net vega',fmt(r.net_vega)],['Gross lev',(r.gross_leverage||0).toFixed(2)+'x'],
+    ['Net lev',(r.net_leverage||0).toFixed(2)+'x'],['Largest pos',((r.largest_position_pct||0)*100).toFixed(0)+'%']];
+   rk.innerHTML=items.map(([l,v])=>`<div class="kpi"><div class="label">${l}</div><div class="val">${v}</div></div>`).join('');}
+  else rk.innerHTML='<span class="muted">broker unavailable</span>';}catch(e){}
  if(!d.available){document.getElementById('posTable').innerHTML='<span class="muted">broker unavailable (check ALPACA keys)</span>';return}
  document.getElementById('posTable').innerHTML=tbl(
   [['Symbol',r=>`<td>${r.symbol}</td>`],['Qty',r=>`<td>${fmt(r.qty)}</td>`],['Entry',r=>`<td>${usd(r.avg_entry_price)}</td>`],

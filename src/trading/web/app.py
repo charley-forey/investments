@@ -100,6 +100,23 @@ def create_app(get_config_fn=get_config, broker_factory=None):
                 "positions": [p.model_dump() for p in state.positions],
                 "lots": [l.model_dump() for l in state.lots]}
 
+    @app.get("/api/portfolio_risk")
+    def portfolio_risk_endpoint():
+        from dataclasses import asdict
+        from ..analytics.portfolio_risk import portfolio_risk
+        j = journal()
+        state = _account_state(j)
+        if state is None:
+            return {"available": False}
+        # Adapt PositionView -> the position shape portfolio_risk expects.
+        positions = []
+        for p in state.positions:
+            price = (p.market_value / p.qty) if p.qty else p.avg_entry_price
+            positions.append({"symbol": p.symbol, "qty": p.qty, "price": abs(price),
+                              "asset_class": p.asset_class})
+        pr = portfolio_risk(positions, state.equity)
+        return {"available": True, "summary": pr.summary(), **asdict(pr)}
+
     @app.get("/api/equity")
     def equity():
         return journal().equity_history(limit=500)
