@@ -106,6 +106,14 @@ CREATE TABLE IF NOT EXISTS heartbeats (
     detail TEXT
 );
 
+CREATE TABLE IF NOT EXISTS equity_snapshots (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    equity REAL NOT NULL,
+    cash REAL,
+    buying_power REAL
+);
+
 CREATE TABLE IF NOT EXISTS reasoning (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -524,6 +532,28 @@ class Journal:
             "SELECT COALESCE(SUM(cost_usd), 0) AS c FROM usage WHERE ts >= ?", (since_iso,)
         ).fetchone()
         return float(row["c"])
+
+    # -- equity history (for the dashboard curve) ----------------------------
+
+    def record_equity(self, *, equity: float, cash: float | None = None,
+                      buying_power: float | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO equity_snapshots (ts, equity, cash, buying_power) VALUES (?,?,?,?)",
+            (utcnow(), equity, cash, buying_power),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def equity_history(self, limit: int = 500) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT ts, equity, cash, buying_power FROM equity_snapshots "
+            "ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(r) for r in reversed(rows)]
+
+    def last_equity_ts(self) -> str | None:
+        row = self.conn.execute(
+            "SELECT ts FROM equity_snapshots ORDER BY id DESC LIMIT 1").fetchone()
+        return row["ts"] if row else None
 
     def last_heartbeat(self, job: str | None = None) -> dict | None:
         if job:

@@ -93,6 +93,11 @@ class Orchestrator:
                 report.notes.append(f"market check failed, proceeding: {e}")
 
         account = self.broker.get_account_state(self.journal)
+        try:
+            self.journal.record_equity(equity=account.equity, cash=account.cash,
+                                       buying_power=account.buying_power)
+        except Exception:
+            pass
 
         if cycle == "intraday":
             self._trade_cycle(account, report)

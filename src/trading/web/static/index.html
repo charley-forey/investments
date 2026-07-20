@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agentic Trading — Operations</title>
+<style>
+  :root{
+    --bg:#0b0e14; --panel:#141922; --panel2:#1b2230; --line:#242c3a;
+    --text:#e6ebf5; --dim:#8a94a6; --accent:#5b8cff; --green:#3ecf8e; --red:#ff6b6b;
+    --amber:#ffb454; --chip:#232b3a;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;font:14px/1.5 system-ui,Segoe UI,Roboto,sans-serif;background:var(--bg);color:var(--text)}
+  header{display:flex;align-items:center;gap:14px;padding:12px 20px;background:var(--panel);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:10}
+  header h1{font-size:16px;margin:0;font-weight:700;letter-spacing:.2px}
+  .badge{padding:3px 9px;border-radius:20px;font-size:12px;font-weight:600;background:var(--chip)}
+  .badge.paper{color:#7fd6ff;background:#0e2a3a}
+  .badge.live{color:#ffd27f;background:#3a2a0e}
+  .badge.ok{color:var(--green);background:#0e2e20}
+  .badge.warn{color:var(--red);background:#331414}
+  .spacer{flex:1}
+  button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:7px 12px;font-weight:600;cursor:pointer;font-size:13px}
+  button.ghost{background:var(--chip);color:var(--text)}
+  button.danger{background:#3a1414;color:var(--red)}
+  button:hover{filter:brightness(1.1)}
+  nav{display:flex;gap:4px;padding:10px 20px;background:var(--panel);border-bottom:1px solid var(--line);flex-wrap:wrap}
+  nav a{padding:6px 14px;border-radius:6px;color:var(--dim);cursor:pointer;font-weight:600;font-size:13px}
+  nav a.active{background:var(--panel2);color:var(--text)}
+  main{padding:20px;max-width:1400px;margin:0 auto}
+  .tab{display:none} .tab.active{display:block}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:18px}
+  .kpi{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:14px}
+  .kpi .label{color:var(--dim);font-size:12px;text-transform:uppercase;letter-spacing:.4px}
+  .kpi .val{font-size:24px;font-weight:700;margin-top:4px}
+  .grid2{display:grid;grid-template-columns:2fr 1fr;gap:16px}
+  @media(max-width:900px){.grid2{grid-template-columns:1fr}}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:16px;margin-bottom:16px}
+  .card h3{margin:0 0 12px;font-size:14px;color:var(--dim);text-transform:uppercase;letter-spacing:.4px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th,td{text-align:left;padding:8px 10px;border-bottom:1px solid var(--line)}
+  th{color:var(--dim);font-weight:600;font-size:12px;text-transform:uppercase;cursor:pointer}
+  tr:hover td{background:var(--panel2)}
+  td.pos{color:var(--green)} td.neg{color:var(--red)}
+  .pill{padding:2px 8px;border-radius:12px;font-size:11px;font-weight:700}
+  .pill.submitted{background:#0e2e20;color:var(--green)}
+  .pill.vetoed{background:#331414;color:var(--red)}
+  .pill.rejected{background:#332414;color:var(--amber)}
+  .pill.pending_approval{background:#2a2440;color:#b79bff}
+  pre{white-space:pre-wrap;font:12px ui-monospace,Menlo,monospace;color:#c8d2e0;background:var(--bg);padding:12px;border-radius:8px;max-height:520px;overflow:auto}
+  .muted{color:var(--dim)}
+  .clickable{cursor:pointer;color:var(--accent)}
+  input,textarea,select{background:var(--bg);color:var(--text);border:1px solid var(--line);border-radius:6px;padding:7px 9px;font:13px system-ui}
+  textarea{width:100%;font:12px ui-monospace;min-height:340px}
+  .row{display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .drawer{position:fixed;top:0;right:0;height:100%;width:min(560px,92vw);background:var(--panel);border-left:1px solid var(--line);box-shadow:-8px 0 24px rgba(0,0,0,.4);transform:translateX(100%);transition:.2s;z-index:20;overflow:auto;padding:20px}
+  .drawer.open{transform:none}
+  .drawer .close{float:right;cursor:pointer;color:var(--dim);font-size:20px}
+</style>
+</head>
+<body>
+<header>
+  <h1>◆ Agentic Trading</h1>
+  <span id="modeBadge" class="badge paper">paper</span>
+  <span id="healthBadge" class="badge">…</span>
+  <span id="ksBadge"></span>
+  <span class="spacer"></span>
+  <span id="clock" class="muted"></span>
+  <button class="ghost" onclick="runCycle()">▶ Run premarket cycle</button>
+  <button class="ghost" onclick="loadAll()">↻ Refresh</button>
+</header>
+<nav id="nav"></nav>
+<main>
+  <section id="overview" class="tab active">
+    <div class="kpis" id="kpis"></div>
+    <div class="grid2">
+      <div class="card"><h3>Equity curve</h3><div id="equityChart">no data yet</div></div>
+      <div class="card"><h3>Risk & liveness</h3><pre id="riskBox">…</pre></div>
+    </div>
+    <div class="card"><h3>Latest market intelligence</h3><pre id="intelHead">…</pre></div>
+  </section>
+
+  <section id="positions" class="tab">
+    <div class="card"><h3>Open positions</h3><div id="posTable">…</div></div>
+    <div class="card"><h3>Tax lots</h3><div id="lotsTable">…</div></div>
+  </section>
+
+  <section id="trades" class="tab">
+    <div class="card"><h3>Orders & fills</h3><div id="tradesTable">…</div></div>
+  </section>
+
+  <section id="opportunities" class="tab">
+    <div class="card"><h3>Opportunities considered — what it looked at and why it acted (or didn't)</h3>
+      <div id="oppTable">…</div></div>
+  </section>
+
+  <section id="performance" class="tab">
+    <div class="kpis" id="pnlKpis"></div>
+    <div class="card"><h3>Per-strategy performance</h3><div id="perfTable">…</div></div>
+    <div class="card"><h3>Capital allocation</h3><div id="allocTable">…</div></div>
+  </section>
+
+  <section id="intelligence" class="tab">
+    <div class="grid2">
+      <div class="card"><h3>Market digest</h3><pre id="intelFull">…</pre></div>
+      <div class="card"><h3>Sentiment by symbol</h3><div id="sentTable">…</div></div>
+    </div>
+    <div class="card"><h3>Watchlist</h3><pre id="watchBox">…</pre></div>
+    <div class="card"><h3>News feed</h3><div id="newsTable">…</div></div>
+  </section>
+
+  <section id="decisions" class="tab">
+    <div class="row" style="margin-bottom:12px">
+      <input id="qbox" placeholder="ask: why did you pass on NVDA?" size="40">
+      <button onclick="runQuery()">Search reasoning</button>
+    </div>
+    <div class="card"><h3>Decision records — click to see full reasoning</h3><div id="decTable">…</div></div>
+    <div class="card" id="queryCard" style="display:none"><h3>Query results</h3><div id="queryOut"></div></div>
+  </section>
+
+  <section id="config" class="tab">
+    <div class="row" style="margin-bottom:10px">
+      <select id="cfgSection" onchange="loadConfig()">
+        <option value="limits">limits.yaml (safety limits)</option>
+        <option value="settings">settings.yaml (behavior)</option>
+      </select>
+      <button onclick="validateCfg()">Validate</button>
+      <button class="danger" onclick="saveCfg()">Save + reload</button>
+      <span id="cfgMsg" class="muted"></span>
+    </div>
+    <textarea id="cfgBox" spellcheck="false"></textarea>
+  </section>
+</main>
+
+<div class="drawer" id="drawer"><span class="close" onclick="closeDrawer()">×</span>
+  <h3 id="drawerTitle">Decision</h3><pre id="drawerBody"></pre></div>
+
+<script>
+const TABS=['overview','positions','trades','opportunities','performance','intelligence','decisions','config'];
+const LABELS={overview:'Overview',positions:'Positions',trades:'Trades',opportunities:'Opportunities',performance:'Performance / P&L',intelligence:'Intelligence',decisions:'Decisions',config:'Config'};
+let active='overview';
+async function j(u,opt){const r=await fetch(u,opt);return r.json()}
+const fmt=n=>n==null?'—':n.toLocaleString('en-US',{maximumFractionDigits:2});
+const usd=n=>n==null?'—':'$'+n.toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const cls=n=>n>0?'pos':n<0?'neg':'';
+
+function buildNav(){const nav=document.getElementById('nav');
+ nav.innerHTML=TABS.map(t=>`<a class="${t==active?'active':''}" onclick="show('${t}')">${LABELS[t]}</a>`).join('')}
+function show(t){active=t;TABS.forEach(x=>{document.getElementById(x).classList.toggle('active',x==t)});buildNav();load(t)}
+
+async function loadOverview(){
+ const [m,a,p,intel]=await Promise.all([j('/api/metrics'),j('/api/account'),j('/api/pnl'),j('/api/intel')]);
+ document.getElementById('modeBadge').className='badge '+m.mode;document.getElementById('modeBadge').textContent=m.mode;
+ const hb=document.getElementById('healthBadge');hb.textContent=m.healthy?'healthy':'unhealthy';hb.className='badge '+(m.healthy?'ok':'warn');
+ document.getElementById('ksBadge').innerHTML=m.kill_switch?'<span class="badge warn">KILL SWITCH</span>':'';
+ const k=[['Equity',a.available?usd(a.equity):'—'],['Day P&L',a.available?usd(a.daily_pl)+' ('+(a.daily_pl_pct||0).toFixed(2)+'%)':'—'],
+   ['Buying power',a.available?usd(a.buying_power):'—'],['Open positions',a.available?a.open_positions:'—'],
+   ['Realized P&L',usd(p.realized)],['Unrealized P&L',usd(p.unrealized)],
+   ['Closed trades',p.closed_trades],['Cost (24h)',usd(m.cost_24h_usd)]];
+ document.getElementById('kpis').innerHTML=k.map(([l,v])=>`<div class="kpi"><div class="label">${l}</div><div class="val">${v}</div></div>`).join('');
+ document.getElementById('riskBox').textContent=JSON.stringify(m,null,2);
+ document.getElementById('intelHead').textContent=intel.digest?intel.digest.slice(0,1400):'no digest yet — run a cycle';
+ drawEquity(await j('/api/equity'));
+}
+function drawEquity(pts){const el=document.getElementById('equityChart');
+ if(!pts||pts.length<2){el.textContent='not enough data yet (runs a point per cycle / dashboard view)';return}
+ const W=680,H=220,pad=30;const ys=pts.map(p=>p.equity);const mn=Math.min(...ys),mx=Math.max(...ys);
+ const rng=(mx-mn)||1;const X=i=>pad+i*(W-2*pad)/(pts.length-1);const Y=v=>H-pad-(v-mn)*(H-2*pad)/rng;
+ let d='',area='';pts.forEach((p,i)=>{const x=X(i),y=Y(p.equity);d+=(i?'L':'M')+x+' '+y+' ';});
+ area=`M${X(0)} ${H-pad} `+pts.map((p,i)=>'L'+X(i)+' '+Y(p.equity)).join(' ')+` L${X(pts.length-1)} ${H-pad} Z`;
+ const up=ys[ys.length-1]>=ys[0];const col=up?'#3ecf8e':'#ff6b6b';
+ el.innerHTML=`<svg viewBox="0 0 ${W} ${H}" width="100%"><path d="${area}" fill="${col}22"/><path d="${d}" fill="none" stroke="${col}" stroke-width="2"/>`+
+   `<text x="${pad}" y="14" fill="#8a94a6" font-size="11">${usd(mn)}</text><text x="${pad}" y="${H-6}" fill="#8a94a6" font-size="11">${pts.length} points · latest ${usd(ys[ys.length-1])}</text></svg>`;
+}
+
+function tbl(cols,rows){return `<table><thead><tr>${cols.map(c=>`<th>${c[0]}</th>`).join('')}</tr></thead><tbody>${
+ rows.map(r=>`<tr>${cols.map(c=>c[1](r)).join('')}</tr>`).join('')||`<tr><td colspan="${cols.length}" class="muted">none</td></tr>`}</tbody></table>`}
+
+async function loadPositions(){const d=await j('/api/positions');
+ if(!d.available){document.getElementById('posTable').innerHTML='<span class="muted">broker unavailable (check ALPACA keys)</span>';return}
+ document.getElementById('posTable').innerHTML=tbl(
+  [['Symbol',r=>`<td>${r.symbol}</td>`],['Qty',r=>`<td>${fmt(r.qty)}</td>`],['Entry',r=>`<td>${usd(r.avg_entry_price)}</td>`],
+   ['Mkt value',r=>`<td>${usd(r.market_value)}</td>`],['Unrealized',r=>`<td class="${cls(r.unrealized_pl)}">${usd(r.unrealized_pl)}</td>`],
+   ['Class',r=>`<td>${r.asset_class}</td>`]],d.positions);
+ document.getElementById('lotsTable').innerHTML=tbl(
+  [['Lot',r=>`<td>#${r.lot_id}</td>`],['Symbol',r=>`<td>${r.symbol}</td>`],['Qty',r=>`<td>${fmt(r.qty)}</td>`],
+   ['Open',r=>`<td>${usd(r.open_price)}</td>`],['Held (d)',r=>`<td>${r.holding_days}</td>`],
+   ['To long-term',r=>`<td>${r.days_to_long_term==0?'LONG-TERM':r.days_to_long_term+'d'}</td>`]],d.lots);
+}
+async function loadTrades(){const rows=await j('/api/trades');
+ document.getElementById('tradesTable').innerHTML=tbl(
+  [['Time',r=>`<td>${(r.ts||'').slice(0,16)}</td>`],['Symbol',r=>`<td>${r.symbol}</td>`],['Side',r=>`<td>${r.side}</td>`],
+   ['Qty',r=>`<td>${fmt(r.qty)}</td>`],['Limit',r=>`<td>${usd(r.limit_price)}</td>`],['Status',r=>`<td>${r.status}</td>`],
+   ['Fills',r=>`<td>${(r.fills||[]).map(f=>fmt(f.qty)+'@'+usd(f.price)).join(', ')||'—'}</td>`],
+   ['DT',r=>`<td>${r.is_day_trade?'yes':''}</td>`]],rows);
+}
+async function loadOpps(){const rows=await j('/api/opportunities');
+ document.getElementById('oppTable').innerHTML=tbl(
+  [['#',r=>`<td class="clickable" onclick="openDecision(${r.proposal_id})">#${r.proposal_id}</td>`],
+   ['Time',r=>`<td>${(r.ts||'').slice(0,16)}</td>`],['Symbol',r=>`<td>${r.symbol}</td>`],['Strategy',r=>`<td>${r.strategy_tag}</td>`],
+   ['Side',r=>`<td>${r.side} ${fmt(r.qty)}</td>`],['Edge',r=>`<td>${usd(r.expected_edge_usd)}</td>`],
+   ['Conf',r=>`<td>${r.confidence!=null?r.confidence:'—'}</td>`],
+   ['Status',r=>`<td><span class="pill ${r.status}">${r.status}</span></td>`],
+   ['Reason',r=>`<td class="muted">${(r.reason||r.thesis||'').slice(0,80)}</td>`]],rows);
+}
+async function loadPerformance(){const p=await j('/api/performance');const pnl=await j('/api/pnl');
+ const k=[['Realized',usd(pnl.realized)],['Unrealized',usd(pnl.unrealized)],['Total',usd(pnl.total)],['Closed trades',pnl.closed_trades]];
+ document.getElementById('pnlKpis').innerHTML=k.map(([l,v])=>`<div class="kpi"><div class="label">${l}</div><div class="val">${v}</div></div>`).join('');
+ const st=Object.entries(p.per_strategy).map(([t,s])=>({tag:t,...s}));
+ document.getElementById('perfTable').innerHTML=tbl(
+  [['Strategy',r=>`<td>${r.tag}</td>`],['Stage',r=>`<td>${r.stage}</td>`],['Trades',r=>`<td>${r.trades}</td>`],
+   ['Win%',r=>`<td>${(r.win_rate*100||0).toFixed(0)}%</td>`],['Expectancy',r=>`<td class="${cls(r.expectancy)}">${usd(r.expectancy)}</td>`],
+   ['After-tax exp',r=>`<td class="${cls(r.after_tax_expectancy)}">${usd(r.after_tax_expectancy)}</td>`],
+   ['Gross P&L',r=>`<td class="${cls(r.gross_pnl)}">${usd(r.gross_pnl)}</td>`],['MaxDD',r=>`<td>${usd(r.max_drawdown)}</td>`]],st);
+ document.getElementById('allocTable').innerHTML=tbl(
+  [['Strategy',r=>`<td>${r.tag}</td>`],['Weight',r=>`<td>${(r.weight*100).toFixed(1)}%</td>`],
+   ['After-tax exp',r=>`<td>${usd(r.after_tax_expectancy)}</td>`],['Trades',r=>`<td>${r.trades}</td>`],
+   ['Confidence',r=>`<td>${r.confidence}</td>`]],p.allocation);
+}
+async function loadIntelligence(){const [intel,sent,watch,news]=await Promise.all(
+  [j('/api/intel'),j('/api/sentiment'),j('/api/watchlist'),j('/api/news')]);
+ document.getElementById('intelFull').textContent=intel.digest||'no digest yet';
+ document.getElementById('watchBox').textContent=watch.markdown||'no watchlist yet — run a premarket cycle';
+ document.getElementById('sentTable').innerHTML=tbl(
+  [['Symbol',r=>`<td>${r.symbol}</td>`],['Polarity',r=>`<td class="${cls(r.polarity)}">${(r.polarity).toFixed(2)}</td>`],
+   ['Mentions',r=>`<td>${r.mention_count}</td>`],['As of',r=>`<td>${(r.ts||'').slice(0,16)}</td>`]],sent);
+ document.getElementById('newsTable').innerHTML=tbl(
+  [['Time',r=>`<td>${(r.ts||'').slice(0,16)}</td>`],['Symbol',r=>`<td>${r.symbol}</td>`],
+   ['Headline',r=>`<td>${r.headline}</td>`],['Source',r=>`<td class="muted">${r.source||''}</td>`]],news);
+}
+async function loadDecisions(){const rows=await j('/api/decisions?limit=40');
+ document.getElementById('decTable').innerHTML=tbl(
+  [['#',r=>`<td class="clickable" onclick="openDecision(${r.proposal_id})">#${r.proposal_id}</td>`],
+   ['Time',r=>`<td>${(r.ts||'').slice(0,16)}</td>`],['Strategy',r=>`<td>${r.strategy_tag}</td>`],
+   ['Symbol',r=>`<td>${r.symbol}</td>`],['Side',r=>`<td>${r.side} ${fmt(r.qty)}</td>`],
+   ['Status',r=>`<td><span class="pill ${r.status}">${r.status}</span></td>`],
+   ['Thesis',r=>`<td class="muted">${(r.thesis||'').slice(0,70)}</td>`]],rows);
+}
+async function openDecision(id){const d=await j('/api/decisions/'+id);
+ document.getElementById('drawerTitle').textContent='Decision #'+id;
+ document.getElementById('drawerBody').textContent=d.full_text||JSON.stringify(d,null,2);
+ document.getElementById('drawer').classList.add('open');}
+function closeDrawer(){document.getElementById('drawer').classList.remove('open')}
+async function runQuery(){const q=document.getElementById('qbox').value;if(!q)return;
+ const rows=await j('/api/query?q='+encodeURIComponent(q));
+ document.getElementById('queryCard').style.display='block';
+ document.getElementById('queryOut').innerHTML=rows.length?rows.map(r=>
+  `<div class="card"><b class="clickable" onclick="openDecision(${r.proposal_id})">${r.summary}</b><pre>${r.reasoning||'(no reasoning captured)'}</pre></div>`).join(''):'<span class="muted">no matches</span>';
+}
+async function loadConfig(){const sec=document.getElementById('cfgSection').value;const c=await j('/api/config');
+ document.getElementById('cfgBox').value=jsyaml(c[sec]);document.getElementById('cfgMsg').textContent='';}
+function jsyaml(o){return JSON.stringify(o,null,2)}
+async function validateCfg(){const sec=document.getElementById('cfgSection').value;
+ let data;try{data=JSON.parse(document.getElementById('cfgBox').value)}catch(e){return setCfgMsg('invalid JSON: '+e,true)}
+ const r=await j('/api/config/validate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({section:sec,data})});
+ setCfgMsg(r.ok?'✓ valid':'✗ '+r.errors,!r.ok);}
+async function saveCfg(){const sec=document.getElementById('cfgSection').value;
+ if(!confirm('Save '+sec+'.yaml and reload config?'))return;
+ let data;try{data=JSON.parse(document.getElementById('cfgBox').value)}catch(e){return setCfgMsg('invalid JSON: '+e,true)}
+ const r=await j('/api/config/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({section:sec,data})});
+ setCfgMsg(r.ok?'✓ saved & reloaded':'✗ '+r.errors,!r.ok);}
+function setCfgMsg(m,err){const e=document.getElementById('cfgMsg');e.textContent=m;e.style.color=err?'#ff6b6b':'#3ecf8e';}
+
+async function runCycle(){if(!confirm('Run a premarket research cycle now? (real Claude calls)'))return;
+ await j('/api/actions/run-cycle',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cycle:'premarket'})});
+ alert('Cycle started — refresh in ~1–2 min to see results.');}
+
+function load(t){({overview:loadOverview,positions:loadPositions,trades:loadTrades,opportunities:loadOpps,
+ performance:loadPerformance,intelligence:loadIntelligence,decisions:loadDecisions,config:loadConfig}[t]||loadOverview)()}
+function loadAll(){load(active)}
+setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString();if(active=='overview')loadOverview();},15000);
+buildNav();loadOverview();document.getElementById('clock').textContent=new Date().toLocaleTimeString();
+</script>
+</body>
+</html>

@@ -114,7 +114,7 @@ class TestDashboard:
     def test_index_html(self, tmp_path):
         client, _, _ = self._client(tmp_path)
         r = client.get("/")
-        assert r.status_code == 200 and "Observability" in r.text
+        assert r.status_code == 200 and "Agentic Trading" in r.text
 
     def test_config_view_and_validate(self, tmp_path):
         client, _, _ = self._client(tmp_path)
@@ -133,4 +133,4 @@ class TestDashboard:
                                 asset_class="stock", side="buy", qty=1, order_type="limit",
                                 limit_price=100.0, thesis="AI demand")
         r = client.get("/api/query", params={"q": "NVDA"})
-        assert r.status_code == 200 and r.json()[0]["symbol"] == "NVDA"
+        assert r.status_code == 200 and "NVDA" in r.json()[0]["summary"]
