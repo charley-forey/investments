@@ -37,8 +37,8 @@ class Embedder:
 
 class HashingEmbedder(Embedder):
     """Local, deterministic, dependency-free embedding: hashed token counts,
-    L2-normalized. Good enough for near-duplicate / similar-context recall; swap for
-    a real semantic model when available."""
+    L2-normalized. Good enough for near-duplicate / similar-context recall; the
+    OpenAI embedder below is the production upgrade when a key is present."""
 
     def embed(self, text: str) -> list[float]:
         vec = [0.0] * self.dim
@@ -46,6 +46,39 @@ class HashingEmbedder(Embedder):
             vec[_stable_bucket(tok, self.dim)] += 1.0
         norm = math.sqrt(sum(v * v for v in vec))
         return [v / norm for v in vec] if norm else vec
+
+
+class OpenAIEmbedder(Embedder):
+    """Production semantic embeddings via OpenAI. Used only for vector memory —
+    the trading agents themselves run on Claude/Anthropic. Selected automatically
+    when OPENAI_API_KEY is set; construction fails loudly so the factory can fall
+    back to the local embedder."""
+
+    def __init__(self, model: str = "text-embedding-3-small", api_key: str | None = None):
+        import os
+
+        from openai import OpenAI
+
+        self.model = model
+        self._client = OpenAI(api_key=api_key or os.getenv("OPENAI_API_KEY"))
+        self.dim = 1536  # text-embedding-3-small
+
+    def embed(self, text: str) -> list[float]:
+        resp = self._client.embeddings.create(model=self.model, input=text or " ")
+        return resp.data[0].embedding
+
+
+def get_embedder(config=None) -> Embedder:
+    """Return the best available embedder: OpenAI when a key is configured, else the
+    dependency-free local hashing embedder (which always works, offline)."""
+    import os
+
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            return OpenAIEmbedder()
+        except Exception:
+            pass  # missing openai package / bad key -> local fallback
+    return HashingEmbedder()
 
 
 def cosine(a: list[float], b: list[float]) -> float:
@@ -71,7 +104,10 @@ class VectorStore:
             "id INTEGER PRIMARY KEY, kind TEXT, ref_id TEXT, text TEXT, vec TEXT, "
             "UNIQUE(kind, ref_id))")
         self.conn.commit()
-        self.embedder = embedder or HashingEmbedder()
+        # OpenAI embeddings when a key is present, else the local fallback. All
+        # vectors in one store must share an embedder (dimensions must match) — a
+        # fresh store adopts whatever is available at creation time.
+        self.embedder = embedder or get_embedder()
 
     def close(self) -> None:
         self.conn.close()
