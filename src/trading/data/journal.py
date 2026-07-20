@@ -146,7 +146,10 @@ CREATE TABLE IF NOT EXISTS signal_snapshot (
     spread_bps REAL,
     features_json TEXT,
     sentiment REAL,
-    mention_count INTEGER
+    mention_count INTEGER,
+    atm_iv REAL,
+    iv_rank REAL,
+    pc_skew REAL
 );
 CREATE INDEX IF NOT EXISTS idx_snapshot_symbol ON signal_snapshot (symbol, id);
 """
@@ -185,6 +188,10 @@ class Journal:
         fill_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(fills)")}
         if "slippage_bps" not in fill_cols:
             self.conn.execute("ALTER TABLE fills ADD COLUMN slippage_bps REAL")
+        snap_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(signal_snapshot)")}
+        for col in ("atm_iv", "iv_rank", "pc_skew"):
+            if col not in snap_cols:
+                self.conn.execute(f"ALTER TABLE signal_snapshot ADD COLUMN {col} REAL")
 
     def close(self) -> None:
         self.conn.close()
@@ -650,13 +657,16 @@ class Journal:
 
     def record_snapshot(self, *, cycle: str, symbol: str, bid, ask, last,
                         spread_bps, features: dict | None,
-                        sentiment, mention_count) -> int:
+                        sentiment, mention_count,
+                        atm_iv=None, iv_rank=None, pc_skew=None) -> int:
         cur = self.conn.execute(
             "INSERT INTO signal_snapshot "
             "(ts, cycle, symbol, bid, ask, last, spread_bps, features_json, "
-            "sentiment, mention_count) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            "sentiment, mention_count, atm_iv, iv_rank, pc_skew) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (utcnow(), cycle, symbol.upper(), bid, ask, last, spread_bps,
-             json.dumps(features) if features else None, sentiment, mention_count),
+             json.dumps(features) if features else None, sentiment, mention_count,
+             atm_iv, iv_rank, pc_skew),
         )
         self.conn.commit()
         return int(cur.lastrowid)

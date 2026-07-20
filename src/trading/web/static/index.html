@@ -241,6 +241,9 @@ async function loadSignals(){const rows=await j('/api/signals');
    ['Vol',r=>`<td>${pct(r.features&&r.features.realized_vol)}</td>`],
    ['ATR',r=>`<td>${pct(r.features&&r.features.atr_pct)}</td>`],
    ['Off high',r=>`<td>${pct(r.features&&r.features.dist_from_high)}</td>`],
+   ['ATM IV',r=>`<td>${pct(r.atm_iv)}</td>`],
+   ['IV rank',r=>`<td>${r.iv_rank==null?'—':r.iv_rank.toFixed(0)+'%'}</td>`],
+   ['P/C skew',r=>`<td class="${cls(r.pc_skew)}">${pct(r.pc_skew)}</td>`],
    ['Sentiment',r=>`<td class="${cls(r.sentiment)}">${r.sentiment==null?'—':r.sentiment.toFixed(2)}</td>`],
    ['Mentions',r=>`<td>${r.mention_count==null?'—':r.mention_count}</td>`],
    ['As of',r=>`<td class="muted">${(r.ts||'').slice(0,16)}</td>`]],rows);

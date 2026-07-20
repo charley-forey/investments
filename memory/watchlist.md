@@ -1,56 +1,60 @@
-# premarket note — 2026-07-20T01:23+00:00
+# premarket note — 2026-07-20T15:56+00:00
 
-I have enough to build the watchlist. One important data-quality flag: the pre-market quotes show absurdly wide spreads (META $65 wide/~10%, NVDA $27, AMD $48) — these are illiquid pre-market prints. Any entry today must be re-checked for tight spreads after the open.
-
----
-
-# 📋 Pre-Market Watchlist — Research Cycle
-
-**Regime:** SPY 743, trend sideways (20d≈50d), index realized vol calm (12%) — *but* a fresh **"Fear" flip driven by a China AI shock (Kimi K3) → semiconductor rout.** Risk-off is chip-led and still fresh (not fully priced). Trade individual longs with tighter stops; don't fight the tape on chips.
-
-**Account:** Flat. $100k equity, $400k BP, 0 positions, 0 day-trades. **No positions need stop/exit/expiry management.**
-
-**⚠️ Data caveat:** Pre-market spreads are blown out (META ~10% wide). All levels below are from daily closes; re-confirm live spreads at/after the open before acting.
+All data gathered. Here's the updated pre-market note.
 
 ---
 
-## Primary candidates
+# 📋 Pre-Market Watchlist — 2026-07-20
+
+**Regime:** SPY 746, trend sideways (20d≈50d), index vol calm (11%). **The key shift vs. Friday: the chip-led "Fear" panic is stabilizing, not accelerating.** Futures green pre-open (Iran de-escalation headline; Polymarket ~65% higher open), semis catching record $46B YTD ETF inflows, NVDA +1% / AMD up pre-market. Treat this as *one-day-panic-resolving* until proven otherwise — but respect that QQQ (−5.2% 20d mom) is still the laggard and the tell.
+
+**Account:** Flat. $100k equity, $400k BP, 0 positions, 0 day-trades. **Nothing needs stop/exit/expiry management.**
+
+**Data quality:** Spreads have normalized to live/liquid (NVDA $0.02, QQQ $0.05, AAPL $0.11, GOOGL $0.55, META $2.22 ≈ 0.34%). Yesterday's blown-out pre-market spread caveat is **resolved** — these levels are actionable.
+
+**⚠️ Calendar feed offline** (`data/calendar.json` not configured) — earnings dates below are inferred from the intel digest, not confirmed. Re-verify before any event-sensitive entry.
+
+---
+
+## Watchlist
 
 ### 1. META — *long continuation / pullback-buy* ⭐ top focus
-- **Setup:** Best-positioned mega-cap. Strongest tape structure in the universe: +13.8% 20d momentum, +7.4% above SMA, only −5.2% off high. Concrete fresh catalyst — **$10B Anthropic compute-lease deal** (new monetization angle, sentiment +1.00) — plus layoff legal overhang cleared. Not a chip name → relatively insulated from the China shock.
-- **What I'm watching:** Friday closed weak (664→646, −2.8%) on an inside-the-uptrend pullback. Looking for a **reclaim of ~656–664 on volume** as a continuation trigger, or a hold of the ~640 area as a higher-low bounce.
-- **Invalidation:** Loss of ~540–556 base / momentum roll-over would kill the thesis.
-- **Note:** Confirm spread tightens before any entry.
+- **Structure:** Cleanest tape in the universe. +12.2% 20d mom, +8.1% above SMA, only −4.9% off high. Friday's pullback (664→646) held a **higher low at ~636 today** and is reclaiming ~648. Sentiment +0.60; Anthropic ~$10B compute-lease catalyst intact.
+- **Trigger I want:** reclaim of **656–664 on real volume** = continuation long; or a clean hold/bounce off ~636–640 = higher-low entry.
+- **Invalidation:** loss of ~620 / break of the higher-low structure.
+- **New minor overhang:** Tennessee "Instagram addictive" trial headline — noise, not thesis-changing.
 
-### 2. GOOGL — *weakness/fade OR oversold-bounce watch*
-- **Setup:** Concrete negative catalyst — **Gemini 3.5 Pro launch delayed** (missed internal goals). Broke down hard 7/16–7/17 (373→346), −4.7% mom, now testing late-June lows (~343–346).
-- **What I'm watching:** Two-sided. Either continued breakdown below ~343 support, or an oversold bounce off it. Sentiment still mildly +0.33 (BMO PT→$455, Intel cloud win) tempers the bear case.
-- **⚠️ Event risk:** **Alphabet reports next week** — do NOT hold a directional swing through the print. Intraday/short-horizon only.
+### 2. NVDA — *failed-breakdown / stabilization long (thesis playing out)*
+- **Structure:** Yesterday's "want a reclaim of 200–203" condition **is triggering** — 205.56, back above the shelf, tight spread, −3.3% off high, today's bar holding 204.58–207.74. Epicenter of the selloff is bouncing with the complex.
+- **Trigger I want:** confirmed hold **above ~203** with SMH/SOXX green; entry on a pullback that holds, not a chase into 208+.
+- **Invalidation:** loss of ~197 = trend re-breaks, stand down.
+- **Watch:** semi-ETF inflow narrative + any TSM/Micron read-through.
 
-### 3. NVDA — *stabilization / failed-breakdown watch (no chase)*
-- **Setup:** Epicenter of the China-AI selloff by sympathy (no direct headline). −7.2% off high, momentum flat (−0.9%), fell 7/17 (207→202). Sentiment only +0.33; "new risks ahead of Big Tech earnings."
-- **What I'm watching:** NOT a knife-catch. Want to see a **hold/reclaim of ~200–203** and the chip fear stabilize (watch SOXX/SMH, TSM print sympathy) before considering a long. Below 197 = trend still broken.
+### 3. AAPL — *relative-strength / rotation beneficiary* (new add)
+- **Why it's on:** The China-shock rotation *out of* chip-capex names is flowing *into* consumer-monetization — AAPL briefly overtook NVDA as most valuable. +9.5% mom, +5.7% above SMA, **only −2.2% off high**, low 38% vol / 2.7% ATR, penny spread. The lowest-drama long in the group.
+- **Trigger I want:** breakout / continuation to new highs, or a shallow pullback that holds the SMA.
+- **Invalidation:** rejection back below the SMA gap / momentum roll.
 
-### 4. AMD — *avoid / volatility monitor only*
-- **Setup:** Most damaged name — **vol 73%, ATR 7.7%, −14.7% off high**, gapped down 7/16–7/17 (549→496). China-shock casualty; MI450 bull narrative is longer-term, not today's driver.
-- **What I'm watching:** Too violent to size sanely right now. On watch only for a capitulation-reversal day (big-volume reversal bar). No trade until vol compresses.
+### 4. GOOGL — *oversold bounce, earnings-capped* (short-horizon only)
+- **Structure:** The 343–346 support held — sharp bounce 346→357 today (+~3%). Sentiment improved to +0.50 (Intel/Google Cloud expansion, "frozen chip" efficiency story). Gemini 3.5 delay is the offsetting negative.
+- **Trigger I want:** two-sided — continuation of the bounce toward ~366 resistance, or failure back below ~350.
+- **⚠️ Event risk:** Alphabet earnings this/next week (unconfirmed w/ feed down). **Intraday / short-horizon only — do NOT carry a directional swing through the print.**
 
-### 5. TSLA — *do-not-touch into earnings*
-- **Setup:** Most negative sentiment (−1.00), −10.4% off high, vol 60%. Musk pay/net-worth overhang; offsets from robotaxi/Germany ramp.
-- **What I'm watching:** **Earnings next week = binary event.** No new position unless the thesis IS the event (it isn't today). Flag as event-risk, stay flat.
+### 5. AMD — *volatility monitor only (no trade)*
+- Still the most damaged: **vol 72%, ATR 7.4%, −11.5% off high** at 514. UBS-positive on MI450x/Advancing AI event and possible Anthropic customer chatter, but too violent to size sanely. On watch **only** for a big-volume capitulation-reversal bar; no entry until vol compresses.
 
-### 6. QQQ / SPY — *regime gauges*
-- QQQ sentiment −1.00 (chip/tech rout); SPY sideways & calm at index level. Watch these as the tell for whether the chip fear bleeds into the broad tape. A stabilizing QQQ is the green light for names #1–3.
-
----
-
-## Game plan for the session
-- **Highest-conviction watch:** META continuation on a reclaim of 656–664 with a real spread.
-- **Chip complex (NVDA/AMD):** wait for stabilization; no knife-catching in a fresh fear regime.
-- **GOOGL:** intraday only, respect next-week earnings.
-- **Avoid:** TSLA (event), AMD (untradeable vol).
-- **Gate everything on:** (a) spreads tightening post-open, (b) QQQ not accelerating lower.
+### 6. TSLA — *event-risk avoid*
+- 373, −12.3% off high, 60% vol, sentiment weak. **Earnings next week = binary event.** Stay flat unless the thesis IS the event (it isn't). Flag, don't trade.
 
 ---
 
-**Summary:** Reviewed empty memory/journal and a flat account. Examined the universe against a fresh chip-led "Fear" regime. META is the clear structural leader with a genuine fresh catalyst and is my primary long watch; GOOGL is a two-sided catalyst play (earnings-capped); NVDA/AMD are on stabilization-watch only (no chasing the China-shock selloff); TSLA is event-risk avoid. No orders proposed (research cycle). **Next cycle I'd watch:** live spreads at the open, whether QQQ stabilizes, META's 656–664 reclaim level, GOOGL's 343 support, and any TSM-print sympathy move through the chip names.
+## Game plan
+- **Highest-conviction watch:** META reclaim of 656–664 (leader, real catalyst, insulated from chips).
+- **Best risk/reward tape:** AAPL as the low-vol rotation long.
+- **Stabilization play:** NVDA long *only* on a held-above-203 pullback, confirmed by SMH/SOXX — no chasing.
+- **Gate everything on:** QQQ not rolling back over (it's the laggard/tell), and semis holding their bounce.
+- **Avoid:** TSLA (event), AMD (untradeable vol), and any GOOGL swing into earnings.
+
+---
+
+**Summary:** Reviewed memory, an empty journal, and a flat account. The dominant change from yesterday is that the chip-led fear is stabilizing (green futures, record semi-ETF inflows, NVDA/AMD bouncing) and spreads have normalized to tradable levels. META remains the structural leader (top watch), AAPL added as the cleanest rotation long, NVDA's stabilization trigger is now firing (watch for a held pullback), GOOGL is an earnings-capped bounce, and AMD/TSLA stay on the do-not-trade list. **No orders proposed (research cycle).** Next cycle I'd watch: whether QQQ confirms the bounce, META's 656–664 reclaim, NVDA holding 203, AAPL's new-high attempt, and I'd try to get the calendar feed restored to pin down GOOGL/TSLA earnings dates.

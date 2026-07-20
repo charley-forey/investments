@@ -179,6 +179,14 @@ READ_ONLY_TOOLS = [t for t in sorted(TOOL_SCHEMAS) if t != "propose_order"]
 STRATEGY_TOOLS = sorted(TOOL_SCHEMAS)
 
 
+def _bars_shim(df):
+    """Adapt a bars DataFrame into the .open/.high/.low/.close row shape that
+    compute_features expects."""
+    return [type("B", (), {"open": float(r["open"]), "high": float(r["high"]),
+                           "low": float(r["low"]), "close": float(r["close"])})()
+            for _, r in df.iterrows()]
+
+
 class ToolRegistry:
     def __init__(self, ctx: ToolContext, allowed: list[str]):
         unknown = set(allowed) - set(TOOL_SCHEMAS)
@@ -230,9 +238,8 @@ class ToolRegistry:
         return "\n".join(rows)
 
     def _t_get_options_chain(self, inp: dict) -> str:
-        from datetime import date
-
-        from ..broker.occ import parse_occ
+        from ..analytics.options import chain_rows, chain_signals, iv_rank
+        from ..analytics.features import compute_features
 
         settings = self.ctx.config.settings.agents
         symbol = inp["symbol"].upper()
@@ -241,31 +248,44 @@ class ToolRegistry:
         if not chain:
             return f"no options chain for {symbol}"
 
-        # chain: dict of occ_symbol -> snapshot. Trim to near-the-money, DTE window.
-        rows = []
-        for occ, snap in chain.items():
-            try:
-                parts = parse_occ(occ, underlying=symbol)
-            except ValueError:
-                continue
-            exp, right, strike = parts.expiry, parts.right, parts.strike
-            dte = (exp - date.today()).days
-            if dte < 0 or dte > settings.options_chain_max_dte:
-                continue
-            if spot > 0 and abs(strike - spot) / spot > 0.10:
-                continue
-            quote = getattr(snap, "latest_quote", None)
-            bid = float(getattr(quote, "bid_price", 0) or 0)
-            ask = float(getattr(quote, "ask_price", 0) or 0)
-            rows.append((exp, right, strike, bid, ask, occ))
-
-        rows.sort()
+        min_dte = self.ctx.config.limits.options.min_days_to_expiry
+        rows = chain_rows(chain, symbol, spot, max_dte=settings.options_chain_max_dte,
+                          min_dte=min_dte)
         if not rows:
             return f"no near-the-money contracts within {settings.options_chain_max_dte} DTE for {symbol}"
-        out = [f"{symbol} spot ~{spot:.2f} — near-the-money chain (exp right strike bid ask occ)"]
-        for exp, right, strike, bid, ask, occ in rows[:80]:
-            out.append(f"{exp} {right:<4} {strike:<8.2f} {bid:<6.2f} {ask:<6.2f} {occ}")
-        return "\n".join(out)
+
+        # Realized vol for an IV-vs-RV read (best-effort).
+        realized_vol = None
+        try:
+            df = self.ctx.broker.get_bars(symbol, days=max(settings.bars_lookback_days, 40))
+            if df is not None and len(df):
+                feats = compute_features(_bars_shim(df))
+                realized_vol = feats.realized_vol if feats else None
+        except Exception:
+            pass
+
+        sig = chain_signals(rows, realized_vol)
+        rank = iv_rank(sig.atm_iv, self._atm_iv_history(symbol))
+        head = f"{symbol} spot ~{spot:.2f} — {sig.summary()}"
+        if rank is not None:
+            head += f"; IV rank {rank:.0f}%"
+        head += ("\nStructure hints: buy premium (long/debit) when IV is cheap & you have a "
+                 "dated catalyst; sell premium (credit vertical / CSP / covered call) when IV "
+                 "is rich. Watch theta (decay), delta (leverage), and the spread (liquidity).")
+        lines = [head, "exp right strike bid ask iv delta theta vega dte occ"]
+        for r in rows[:80]:
+            lines.append(r.line())
+        return "\n".join(lines)
+
+    def _atm_iv_history(self, symbol: str) -> list:
+        """Stored ATM IV history for IV rank (from the per-interval snapshot dataset)."""
+        try:
+            rows = self.ctx.journal.conn.execute(
+                "SELECT atm_iv FROM signal_snapshot WHERE symbol=? AND atm_iv IS NOT NULL "
+                "ORDER BY id DESC LIMIT 200", (symbol.upper(),)).fetchall()
+            return [r["atm_iv"] for r in rows]
+        except Exception:
+            return []
 
     def _t_search_news(self, inp: dict) -> str:
         limit = self.ctx.config.settings.agents.news_limit
@@ -363,10 +383,7 @@ class ToolRegistry:
         df = self.ctx.broker.get_bars(inp["symbol"], days=max(days, 40))
         if df is None or len(df) == 0:
             return f"no bars for {inp['symbol']}"
-        rows = [type("B", (), {"open": float(r["open"]), "high": float(r["high"]),
-                               "low": float(r["low"]), "close": float(r["close"])})()
-                for _, r in df.iterrows()]
-        feats = compute_features(rows)
+        feats = compute_features(_bars_shim(df))
         return feats.summary() if feats else f"insufficient history for {inp['symbol']}"
 
     def _t_get_calendar(self, inp: dict) -> str:

@@ -19,9 +19,10 @@ def _feature_rows(df):
             for _, r in df.iterrows()]
 
 
-def _snapshot_symbol(config, broker, store, symbol: str) -> dict:
+def _snapshot_symbol(config, journal, broker, store, symbol: str) -> dict:
     bid = ask = last = spread_bps = sentiment = mention_count = None
     features = None
+    realized_vol = None
     try:
         q = broker.get_quote(symbol)
         bid, ask = q.bid, q.ask
@@ -36,6 +37,7 @@ def _snapshot_symbol(config, broker, store, symbol: str) -> dict:
             feats = compute_features(_feature_rows(df))
             if feats:
                 features = feats.as_dict()
+                realized_vol = feats.realized_vol
                 if last is None:
                     last = feats.last
     except Exception:
@@ -48,9 +50,32 @@ def _snapshot_symbol(config, broker, store, symbol: str) -> dict:
                 mention_count = hist[-1]["mention_count"]
         except Exception:
             pass
+    atm_iv, iv_rank_val, pc_skew = _option_signals(journal, broker, symbol, last, realized_vol)
     return {"bid": bid, "ask": ask, "last": last, "spread_bps": spread_bps,
             "features": features, "sentiment": sentiment,
-            "mention_count": mention_count}
+            "mention_count": mention_count,
+            "atm_iv": atm_iv, "iv_rank": iv_rank_val, "pc_skew": pc_skew}
+
+
+def _option_signals(journal, broker, symbol: str, spot, realized_vol):
+    """Best-effort ATM IV, IV rank, and put/call skew from the option chain."""
+    from .options import chain_rows, chain_signals, iv_rank
+
+    try:
+        chain = broker.get_options_chain(symbol)
+    except Exception:
+        return None, None, None
+    if not chain or not spot:
+        return None, None, None
+    try:
+        rows = chain_rows(chain, symbol, spot)
+        sig = chain_signals(rows, realized_vol)
+        hist = [r["atm_iv"] for r in journal.conn.execute(
+            "SELECT atm_iv FROM signal_snapshot WHERE symbol=? AND atm_iv IS NOT NULL "
+            "ORDER BY id DESC LIMIT 200", (symbol.upper(),)).fetchall()]
+        return sig.atm_iv, iv_rank(sig.atm_iv, hist), sig.pc_skew
+    except Exception:
+        return None, None, None
 
 
 def snapshot_universe(config, journal, broker, *, cycle: str = "intraday") -> int:
@@ -64,7 +89,7 @@ def snapshot_universe(config, journal, broker, *, cycle: str = "intraday") -> in
     try:
         n = 0
         for symbol in config.settings.universe.core:
-            s = _snapshot_symbol(config, broker, store, symbol)
+            s = _snapshot_symbol(config, journal, broker, store, symbol)
             journal.record_snapshot(cycle=cycle, symbol=symbol, **s)
             n += 1
         return n
