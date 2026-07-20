@@ -130,6 +130,20 @@ class Orchestrator:
         except Exception as e:
             report.notes.append(f"stale-order cancel failed: {e}")
 
+        market_open = True
+        try:
+            market_open = self.broker.market_open()
+        except Exception:
+            pass
+
+        # Deterministic exit management (no LLM): close positions that hit a
+        # stop/target/trailing/time rule or options nearing expiry, BEFORE the agent
+        # proposes anything — so the strategy agent sees an already-managed book.
+        try:
+            self._manage_positions(account, report, market_open)
+        except Exception as e:
+            report.notes.append(f"manage_positions failed: {e}")
+
         stages = lifecycle.stages_summary(self.journal)
         perf = portfolio_summary(self.journal, self.config.settings.tax)
         extra = f"Strategy stages: {stages}\n{perf}"
@@ -160,12 +174,6 @@ class Orchestrator:
             snapshot_universe(self.config, self.journal, self.broker, cycle="intraday")
         except Exception as e:
             report.notes.append(f"snapshot failed: {e}")
-
-        market_open = True
-        try:
-            market_open = self.broker.market_open()
-        except Exception:
-            pass
 
         for draft in session.drafts:
             would_be_dt = self._would_be_day_trade(draft)
@@ -217,6 +225,64 @@ class Orchestrator:
                 report.pending_approval += 1
             else:
                 report.rejected += 1
+
+    def _manage_positions(self, account, report: CycleReport, market_open: bool) -> None:
+        """Deterministic exits (no LLM): stop/target/trailing/time/expiry rules from
+        config.limits.exits. Stock exits are submitted through the guardrail pipeline;
+        option exits are flagged for the strategy agent (a defined-risk close needs the
+        multi-leg path, so we don't synthesize a naked closing leg here)."""
+        if not account.positions:
+            return
+        from datetime import date
+
+        from .analytics.exits import ExitRules, evaluate_exits
+        from .execution_pricing import marketable_limit
+
+        ex = self.config.limits.exits
+        quotes, marks = {}, {}
+        for p in account.positions:
+            try:
+                q = self.broker.get_quote(p.symbol)
+                quotes[p.symbol], marks[p.symbol] = q, q.mid
+            except Exception:
+                continue
+        opened: dict = {}
+        try:
+            for lot in self.journal.open_lots():
+                sym, d = lot["symbol"], date.fromisoformat(lot["open_ts"][:10])
+                if sym not in opened or d < opened[sym]:
+                    opened[sym] = d
+        except Exception:
+            pass
+        rules = ExitRules(
+            stop_loss_pct=ex.stop_loss_pct, take_profit_pct=ex.take_profit_pct,
+            trailing_pct=ex.trailing_pct, max_holding_days=ex.max_holding_days,
+            option_roll_dte=ex.option_roll_dte, open_dates=opened,
+        )
+        for act in evaluate_exits(account.positions, marks, rules=rules):
+            pos = account.position_for(act.symbol)
+            if pos is None or pos.qty == 0:
+                continue
+            if pos.asset_class != "stock":
+                report.notes.append(f"exit flagged (option) {act.symbol}: {act.reason}")
+                continue
+            q = quotes.get(act.symbol)
+            if q is None:
+                continue
+            side = "sell" if pos.qty > 0 else "buy"
+            proposal = OrderProposal(
+                agent="exit_manager", strategy_tag="deterministic_exit",
+                symbol=act.symbol, asset_class="stock", side=side, qty=abs(pos.qty),
+                order_type="limit",
+                limit_price=marketable_limit(side, q.bid, q.ask, aggressiveness=0.7),
+                reduces_position=True, thesis=f"{act.action}: {act.reason}",
+                expected_edge_usd=0.0,
+            )
+            try:
+                res = self.pipeline.process(proposal, account, q, market_is_open=market_open)
+                report.notes.append(f"exit {act.symbol} ({act.reason}): {res.status}")
+            except Exception as e:
+                report.notes.append(f"exit {act.symbol} failed: {e}")
 
     def _cost_capped(self) -> bool:
         """True if the trailing-24h Anthropic spend has hit the configured cap —
