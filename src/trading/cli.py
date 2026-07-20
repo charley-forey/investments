@@ -440,6 +440,16 @@ def cmd_reset_kill_switch(_args) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # LLM-generated text (digests, reasoning, watchlists) contains Unicode the
+    # default Windows console (cp1252) can't encode. Force UTF-8 output.
+    for stream in (sys.stdout, sys.stderr):
+        reconfig = getattr(stream, "reconfigure", None)
+        if reconfig:
+            try:
+                reconfig(encoding="utf-8", errors="replace")
+            except (ValueError, OSError):
+                pass
+
     p = argparse.ArgumentParser(prog="trading", description="Agentic trading system CLI")
     sub = p.add_subparsers(dest="command", required=True)
 
