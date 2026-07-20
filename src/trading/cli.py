@@ -114,8 +114,6 @@ def cmd_status(_args) -> int:
     print(f"pending approvals: {len(journal.pending_approvals())}")
 
     # Liveness + cost.
-    from datetime import datetime, timezone
-
     from .monitoring import check_health
 
     health = check_health(journal)
