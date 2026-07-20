@@ -91,7 +91,19 @@
 
   <section id="opportunities" class="tab">
     <div class="card"><h3>Opportunities considered — what it looked at and why it acted (or didn't)</h3>
+      <p class="muted" style="margin:0 0 8px">Rows appear only once the agent registers a proposal. For what every interval examined (including no-trade cycles), see the <a class="clickable" onclick="show('activity')">Activity</a> tab.</p>
       <div id="oppTable">…</div></div>
+  </section>
+
+  <section id="activity" class="tab">
+    <div class="card"><h3>Activity — what the agent examined each interval</h3>
+      <p class="muted" style="margin:0 0 8px">Every intraday cycle records the agent's own summary even when it proposes nothing. Click a row for the full narrative.</p>
+      <div id="actTable">…</div></div>
+  </section>
+
+  <section id="signals" class="tab">
+    <div class="card"><h3>Signals — latest per-symbol snapshot (click a symbol for history)</h3>
+      <div id="sigTable">…</div></div>
   </section>
 
   <section id="performance" class="tab">
@@ -114,7 +126,9 @@
       <input id="qbox" placeholder="ask: why did you pass on NVDA?" size="40">
       <button onclick="runQuery()">Search reasoning</button>
     </div>
-    <div class="card"><h3>Decision records — click to see full reasoning</h3><div id="decTable">…</div></div>
+    <div class="card"><h3>Decision records — click to see full reasoning</h3>
+      <p class="muted" style="margin:0 0 8px">Populated when a trade is proposed. No proposals yet? The <a class="clickable" onclick="show('activity')">Activity</a> tab shows what each interval examined.</p>
+      <div id="decTable">…</div></div>
     <div class="card" id="queryCard" style="display:none"><h3>Query results</h3><div id="queryOut"></div></div>
   </section>
 
@@ -136,8 +150,8 @@
   <h3 id="drawerTitle">Decision</h3><pre id="drawerBody"></pre></div>
 
 <script>
-const TABS=['overview','positions','trades','opportunities','performance','intelligence','decisions','config'];
-const LABELS={overview:'Overview',positions:'Positions',trades:'Trades',opportunities:'Opportunities',performance:'Performance / P&L',intelligence:'Intelligence',decisions:'Decisions',config:'Config'};
+const TABS=['overview','positions','trades','opportunities','activity','signals','performance','intelligence','decisions','config'];
+const LABELS={overview:'Overview',positions:'Positions',trades:'Trades',opportunities:'Opportunities',activity:'Activity',signals:'Signals',performance:'Performance / P&L',intelligence:'Intelligence',decisions:'Decisions',config:'Config'};
 let active='overview';
 async function j(u,opt){const r=await fetch(u,opt);return r.json()}
 const fmt=n=>n==null?'—':n.toLocaleString('en-US',{maximumFractionDigits:2});
@@ -203,6 +217,41 @@ async function loadOpps(){const rows=await j('/api/opportunities');
    ['Status',r=>`<td><span class="pill ${r.status}">${r.status}</span></td>`],
    ['Reason',r=>`<td class="muted">${(r.reason||r.thesis||'').slice(0,80)}</td>`]],rows);
 }
+let ACT=[];
+async function loadActivity(){ACT=await j('/api/cycle-log?limit=60');
+ document.getElementById('actTable').innerHTML=tbl(
+  [['Time',r=>`<td class="clickable" onclick="openNarrative(${r._i})">${(r.ts||'').slice(0,16)}</td>`],
+   ['Symbols examined',r=>`<td>${(r.symbols_examined||[]).join(', ')||'—'}</td>`],
+   ['Tools',r=>`<td>${r.tool_count}</td>`],['Cost',r=>`<td>${usd(r.cost_usd)}</td>`],
+   ['Summary',r=>`<td class="muted">${(r.summary||'').slice(0,90)}</td>`]],
+  ACT.map((r,i)=>({...r,_i:i})));
+}
+function openNarrative(i){const r=ACT[i];if(!r)return;
+ document.getElementById('drawerTitle').textContent='Cycle · '+(r.ts||'').slice(0,16);
+ document.getElementById('drawerBody').textContent=(r.summary||'(no narrative captured)')+
+  '\n\n— symbols examined: '+((r.symbols_examined||[]).join(', ')||'none')+
+  '\n— tool calls: '+r.tool_count+'  · cost: '+usd(r.cost_usd);
+ document.getElementById('drawer').classList.add('open');}
+async function loadSignals(){const rows=await j('/api/signals');
+ const pct=v=>v==null?'—':(v*100).toFixed(1)+'%';
+ document.getElementById('sigTable').innerHTML=tbl(
+  [['Symbol',r=>`<td class="clickable" onclick="openSignalHistory('${r.symbol}')">${r.symbol}</td>`],
+   ['Last',r=>`<td>${usd(r.last)}</td>`],['Spread',r=>`<td>${r.spread_bps==null?'—':r.spread_bps.toFixed(1)+'bps'}</td>`],
+   ['Mom20',r=>`<td class="${cls(r.features?r.features.momentum_20:0)}">${pct(r.features&&r.features.momentum_20)}</td>`],
+   ['Vol',r=>`<td>${pct(r.features&&r.features.realized_vol)}</td>`],
+   ['ATR',r=>`<td>${pct(r.features&&r.features.atr_pct)}</td>`],
+   ['Off high',r=>`<td>${pct(r.features&&r.features.dist_from_high)}</td>`],
+   ['Sentiment',r=>`<td class="${cls(r.sentiment)}">${r.sentiment==null?'—':r.sentiment.toFixed(2)}</td>`],
+   ['Mentions',r=>`<td>${r.mention_count==null?'—':r.mention_count}</td>`],
+   ['As of',r=>`<td class="muted">${(r.ts||'').slice(0,16)}</td>`]],rows);
+}
+async function openSignalHistory(sym){const rows=await j('/api/signals?symbol='+sym+'&limit=40');
+ document.getElementById('drawerTitle').textContent=sym+' · signal history';
+ document.getElementById('drawerBody').textContent=rows.map(r=>
+  `${(r.ts||'').slice(0,16)}  last ${usd(r.last)}  spread ${r.spread_bps==null?'—':r.spread_bps.toFixed(1)+'bps'}`+
+  (r.features?`  mom ${(r.features.momentum_20*100).toFixed(1)}%  vol ${(r.features.realized_vol*100).toFixed(0)}%`:'')+
+  (r.sentiment==null?'':`  sent ${r.sentiment.toFixed(2)}`)).join('\n')||'no history yet';
+ document.getElementById('drawer').classList.add('open');}
 async function loadPerformance(){const p=await j('/api/performance');const pnl=await j('/api/pnl');
  const k=[['Realized',usd(pnl.realized)],['Unrealized',usd(pnl.unrealized)],['Total',usd(pnl.total)],['Closed trades',pnl.closed_trades]];
  document.getElementById('pnlKpis').innerHTML=k.map(([l,v])=>`<div class="kpi"><div class="label">${l}</div><div class="val">${v}</div></div>`).join('');
@@ -266,6 +315,7 @@ async function runCycle(){if(!confirm('Run a premarket research cycle now? (real
  alert('Cycle started — refresh in ~1–2 min to see results.');}
 
 function load(t){({overview:loadOverview,positions:loadPositions,trades:loadTrades,opportunities:loadOpps,
+ activity:loadActivity,signals:loadSignals,
  performance:loadPerformance,intelligence:loadIntelligence,decisions:loadDecisions,config:loadConfig}[t]||loadOverview)()}
 function loadAll(){load(active)}
 setInterval(()=>{document.getElementById('clock').textContent=new Date().toLocaleTimeString();if(active=='overview')loadOverview();},15000);

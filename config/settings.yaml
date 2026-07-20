@@ -2,7 +2,8 @@
 
 universe:
   # starting watch universe; the research agent may propose additions within symbol limits
-  core: [SPY, QQQ, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AMD]
+  core: [SPY, QQQ, IWM, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AMD, AVGO, MU,
+         CRM, NFLX, JPM, LLY, UNH, XOM, COST, PLTR, COIN, GLD]
 
 schedule:
   timezone: America/New_York

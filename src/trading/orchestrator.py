@@ -143,6 +143,24 @@ class Orchestrator:
         self._record_usage("intraday", "strategy", session.usage, report)
         report.proposals = len(session.drafts)
 
+        # Persist the agent's per-interval narrative (what it examined, why it
+        # proposed nothing) — the reasoning table keyed by proposal_id=NULL. This is
+        # thrown away otherwise on a 0-proposal cycle, which is most of them.
+        try:
+            self.journal.record_reasoning(
+                proposal_id=None, agent="cycle:intraday",
+                reasoning=session.final_text, tool_calls=session.tool_calls,
+            )
+        except Exception as e:
+            report.notes.append(f"cycle narrative not recorded: {e}")
+
+        # Deterministic per-interval signal snapshot of the whole universe (no LLM).
+        try:
+            from .analytics.snapshot import snapshot_universe
+            snapshot_universe(self.config, self.journal, self.broker, cycle="intraday")
+        except Exception as e:
+            report.notes.append(f"snapshot failed: {e}")
+
         market_open = True
         try:
             market_open = self.broker.market_open()

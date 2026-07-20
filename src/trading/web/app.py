@@ -20,6 +20,14 @@ from ..data.journal import Journal
 _STATIC = Path(__file__).parent / "static"
 
 
+def _ts_gap(a: str | None, b: str | None) -> float:
+    """Absolute seconds between two ISO timestamps; large if unparseable."""
+    try:
+        return abs((datetime.fromisoformat(a) - datetime.fromisoformat(b)).total_seconds())
+    except (ValueError, TypeError):
+        return 1e18
+
+
 def _default_broker_factory(config):
     try:
         from ..broker.alpaca import AlpacaBroker
@@ -176,6 +184,46 @@ def create_app(get_config_fn=get_config, broker_factory=None):
         d = asdict(rec)
         d["full_text"] = rec.full_text()
         return d
+
+    @app.get("/api/cycle-log")
+    def cycle_log(limit: int = 50):
+        import json as _json
+        j = journal()
+        rows = j.cycle_log(limit)
+        # A small pool of recent intraday usage rows to attach cost by nearest ts.
+        usage = j.conn.execute(
+            "SELECT ts, cost_usd FROM usage WHERE cycle='intraday' "
+            "ORDER BY id DESC LIMIT ?", (limit * 2,)).fetchall()
+        out = []
+        for r in rows:
+            symbols, calls = [], []
+            if r.get("tool_calls_json"):
+                try:
+                    calls = _json.loads(r["tool_calls_json"])
+                except ValueError:
+                    calls = []
+            seen = set()
+            for c in calls:
+                sym = (c.get("input") or {}).get("symbol")
+                if sym and sym.upper() not in seen:
+                    seen.add(sym.upper())
+                    symbols.append(sym.upper())
+            cost = None
+            if usage:
+                cost = min(usage, key=lambda u: _ts_gap(u["ts"], r["ts"]))["cost_usd"]
+            out.append({"ts": r["ts"], "summary": r["reasoning"],
+                        "symbols_examined": symbols, "tool_count": len(calls),
+                        "cost_usd": cost})
+        return out
+
+    @app.get("/api/signals")
+    def signals(symbol: str | None = None, limit: int = 50):
+        import json as _json
+        rows = journal().recent_snapshots(symbol, limit)
+        for r in rows:
+            r["features"] = _json.loads(r["features_json"]) if r.get("features_json") else None
+            r.pop("features_json", None)
+        return rows
 
     @app.get("/api/intel")
     def intel():

@@ -134,6 +134,21 @@ CREATE TABLE IF NOT EXISTS usage (
     cache_read_tokens INTEGER NOT NULL DEFAULT 0,
     cost_usd REAL NOT NULL DEFAULT 0
 );
+
+CREATE TABLE IF NOT EXISTS signal_snapshot (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    cycle TEXT,
+    symbol TEXT NOT NULL,
+    bid REAL,
+    ask REAL,
+    last REAL,
+    spread_bps REAL,
+    features_json TEXT,
+    sentiment REAL,
+    mention_count INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_snapshot_symbol ON signal_snapshot (symbol, id);
 """
 
 
@@ -620,4 +635,43 @@ class Journal:
         rows = self.conn.execute(
             "SELECT * FROM reasoning WHERE proposal_id=? ORDER BY id", (proposal_id,)
         ).fetchall()
+        return [dict(r) for r in rows]
+
+    def cycle_log(self, limit: int = 50) -> list[dict]:
+        """Per-cycle narrative rows (proposal_id IS NULL) — the agent's own summary
+        of what it examined each interval even when it proposed nothing."""
+        rows = self.conn.execute(
+            "SELECT * FROM reasoning WHERE proposal_id IS NULL ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    # -- signal snapshots (per-interval research dataset) --------------------
+
+    def record_snapshot(self, *, cycle: str, symbol: str, bid, ask, last,
+                        spread_bps, features: dict | None,
+                        sentiment, mention_count) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO signal_snapshot "
+            "(ts, cycle, symbol, bid, ask, last, spread_bps, features_json, "
+            "sentiment, mention_count) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (utcnow(), cycle, symbol.upper(), bid, ask, last, spread_bps,
+             json.dumps(features) if features else None, sentiment, mention_count),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def recent_snapshots(self, symbol: str | None = None, limit: int = 50) -> list[dict]:
+        if symbol:
+            rows = self.conn.execute(
+                "SELECT * FROM signal_snapshot WHERE symbol=? ORDER BY id DESC LIMIT ?",
+                (symbol.upper(), limit),
+            ).fetchall()
+        else:
+            # Latest snapshot per symbol: the newest id for each symbol.
+            rows = self.conn.execute(
+                "SELECT s.* FROM signal_snapshot s JOIN "
+                "(SELECT symbol, MAX(id) AS mid FROM signal_snapshot GROUP BY symbol) m "
+                "ON s.id = m.mid ORDER BY s.symbol",
+            ).fetchall()
         return [dict(r) for r in rows]
