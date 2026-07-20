@@ -38,6 +38,7 @@ class PortfolioLimits(BaseModel):
     max_position_correlation: float = Field(default=0.9, ge=0)  # >=1 disables the check
     vol_target_annual: float = Field(default=0.0, ge=0)         # 0 = fixed-risk sizing
     kelly_cap: float = Field(default=0.25, ge=0)
+    max_net_delta_pct: float = Field(default=0.0, ge=0)         # net directional delta cap (% equity); 0 = off
 
 
 class Reconciliation(BaseModel):

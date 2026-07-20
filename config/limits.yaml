@@ -23,8 +23,9 @@ portfolio:
   drawdown_circuit_pct: 15.0        # peak-to-trough equity drawdown halt (0 = off)
   elevated_vol_gross_scale: 0.5     # scale the gross-exposure cap in high-vol regimes
   max_position_correlation: 0.9     # reject a new name too correlated with holdings (>=1 off)
-  vol_target_annual: 0.0            # 0 = fixed-risk sizing; else target portfolio vol
+  vol_target_annual: 0.15           # target 15% annualized vol per stock entry; shrinks oversized/high-vol positions (0 = off)
   kelly_cap: 0.25                   # fractional-Kelly ceiling
+  max_net_delta_pct: 100.0          # cap net directional delta at 100% of equity (no net leverage); 0 = off
 
 reconciliation:
   halt_on_mismatch: true            # block new entries when broker/journal drift

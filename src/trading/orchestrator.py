@@ -176,6 +176,9 @@ class Orchestrator:
             report.notes.append(f"snapshot failed: {e}")
 
         for draft in session.drafts:
+            # Volatility-targeted sizing: shrink an oversized stock entry to a
+            # risk-appropriate size (never grow it), then apply a drawdown throttle.
+            self._risk_size(draft, account, report)
             would_be_dt = self._would_be_day_trade(draft)
             verdict = self._review(
                 self.client, self.config, self.journal, self.broker, account, draft
@@ -283,6 +286,65 @@ class Orchestrator:
                 report.notes.append(f"exit {act.symbol} ({act.reason}): {res.status}")
             except Exception as e:
                 report.notes.append(f"exit {act.symbol} failed: {e}")
+
+    def _risk_size(self, draft: OrderProposal, account, report: CycleReport) -> None:
+        """Clamp an opening stock buy to a volatility-targeted size (never larger than
+        the agent proposed), then scale by a drawdown throttle. Off when
+        portfolio.vol_target_annual is 0. Best-effort: no vol/price -> leave as-is."""
+        pl = self.config.limits.portfolio
+        if pl.vol_target_annual <= 0:
+            return
+        if draft.asset_class != "stock" or draft.side != "buy" or draft.reduces_position:
+            return
+        vol = self._symbol_vol(draft.symbol)
+        price = draft.limit_price or self._mark(draft.symbol)
+        if not vol or vol <= 0 or not price or price <= 0 or account.equity <= 0:
+            return
+        from .analytics.sizing import drawdown_throttle, vol_target_size
+
+        target = vol_target_size(
+            account.equity, price, vol,
+            target_annual_vol=pl.vol_target_annual,
+            max_weight=self.config.limits.position.max_position_pct / 100.0,
+        )
+        dd = 0.0
+        try:
+            peak = float(self.journal.get_state("equity_peak", "0") or 0)
+            if peak > 0:
+                dd = max(0.0, (peak - account.equity) / peak)
+        except Exception:
+            pass
+        circuit = (pl.drawdown_circuit_pct / 100.0) if pl.drawdown_circuit_pct > 0 else 0.15
+        sized = int(target * drawdown_throttle(dd, soft=circuit / 2, hard=circuit))
+        if sized < draft.qty:
+            old = draft.qty
+            draft.qty = max(sized, 0)
+            report.notes.append(
+                f"vol-sized {draft.symbol} {old:g}->{draft.qty:g} "
+                f"(vol {vol:.0%}"
+                + (f", dd {dd:.0%}" if dd > 0 else "") + ")"
+            )
+
+    def _symbol_vol(self, symbol: str) -> float | None:
+        """Latest captured realized (annualized) vol for a symbol from the per-interval
+        signal snapshot dataset."""
+        try:
+            import json
+            row = self.journal.conn.execute(
+                "SELECT features_json FROM signal_snapshot WHERE symbol=? "
+                "AND features_json IS NOT NULL ORDER BY id DESC LIMIT 1",
+                (symbol.upper(),)).fetchone()
+            if row and row["features_json"]:
+                return json.loads(row["features_json"]).get("realized_vol")
+        except Exception:
+            pass
+        return None
+
+    def _mark(self, symbol: str) -> float | None:
+        try:
+            return self.broker.get_quote(symbol).mid
+        except Exception:
+            return None
 
     def _cost_capped(self) -> bool:
         """True if the trailing-24h Anthropic spend has hit the configured cap —

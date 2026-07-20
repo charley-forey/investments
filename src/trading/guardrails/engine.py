@@ -235,6 +235,26 @@ class GuardrailEngine:
                      f"holding exceeds cap {corr_cap:.2f} — too correlated to add as a "
                      f"separate position")
 
+            # 7c. Net directional delta cap: limit how net-long/short the whole book
+            # can get (a market-neutral book can run high gross but low net). Stock
+            # proposals add signed delta; defined-risk options are capped separately.
+            net_cap_pct = limits.portfolio.max_net_delta_pct
+            if net_cap_pct > 0 and account.equity > 0:
+                from ..analytics.portfolio_risk import portfolio_risk
+                book = [{"symbol": p.symbol, "qty": p.qty,
+                         "price": (abs(p.market_value / p.qty) if p.qty else p.avg_entry_price),
+                         "asset_class": p.asset_class} for p in account.positions]
+                if not proposal.is_option:
+                    signed = proposal.qty if proposal.side == "buy" else -proposal.qty
+                    book.append({"symbol": sym, "qty": signed, "price": ref_price,
+                                 "asset_class": "stock"})
+                net_delta = portfolio_risk(book, account.equity).net_delta_dollars
+                delta_cap = account.equity * net_cap_pct / 100.0
+                if abs(net_delta) > delta_cap:
+                    fail("max_net_delta",
+                         f"net delta ${net_delta:,.0f} would exceed cap ${delta_cap:,.0f} "
+                         f"({net_cap_pct:.0f}% of equity)")
+
         # 8. Options rules — recompute risk independently from the legs.
         computed_max_loss: float | None = None
         if proposal.is_option:
