@@ -27,6 +27,7 @@ paths:
 agents:
   model: claude-opus-4-8
   max_tokens: 16000
+  max_daily_cost_usd: 0.0        # pause agent cycles if 24h Anthropic spend hits this (0=off)
   max_proposals_per_cycle: 2
   max_tool_iterations: 25
   bars_lookback_days: 30

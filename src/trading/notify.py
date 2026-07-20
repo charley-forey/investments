@@ -36,3 +36,20 @@ def notify_cycle(config: Config, journal, report) -> None:
     ok = send(config, f"**[{report.cycle}]** {report.summary()}")
     journal.heartbeat("notify", status="ok" if ok else "skip",
                       detail=f"cycle {report.cycle}")
+
+
+def notify_fill(config: Config, journal, report) -> None:
+    """Fire a Discord message when fills land, if configured."""
+    if not config.secrets.discord_webhook_url:
+        return
+    send(config, f"💰 **{report.fills_recorded} fill(s)** synced "
+                 f"(lots +{report.lots_opened}/-{report.lots_closed}, "
+                 f"{report.day_trades_flagged} day trade(s))")
+
+
+def notify_event(config: Config, journal, title: str, detail: str = "") -> None:
+    """Fire a Discord alert for a notable event (kill switch, halt, error)."""
+    if not config.secrets.discord_webhook_url:
+        return
+    ok = send(config, f"⚠️ **{title}**\n{detail}")
+    journal.heartbeat("notify", status="ok" if ok else "skip", detail=title)

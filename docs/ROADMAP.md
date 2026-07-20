@@ -1,3 +1,71 @@
+# Roadmap — Milestones 3–24
+
+> **Phase Three built:** M17 Operations Dashboard (commit `a8f173d`) — a full
+> localhost cockpit (account, positions, trades, opportunities, P&L + equity curve,
+> per-strategy performance, intelligence, decisions-with-reasoning, config editor,
+> human actions). Running live on paper with Claude agents + OpenAI embeddings.
+
+---
+
+# Phase Four — Mid-term (M18–M24)
+
+**Guiding truth:** the system's breadth is exceptional, but it has **never actually
+traded** — everything is verified against mocks plus research cycles. The two gaps
+that matter most are *proof it runs* and *proof it makes money*. **Prove M18 and M19
+before building M20+.** More features on an unvalidated base is diminishing returns.
+
+## M18 — Live Validation & Hardening  *(do first)*
+Make the live paper operation robust and correct so it can run unattended for weeks
+and produce a real, scored track record.
+- Partial-fill-aware order/fill sync (record incremental deltas; handle canceled/
+  rejected/expired); retry-wrapped broker calls; runaway-cost cap; real-event
+  notifications (fills, kill-switch, errors); a `trading preflight` go/no-go check.
+- **Exit:** 30+ days unattended paper operation with real fills synced, lots opened/
+  closed correctly, trades scored, and no crashes.
+
+## M19 — Proven Alpha & Real Backtesting
+Prove there is an edge before any live capital.
+- Backtest the agents' *actual* proposed strategies and option structures (not just
+  SMA/breakout), transaction-cost-realistic; add Monte Carlo, regime-conditioned
+  tests, and benchmark-relative live tracking vs SPY; paper-vs-backtest
+  reconciliation; an agent-decision eval harness (was the thesis borne out?).
+- **Exit:** ≥1 strategy with positive expectancy demonstrated in walk-forward
+  backtest *and* confirmed in weeks of paper — the gate to any live sizing.
+
+## M20 — Data & Signal Depth
+Unblock the real feeds behind the seams already built (M10/M15).
+- SIP real-time data, fundamentals, earnings/economic calendar auto-feed, options
+  chains/flow, a finance-tuned sentiment model, X/Twitter. Feature store over them.
+- **Exit:** agents cite fundamentals + options-flow + calendar-aware theses; new
+  data-driven candidate strategies enter the walk-forward gate.
+
+## M21 — Options Greeks & Advanced Risk / Exit Management
+- Full Greeks (delta/theta/vega/gamma) + Greeks-based portfolio risk and volatility-
+  surface awareness; options lifecycle (rolling, assignment, early exercise, expiry);
+  trailing/dynamic stops and scaling in/out for stocks and options.
+- **Exit:** options positions managed by their Greeks and lifecycle, not just entry.
+
+## M22 — Production Infrastructure
+- SQLite→Postgres (write-concurrency), HA/DR + tested restore, secrets manager,
+  the inbound phone-approval bot, structured metrics/dashboards (Grafana), rate-limit
+  governance, VPS/systemd deployment.
+- **Exit:** multi-region unattended operation; leaked-key and DB-restore drills pass.
+
+## M23 — Advanced UX & Interaction
+- Interactive agent chat ("why did you…", "what would you do if…"), benchmark-overlay
+  equity/drawdown charts, per-trade timelines, backtest-from-dashboard, alert-config
+  UI, mobile view, playbook editor, what-if scenario tools.
+- **Exit:** an operator can understand, question, and steer the system entirely from
+  the dashboard.
+
+## M24 — Capital & Portfolio Management
+- Idle-cash sweep (→ T-bills/MMF), tax-aware whole-book rebalancing, multi-strategy
+  capital optimization, corporate-actions handling (dividends, splits, mergers),
+  margin/interest modeling, optional multi-account.
+- **Exit:** capital is fully managed — no idle drag, tax-aware, corporate-actions-safe.
+
+---
+
 # Roadmap — Milestones 3–16
 
 > **M15–M16 built (commits `04f3e85`, `d46476a`; 219 tests green):**

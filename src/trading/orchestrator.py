@@ -8,7 +8,7 @@ agents and a stub broker.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import cost, notify
@@ -82,6 +82,10 @@ class Orchestrator:
         if cycle in ("intraday",):
             if self.journal.kill_switch_active():
                 report.skipped = "kill switch active"
+                self.journal.heartbeat(f"cycle:{cycle}", status="skip", detail=report.skipped)
+                return report
+            if self._cost_capped():
+                report.skipped = "cost cap reached"
                 self.journal.heartbeat(f"cycle:{cycle}", status="skip", detail=report.skipped)
                 return report
             try:
@@ -187,6 +191,26 @@ class Orchestrator:
             else:
                 report.rejected += 1
 
+    def _cost_capped(self) -> bool:
+        """True if the trailing-24h Anthropic spend has hit the configured cap —
+        runaway-cost protection that pauses agent (LLM) work."""
+        cap = self.config.settings.agents.max_daily_cost_usd
+        if cap <= 0:
+            return False
+        day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        spent = self.journal.cost_since(day_ago)
+        if spent >= cap:
+            self.journal.heartbeat("cost_cap", status="warn",
+                                   detail=f"24h spend ${spent:.2f} >= cap ${cap:.2f}")
+            try:
+                notify.notify_event(self.config, self.journal, "Cost cap reached",
+                                    f"24h Anthropic spend ${spent:.2f} >= ${cap:.2f}; "
+                                    "agent cycles paused")
+            except Exception:
+                pass
+            return True
+        return False
+
     def _record_usage(self, cycle: str, agent: str, usage, report: CycleReport) -> None:
         model = self.config.settings.agents.model
         cost_usd = cost.estimate_cost(usage, model)
@@ -262,13 +286,18 @@ class Orchestrator:
             f"scored {score_report.scored} trades (gross ${score_report.gross_pnl:+.2f})"
         )
         # 2. Qualitative lessons from the scoring agent -> memory/lessons.md.
-        try:
-            lessons = self._score(
-                self.client, self.config, self.journal, self.broker, account
-            )
-            report.notes.append(f"{len(lessons)} lessons recorded")
-        except Exception as e:
-            report.notes.append(f"scoring agent failed: {e}")
+        #    Deterministic scoring above always runs; the LLM lessons pause under the
+        #    cost cap.
+        if self._cost_capped():
+            report.notes.append("scoring agent skipped (cost cap)")
+        else:
+            try:
+                lessons = self._score(
+                    self.client, self.config, self.journal, self.broker, account
+                )
+                report.notes.append(f"{len(lessons)} lessons recorded")
+            except Exception as e:
+                report.notes.append(f"scoring agent failed: {e}")
         # 3. EOD performance snapshot into memory.
         perf = portfolio_summary(self.journal, self.config.settings.tax)
         self._write_memory("eod_review.md", "postclose",
@@ -278,6 +307,9 @@ class Orchestrator:
     # -- premarket: write a watchlist note -----------------------------------
 
     def _note_cycle(self, cycle: str, account, report: CycleReport) -> None:
+        if self._cost_capped():
+            report.notes.append("agent research skipped (cost cap)")
+            return
         # Refresh the market-intel digest at the start of the day.
         if cycle == "premarket":
             try:
@@ -337,6 +369,11 @@ class Orchestrator:
         persist_allocations(self.journal, allocations)
         top = ", ".join(f"{a.tag} {a.weight*100:.0f}%" for a in allocations[:3] if a.weight > 0)
         report.notes.append(f"allocation: {top or 'no positive-expectancy strategies'}")
+        # Deterministic weekly rollup + allocation above always run; the research
+        # agent pauses under the cost cap.
+        if self._cost_capped():
+            report.notes.append("weekend research agent skipped (cost cap)")
+            return
         session = self._run_strategy(
             self.client, self.config, self.journal, self.broker, account, cycle="weekend"
         )

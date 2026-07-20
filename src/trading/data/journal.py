@@ -299,6 +299,11 @@ class Journal:
         ).fetchone()
         return int(row["n"])
 
+    def set_order_status(self, broker_order_id: str, status: str) -> None:
+        self.conn.execute(
+            "UPDATE orders SET status=? WHERE broker_order_id=?", (status, broker_order_id))
+        self.conn.commit()
+
     def day_trades_last_n_days(self, days: int = 5) -> int:
         since = datetime.now(timezone.utc) - timedelta(days=days)
         row = self.conn.execute(

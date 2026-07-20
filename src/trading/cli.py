@@ -135,6 +135,14 @@ def cmd_metrics(_args) -> int:
     return 0
 
 
+def cmd_preflight(_args) -> int:
+    from .preflight import run_preflight
+
+    result = run_preflight(get_config())
+    print(result.report())
+    return 0 if result.critical_ok else 1
+
+
 def cmd_watchdog(_args) -> int:
     from .monitoring import run_watchdog
 
@@ -541,6 +549,9 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--port", type=int, default=8787)
     dash.set_defaults(fn=cmd_dashboard)
     sub.add_parser("stream", help="run the real-time fill websocket").set_defaults(fn=cmd_stream)
+    sub.add_parser("preflight", help="go/no-go self-check before running live").set_defaults(
+        fn=cmd_preflight
+    )
     sub.add_parser("metrics", help="dashboard-ready metrics snapshot (JSON)").set_defaults(
         fn=cmd_metrics
     )

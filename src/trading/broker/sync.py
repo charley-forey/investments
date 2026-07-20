@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 
 from ..config import Config
 from ..data.journal import Journal
+from ..resilience import RetryConfig, with_retry
 
 
 @dataclass
@@ -45,21 +46,35 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
         else datetime.now(timezone.utc) - timedelta(days=7)
     )
 
-    orders = broker.list_orders_since(since)
+    orders = with_retry(lambda: broker.list_orders_since(since),
+                        config=RetryConfig(retries=2))
     newest = since
+    terminal = {"canceled", "cancelled", "rejected", "expired", "done_for_day"}
     for order in orders:
         report.orders_seen += 1
         updated = _parse_ts(getattr(order, "updated_at", None) or getattr(order, "submitted_at"))
         newest = max(newest, updated)
 
-        filled_qty = float(getattr(order, "filled_qty", 0) or 0)
+        broker_id = str(order.id)
         status = str(getattr(order, "status", "")).lower()
-        if filled_qty <= 0 or "filled" not in status:
+        filled_qty = float(getattr(order, "filled_qty", 0) or 0)
+
+        # Terminal, unfilled states: record the order's final status once, no fill.
+        if any(t in status for t in terminal) and filled_qty <= 0:
+            if not journal.get_state(f"order_status:{broker_id}"):
+                journal.set_state(f"order_status:{broker_id}", status)
             continue
 
-        broker_id = str(order.id)
-        if journal.get_state(f"synced_fill:{broker_id}"):
-            continue  # idempotent: never double-record a fill
+        if filled_qty <= 0:
+            continue  # still working / pending, nothing filled yet
+
+        # Partial-fill safe: record only the INCREMENTAL delta since the last sync,
+        # so a partially-filled order that completes later doesn't double-count and
+        # its remainder isn't lost.
+        already = float(journal.get_state(f"synced_qty:{broker_id}", "0") or 0)
+        delta = filled_qty - already
+        if delta <= 1e-9:
+            continue  # nothing new since last sync
 
         symbol = order.symbol
         side = str(getattr(order, "side", "")).lower().replace("orderside.", "")
@@ -73,7 +88,6 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
         proposal = _proposal_from_client_order_id(journal, coid)
         tag = proposal["strategy_tag"] if proposal else journal.recent_strategy_tag_for(symbol)
 
-        # Realized slippage vs the proposal's intended (reference) price.
         slippage = None
         if proposal and proposal.get("limit_price"):
             from ..execution import realized_slippage_bps
@@ -84,19 +98,19 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
 
         order_id = journal.record_order(
             proposal_id=None, mode=config.limits.mode, symbol=symbol, side=side,
-            qty=filled_qty, order_type="limit", limit_price=price,
+            qty=delta, order_type="limit", limit_price=price,
             broker_order_id=broker_id,
         )
-        journal.record_fill(order_id, qty=filled_qty, price=price, fees_usd=fees,
+        journal.record_fill(order_id, qty=delta, price=price, fees_usd=fees,
                             slippage_bps=slippage)
         report.fills_recorded += 1
 
         if side == "buy":
-            journal.open_lot(symbol=lot_symbol, qty=filled_qty, price=price,
+            journal.open_lot(symbol=lot_symbol, qty=delta, price=price,
                              strategy_tag=tag, multiplier=multiplier, asset_class=asset_class)
             report.lots_opened += 1
         else:
-            closed = _close_lots_hifo(journal, lot_symbol, filled_qty, price, updated)
+            closed = _close_lots_hifo(journal, lot_symbol, delta, price, updated)
             report.lots_closed += closed["closed"]
             if closed["day_trade"]:
                 journal.conn.execute(
@@ -105,7 +119,8 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
                 journal.conn.commit()
                 report.day_trades_flagged += 1
 
-        journal.set_state(f"synced_fill:{broker_id}", updated.isoformat())
+        # Advance the recorded-qty watermark to the cumulative filled qty.
+        journal.set_state(f"synced_qty:{broker_id}", str(filled_qty))
 
     journal.set_state("last_fill_sync", newest.isoformat())
 
@@ -114,6 +129,12 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
               f"lots+{report.lots_opened}/-{report.lots_closed} "
               f"daytrades={report.day_trades_flagged}")
     journal.heartbeat("sync_fills", status="ok", detail=detail)
+    if report.fills_recorded:
+        try:
+            from .. import notify
+            notify.notify_fill(config, journal, report)
+        except Exception:
+            pass
     return report
 
 
