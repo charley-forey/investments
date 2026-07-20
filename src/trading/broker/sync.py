@@ -87,6 +87,7 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
         coid = getattr(order, "client_order_id", None)
         proposal = _proposal_from_client_order_id(journal, coid)
         tag = proposal["strategy_tag"] if proposal else journal.recent_strategy_tag_for(symbol)
+        proposal_id = int(proposal["id"]) if proposal else None
 
         slippage = None
         if proposal and proposal.get("limit_price"):
@@ -97,7 +98,7 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
         asset_class, multiplier, lot_symbol = _classify(symbol)
 
         order_id = journal.record_order(
-            proposal_id=None, mode=config.limits.mode, symbol=symbol, side=side,
+            proposal_id=proposal_id, mode=config.limits.mode, symbol=symbol, side=side,
             qty=delta, order_type="limit", limit_price=price,
             broker_order_id=broker_id,
         )
@@ -107,7 +108,8 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
 
         if side == "buy":
             journal.open_lot(symbol=lot_symbol, qty=delta, price=price,
-                             strategy_tag=tag, multiplier=multiplier, asset_class=asset_class)
+                             strategy_tag=tag, multiplier=multiplier,
+                             asset_class=asset_class, proposal_id=proposal_id)
             report.lots_opened += 1
         else:
             closed = _close_lots_hifo(journal, lot_symbol, delta, price, updated)

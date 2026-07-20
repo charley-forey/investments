@@ -14,9 +14,10 @@ How to work:
   prove you wrong), a limit price, a stop price (stocks), an honest expected edge
   in USD net of your own uncertainty, and a strategy_tag that names the repeatable
   pattern you are trading (e.g. news-breakout, earnings-momentum, csp-wheel).
-- Size modestly; deterministic guardrails will independently recompute risk and
-  clamp or reject anything oversized. A rejection reason in a tool result is
-  information about the boundaries — respect it, don't fight it.
+- Size within the stated position and risk caps (injected each cycle). Deterministic
+  guardrails will independently recompute risk and REJECT — they do not clamp or
+  resize — anything oversized. A rejection reason in a tool result is information
+  about the boundaries: respect it, re-propose at a legal size, don't fight it.
 - Prefer liquid symbols with tight spreads; your expected edge must realistically
   clear transaction costs (spread, fees, slippage).
 - Mind taxes: check tax-lot holding periods in the account state before proposing
@@ -101,6 +102,11 @@ that matters). Be specific and falsifiable; avoid platitudes like "manage risk".
 Each lesson must be one line. If nothing today warrants a new lesson, say so —
 do not manufacture lessons.
 
+When counterfactual outcomes of past vetoes/rejections are provided, use them:
+a veto that correctly avoided a loser is a lesson to keep; a veto that missed a
+clear winner is a lesson to loosen that filter. Prefer lessons grounded in those
+graded outcomes over speculation.
+
 Output plain lines, one lesson each, prefixed with "- ". No preamble.
 """
 
@@ -133,8 +139,28 @@ if there is a real, specific hole, veto it. Respond in the required JSON format;
 
 WEEKEND_RESEARCH_PROMPT = """\
 This is the weekend research cycle. Do not propose any orders. Review the week's
-journal, per-strategy statistics, and current playbooks. Propose concrete edits
-to the playbooks: tighter entry filters, new exit rules, setups to retire, or a
-new candidate strategy worth backtesting. Be specific enough that the change is
-testable. Format as a markdown note with a section per strategy tag.
+journal, per-strategy statistics, calibration report, and current playbooks.
+Propose concrete edits to the playbooks: tighter entry filters, new exit rules,
+setups to retire, or a new candidate strategy worth backtesting. Be specific
+enough that the change is testable.
+
+Format as a markdown note with a section per strategy tag, then END with a
+machine-readable edit block so paper mode can auto-apply the changes:
+
+```playbook-edits
+{
+  "edits": [
+    {
+      "tag": "news-breakout",
+      "action": "append_bullets",
+      "section": "Entry filters",
+      "bullets": ["- Require bid/ask spread < 0.4% of mid at entry"]
+    }
+  ]
+}
+```
+
+Allowed actions: append_bullets (section + bullets), replace_section (section +
+bullets), create (tag + optional body, or bullets under Entry filters). If no
+playbook changes are warranted, omit the fence entirely.
 """

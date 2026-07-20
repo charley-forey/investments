@@ -143,6 +143,26 @@ def cmd_preflight(_args) -> int:
     return 0 if result.critical_ok else 1
 
 
+def cmd_paper_proof(_args) -> int:
+    """M18 lite: go/no-go for unattended paper + learning-loop wiring."""
+    from .paper_proof import run_paper_proof
+
+    result = run_paper_proof(get_config())
+    print(result.report())
+    return 0 if result.ok else 1
+
+
+def cmd_calendar(_args) -> int:
+    from .data.calendar_feed import refresh_calendar
+
+    report = refresh_calendar(get_config())
+    print(f"calendar → {report.path}: {report.events_written} events "
+          f"({report.symbols_ok} symbols ok, {report.symbols_failed} failed)")
+    for err in report.errors[:5]:
+        print(f"  warn: {err}")
+    return 0 if report.events_written > 0 or report.symbols_ok > 0 else 1
+
+
 def cmd_watchdog(_args) -> int:
     from .monitoring import run_watchdog
 
@@ -583,6 +603,13 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("preflight", help="go/no-go self-check before running live").set_defaults(
         fn=cmd_preflight
     )
+    sub.add_parser(
+        "paper-proof",
+        help="M18 lite: verify paper path (sizing, calendar, fill→lot schema, Discord)",
+    ).set_defaults(fn=cmd_paper_proof)
+    sub.add_parser(
+        "calendar", help="refresh data/calendar.json earnings dates from Yahoo",
+    ).set_defaults(fn=cmd_calendar)
     sub.add_parser("metrics", help="dashboard-ready metrics snapshot (JSON)").set_defaults(
         fn=cmd_metrics
     )

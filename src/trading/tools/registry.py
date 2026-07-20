@@ -219,8 +219,17 @@ class ToolRegistry:
 
     def _t_get_quote(self, inp: dict) -> str:
         q = self.ctx.broker.get_quote(inp["symbol"])
-        return (f"{q.symbol}: bid {q.bid:.2f} ask {q.ask:.2f} mid {q.mid:.2f} "
-                f"spread {q.spread:.2f}")
+        mid = q.mid
+        spread_pct = (100.0 * q.spread / mid) if mid > 0 else 0.0
+        line = (f"{q.symbol}: bid {q.bid:.2f} ask {q.ask:.2f} mid {mid:.2f} "
+                f"spread {q.spread:.2f} ({spread_pct:.2f}%)")
+        # Wide spreads are often stale/one-sided snapshots — flag them so the
+        # agent does not build a thesis on an untradeable book.
+        if mid > 0 and spread_pct > 1.0:
+            line += (f"\nWARNING: spread {spread_pct:.1f}% of mid looks stale/unreliable "
+                     f"— do not size or enter on this quote; wait for a tight book "
+                     f"(<0.4%) or confirm with a fresh last trade.")
+        return line
 
     def _t_get_bars(self, inp: dict) -> str:
         days = self.ctx.config.settings.agents.bars_lookback_days
@@ -439,8 +448,92 @@ class ToolRegistry:
                 return "error: opening stock proposal needs stop_price (used for sizing/risk)"
         elif not proposal.legs:
             return "error: option proposal needs legs"
+
+        # Pre-validate sizing so the agent can self-correct in-cycle instead of
+        # dying later at the guardrail (which rejects — it does not clamp).
+        size_err = self._sizing_precheck(proposal)
+        if size_err:
+            return size_err
+
         self.ctx.drafts.append(proposal)
         return (f"draft #{len(self.ctx.drafts)} registered for risk review: "
                 f"{proposal.side} {proposal.qty:g} {proposal.symbol} "
                 f"({proposal.strategy_tag}). It will NOT execute unless the risk agent "
                 f"and guardrails approve.")
+
+    def _sizing_precheck(self, proposal: OrderProposal) -> str | None:
+        """Return an actionable error if the draft will fail hard position/risk
+        caps; None if size looks within bounds. Skipped for position-reducing
+        orders (exits are always allowed through sizing)."""
+        if proposal.reduces_position:
+            return None
+        lim = self.ctx.config.limits
+        equity = self.ctx.account_state.equity
+        if equity <= 0:
+            return None
+
+        if proposal.asset_class == "stock":
+            return self._stock_sizing_error(proposal, lim, equity)
+        return self._option_sizing_error(proposal, lim)
+
+    def _stock_sizing_error(self, proposal: OrderProposal, lim, equity: float) -> str | None:
+        import math
+
+        from ..guardrails.account_math import size_stock_position
+
+        price = float(proposal.limit_price or 0)
+        if price <= 0:
+            return None
+        notional = price * proposal.qty
+        pos_cap = min(lim.position.max_position_usd,
+                      equity * lim.position.max_position_pct / 100.0)
+        order_cap = lim.orders.max_order_notional_usd
+        hard_cap = min(pos_cap, order_cap)
+
+        max_by_notional = math.floor(hard_cap / price) if price > 0 else 0
+        max_by_risk = size_stock_position(
+            equity=equity,
+            risk_per_trade_pct=lim.position.risk_per_trade_pct,
+            entry_price=price,
+            stop_price=float(proposal.stop_price or 0),
+            max_position_usd=lim.position.max_position_usd,
+            max_position_pct=lim.position.max_position_pct,
+        )
+        max_qty = min(max_by_notional, max_by_risk) if max_by_risk > 0 else max_by_notional
+
+        if notional > hard_cap:
+            return (f"error: notional ${notional:,.2f} exceeds cap ${hard_cap:,.2f} "
+                    f"(min of ${lim.position.max_position_usd:,.0f} position / "
+                    f"{lim.position.max_position_pct:g}% equity / "
+                    f"${lim.orders.max_order_notional_usd:,.0f} order) — "
+                    f"max qty at this limit price is {max_qty}. Re-propose with qty={max_qty}.")
+
+        if proposal.stop_price and proposal.qty > 0:
+            per_share_risk = abs(price - float(proposal.stop_price))
+            risk_usd = per_share_risk * proposal.qty
+            risk_cap = equity * lim.position.risk_per_trade_pct / 100.0
+            if risk_usd > risk_cap + 1e-6:
+                return (f"error: risk ${risk_usd:,.2f} ({per_share_risk:.2f}/share x "
+                        f"{proposal.qty:g}) exceeds {lim.position.risk_per_trade_pct:g}% "
+                        f"of equity (${risk_cap:,.2f}) — max qty at this stop is "
+                        f"{max_by_risk}. Re-propose with qty={max_by_risk}.")
+        return None
+
+    def _option_sizing_error(self, proposal: OrderProposal, lim) -> str | None:
+        from ..guardrails.account_math import analyze_option_legs
+
+        if not proposal.legs:
+            return None
+        account = self.ctx.account_state
+        existing = account.position_for(proposal.symbol)
+        shares = existing.qty if existing and existing.asset_class == "stock" else 0.0
+        analysis = analyze_option_legs(
+            proposal.legs,
+            underlying_shares_held=shares,
+            cash_available=account.cash,
+        )
+        if analysis.max_loss_usd > lim.options.max_loss_per_trade_usd:
+            return (f"error: computed max loss ${analysis.max_loss_usd:,.2f} exceeds "
+                    f"options cap ${lim.options.max_loss_per_trade_usd:,.0f} — "
+                    f"reduce contracts or tighten the structure and re-propose.")
+        return None

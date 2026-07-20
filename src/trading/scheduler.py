@@ -90,6 +90,28 @@ def run_intel_safe() -> None:
         store.close()
 
 
+def run_calendar_safe() -> None:
+    from .data.calendar_feed import refresh_calendar
+    from .data.journal import Journal
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        report = refresh_calendar(config)
+        log.info("calendar refresh: %d events (%d symbols ok, %d failed)",
+                 report.events_written, report.symbols_ok, report.symbols_failed)
+        journal.heartbeat(
+            "calendar", status="ok",
+            detail=f"events={report.events_written} ok={report.symbols_ok} "
+                   f"fail={report.symbols_failed}",
+        )
+    except Exception as e:
+        log.exception("calendar refresh failed")
+        journal.heartbeat("calendar", status="error", detail=str(e))
+    finally:
+        journal.close()
+
+
 def build_scheduler():
     from apscheduler.schedulers.blocking import BlockingScheduler
     from apscheduler.triggers.cron import CronTrigger
@@ -102,6 +124,14 @@ def build_scheduler():
     scheduler.add_job(
         run_cycle_safe, CronTrigger(day_of_week="mon-fri", hour=pre_h, minute=pre_m),
         args=["premarket"], id="premarket", max_instances=1,
+    )
+    # Refresh earnings calendar 15 minutes before premarket research.
+    pre_total = int(pre_h) * 60 + int(pre_m)
+    cal_total = max(0, pre_total - 15)
+    scheduler.add_job(
+        run_calendar_safe,
+        CronTrigger(day_of_week="mon-fri", hour=cal_total // 60, minute=cal_total % 60),
+        id="calendar", max_instances=1,
     )
     scheduler.add_job(
         run_cycle_safe,

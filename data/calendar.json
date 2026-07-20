@@ -1,0 +1,107 @@
+[
+  {
+    "date": "2026-07-22",
+    "symbol": "NFLX",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-07-23",
+    "symbol": "IBM",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-07-23",
+    "symbol": "TSLA",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-07-29",
+    "symbol": "META",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-07-29",
+    "symbol": "MSFT",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-07-29",
+    "symbol": "UNH",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-07-30",
+    "symbol": "AAPL",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-07-30",
+    "symbol": "AMZN",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-07-30",
+    "symbol": "FOMC",
+    "event": "Fed rate decision"
+  },
+  {
+    "date": "2026-07-30",
+    "symbol": "GOOGL",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-08-01",
+    "symbol": "US",
+    "event": "Nonfarm payrolls"
+  },
+  {
+    "date": "2026-08-01",
+    "symbol": "XOM",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-08-06",
+    "symbol": "AMD",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-08-06",
+    "symbol": "COIN",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-08-07",
+    "symbol": "LLY",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-08-14",
+    "symbol": "AVGO",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-08-20",
+    "symbol": "NVDA",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-08-27",
+    "symbol": "CRM",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-09-03",
+    "symbol": "MU",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-09-03",
+    "symbol": "PLTR",
+    "event": "earnings"
+  },
+  {
+    "date": "2026-09-24",
+    "symbol": "COST",
+    "event": "earnings"
+  }
+]

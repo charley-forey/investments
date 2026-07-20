@@ -176,10 +176,10 @@ class AgentSettings(BaseModel):
     scoring_model: str | None = None
     redteam_model: str | None = None
     # Adversarial red-team pass triggers at/above this proposal confidence.
-    # 1.0 effectively disables it (default); lower it to enable.
+    # 1.0 effectively disables it (code default); settings.yaml sets 0.7 in prod.
     redteam_confidence_threshold: float = 1.0
     # Runaway-cost protection: pause agent work if 24h Anthropic spend hits this.
-    # 0 = no cap.
+    # 0 = no cap (code default); settings.yaml sets 15.0 in prod.
     max_daily_cost_usd: float = 0.0
 
     def model_for(self, role: str) -> str:

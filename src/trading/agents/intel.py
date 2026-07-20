@@ -42,4 +42,9 @@ def run_intel_session(client, config: Config, store: IntelStore) -> str:
     digest = "\n".join(b.text for b in response.content if b.type == "text").strip()
     if digest:
         store.save_digest(digest, scope="market")
+        try:
+            from ..data.memory_vectors import remember_digest
+            remember_digest(config, digest, scope="market")
+        except Exception:
+            pass
     return digest

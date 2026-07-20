@@ -76,13 +76,34 @@ runs the real-time fill websocket.
 
 | Job | Schedule | Purpose |
 |---|---|---|
+| calendar | 15 min before premarket | refresh `data/calendar.json` earnings dates |
 | premarket | 08:30 ET Mon–Fri | research + watchlist |
 | intraday | every 15 min, market hours | propose → risk → execute |
-| postclose | 16:30 ET Mon–Fri | scoring + lessons + EOD note |
-| weekend | Sat 10:00 | weekly rollup + lifecycle + playbook research |
+| postclose | 16:30 ET Mon–Fri | scoring + lessons + counterfactuals + EOD note |
+| weekend | Sat 10:00 | lifecycle + allocation + calibration + signal research + playbook auto-apply |
 | watchdog | every 30 min | alerts if heartbeats go stale |
 | daily_summary | 16:45 ET Mon–Fri | "alive + what I did" + 24h cost to Discord |
 | backup | 23:30 daily | rotated journal DB snapshot (keeps 14) |
+
+## Paper-proof checklist (M18 lite) — do this before trusting unattended paper
+
+```powershell
+trading paper-proof          # go/no-go: mode, sizing, calendar, schema, Discord
+trading calendar             # one-shot earnings calendar refresh
+trading preflight            # broker + Anthropic + DB
+trading daemon               # leave running; NSSM optional (see above)
+# optional: trading stream   # real-time fills
+```
+
+After the first submitted trade fills:
+
+1. `trading sync` — confirm fill + tax lot with `proposal_id`
+2. Next `postclose` — `scores` row linked to that proposal; lessons in `memory/lessons.md`
+3. Discord webhook should ping on the fill (if `DISCORD_WEBHOOK_URL` is set)
+4. After 5+ days, aged vetoes get `proposal_outcomes` grades (counterfactuals)
+
+Exit criteria for "paper has a pulse": ≥1 filled trade with linked score, and strategy
+no longer repeating oversized notionals (sizing precheck + recent-failure context).
 
 ## Monitoring
 

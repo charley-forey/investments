@@ -152,6 +152,23 @@ CREATE TABLE IF NOT EXISTS signal_snapshot (
     pc_skew REAL
 );
 CREATE INDEX IF NOT EXISTS idx_snapshot_symbol ON signal_snapshot (symbol, id);
+
+CREATE TABLE IF NOT EXISTS proposal_outcomes (
+    id INTEGER PRIMARY KEY,
+    proposal_id INTEGER NOT NULL UNIQUE REFERENCES proposals(id),
+    ts TEXT NOT NULL,
+    horizon_days INTEGER NOT NULL,
+    entry_price REAL,
+    stop_price REAL,
+    target_price REAL,
+    max_favorable_usd REAL,
+    max_adverse_usd REAL,
+    hypothetical_pnl REAL,
+    stop_hit INTEGER NOT NULL DEFAULT 0,
+    target_hit INTEGER NOT NULL DEFAULT 0,
+    verdict_was_right INTEGER,
+    notes TEXT
+);
 """
 
 
@@ -192,6 +209,21 @@ class Journal:
         for col in ("atm_iv", "iv_rank", "pc_skew"):
             if col not in snap_cols:
                 self.conn.execute(f"ALTER TABLE signal_snapshot ADD COLUMN {col} REAL")
+        lot_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tax_lots)")}
+        if "proposal_id" not in lot_cols:
+            self.conn.execute("ALTER TABLE tax_lots ADD COLUMN proposal_id INTEGER")
+        # Ensure proposal_outcomes exists on DBs created before this table was added.
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS proposal_outcomes ("
+            "id INTEGER PRIMARY KEY, "
+            "proposal_id INTEGER NOT NULL UNIQUE REFERENCES proposals(id), "
+            "ts TEXT NOT NULL, horizon_days INTEGER NOT NULL, "
+            "entry_price REAL, stop_price REAL, target_price REAL, "
+            "max_favorable_usd REAL, max_adverse_usd REAL, "
+            "hypothetical_pnl REAL, stop_hit INTEGER NOT NULL DEFAULT 0, "
+            "target_hit INTEGER NOT NULL DEFAULT 0, "
+            "verdict_was_right INTEGER, notes TEXT)"
+        )
 
     def close(self) -> None:
         self.conn.close()
@@ -340,12 +372,13 @@ class Journal:
         self, *, symbol: str, qty: float, price: float,
         ts: str | None = None, strategy_tag: str | None = None,
         multiplier: float = 1.0, asset_class: str = "stock",
+        proposal_id: int | None = None,
     ) -> int:
         cur = self.conn.execute(
             "INSERT INTO tax_lots (symbol, qty, open_ts, open_price, strategy_tag, "
-            "multiplier, asset_class) VALUES (?,?,?,?,?,?,?)",
+            "multiplier, asset_class, proposal_id) VALUES (?,?,?,?,?,?,?,?)",
             (symbol.upper(), qty, ts or utcnow(), price, strategy_tag,
-             multiplier, asset_class),
+             multiplier, asset_class, proposal_id),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -457,14 +490,15 @@ class Journal:
 
         # Partial: closed child row for `qty`, parent keeps the remainder.
         realized = (price - row["open_price"]) * qty * mult
+        pid = row["proposal_id"] if "proposal_id" in row.keys() else None
         cur = self.conn.execute(
             """INSERT INTO tax_lots
                (symbol, qty, open_ts, open_price, close_ts, close_price, realized_pnl,
-                term, strategy_tag, multiplier, asset_class)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+                term, strategy_tag, multiplier, asset_class, proposal_id)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
             (row["symbol"], qty, row["open_ts"], row["open_price"], close_ts, price,
              realized, term, row["strategy_tag"], mult,
-             row["asset_class"] if "asset_class" in row.keys() else "stock"),
+             row["asset_class"] if "asset_class" in row.keys() else "stock", pid),
         )
         self.conn.execute("UPDATE tax_lots SET qty=? WHERE id=?", (lot_qty - qty, lot_id))
         self.conn.commit()
@@ -624,6 +658,71 @@ class Journal:
             "SELECT DISTINCT strategy_tag FROM scores WHERE strategy_tag IS NOT NULL"
         ).fetchall()
         return [r["strategy_tag"] for r in rows]
+
+    # -- proposal counterfactual outcomes ------------------------------------
+
+    def record_proposal_outcome(
+        self, *, proposal_id: int, horizon_days: int,
+        entry_price: float | None, stop_price: float | None,
+        target_price: float | None, max_favorable_usd: float | None,
+        max_adverse_usd: float | None, hypothetical_pnl: float | None,
+        stop_hit: bool = False, target_hit: bool = False,
+        verdict_was_right: bool | None = None, notes: str | None = None,
+    ) -> int:
+        cur = self.conn.execute(
+            """INSERT INTO proposal_outcomes
+               (proposal_id, ts, horizon_days, entry_price, stop_price, target_price,
+                max_favorable_usd, max_adverse_usd, hypothetical_pnl,
+                stop_hit, target_hit, verdict_was_right, notes)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(proposal_id) DO UPDATE SET
+                 ts=excluded.ts, horizon_days=excluded.horizon_days,
+                 entry_price=excluded.entry_price, stop_price=excluded.stop_price,
+                 target_price=excluded.target_price,
+                 max_favorable_usd=excluded.max_favorable_usd,
+                 max_adverse_usd=excluded.max_adverse_usd,
+                 hypothetical_pnl=excluded.hypothetical_pnl,
+                 stop_hit=excluded.stop_hit, target_hit=excluded.target_hit,
+                 verdict_was_right=excluded.verdict_was_right, notes=excluded.notes""",
+            (proposal_id, utcnow(), horizon_days, entry_price, stop_price, target_price,
+             max_favorable_usd, max_adverse_usd, hypothetical_pnl,
+             int(stop_hit), int(target_hit),
+             None if verdict_was_right is None else int(verdict_was_right),
+             notes),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def has_proposal_outcome(self, proposal_id: int) -> bool:
+        row = self.conn.execute(
+            "SELECT 1 AS n FROM proposal_outcomes WHERE proposal_id=?", (proposal_id,)
+        ).fetchone()
+        return row is not None
+
+    def proposals_needing_outcome(self, *, older_than_days: int = 5,
+                                  statuses: tuple[str, ...] = ("vetoed", "rejected"),
+                                  ) -> list[dict]:
+        """Vetoed/rejected proposals old enough to grade, not yet outcome-scored."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+        placeholders = ",".join("?" * len(statuses))
+        rows = self.conn.execute(
+            f"SELECT p.* FROM proposals p "
+            f"LEFT JOIN proposal_outcomes o ON o.proposal_id = p.id "
+            f"WHERE p.status IN ({placeholders}) AND p.ts <= ? AND o.id IS NULL "
+            f"ORDER BY p.id",
+            (*statuses, cutoff),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def all_proposal_outcomes(self) -> list[dict]:
+        return [dict(r) for r in self.conn.execute(
+            "SELECT * FROM proposal_outcomes ORDER BY id")]
+
+    def recent_proposals(self, limit: int = 100) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM proposals ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [dict(r) for r in rows]
 
     # -- reasoning capture (transparency) ------------------------------------
 

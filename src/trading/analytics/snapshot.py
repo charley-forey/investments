@@ -51,6 +51,11 @@ def _snapshot_symbol(config, journal, broker, store, symbol: str) -> dict:
         except Exception:
             pass
     atm_iv, iv_rank_val, pc_skew = _option_signals(journal, broker, symbol, last, realized_vol)
+    # Flag unusable quotes in features so research can filter them later.
+    if features is not None and spread_bps is not None and spread_bps > 100:
+        features = dict(features)
+        features["wide_spread_warning"] = True
+        features["spread_pct"] = round(spread_bps / 100.0, 2)
     return {"bid": bid, "ask": ask, "last": last, "spread_bps": spread_bps,
             "features": features, "sentiment": sentiment,
             "mention_count": mention_count,

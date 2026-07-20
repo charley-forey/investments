@@ -90,6 +90,44 @@ def test_propose_respects_budget(tmp_path):
     assert len(ctx.drafts) == 1
 
 
+def test_propose_rejects_oversized_with_max_qty(tmp_path):
+    ctx = make_ctx(tmp_path)  # equity $50k, position cap $5k
+    reg = ToolRegistry(ctx, STRATEGY_TOOLS)
+    out = reg.dispatch("propose_order", {
+        "symbol": "META", "asset_class": "stock", "side": "buy", "qty": 40,
+        "limit_price": 650.0, "stop_price": 630.0, "thesis": "oversized",
+        "expected_edge_usd": 200.0, "strategy_tag": "rel-strength",
+    })
+    assert out.startswith("error:")
+    assert "max qty" in out
+    assert "Re-propose" in out
+    assert ctx.drafts == []
+
+
+def test_propose_rejects_excessive_risk(tmp_path):
+    ctx = make_ctx(tmp_path)  # 1% of $50k = $500 risk budget
+    reg = ToolRegistry(ctx, STRATEGY_TOOLS)
+    # 20 shares * $30 stop distance = $600 risk > $500, but notional $3600 < $5k
+    out = reg.dispatch("propose_order", {
+        "symbol": "AAPL", "asset_class": "stock", "side": "buy", "qty": 20,
+        "limit_price": 180.0, "stop_price": 150.0, "thesis": "wide stop",
+        "expected_edge_usd": 100.0, "strategy_tag": "t",
+    })
+    assert out.startswith("error:")
+    assert "risk" in out.lower()
+    assert ctx.drafts == []
+
+
+def test_get_quote_warns_on_wide_spread(tmp_path):
+    from trading.broker.models import Quote
+    ctx = make_ctx(tmp_path)
+    ctx.broker._quotes["WIDE"] = Quote(symbol="WIDE", bid=100.0, ask=105.0)
+    reg = ToolRegistry(ctx, STRATEGY_TOOLS)
+    out = reg.dispatch("get_quote", {"symbol": "WIDE"})
+    assert "WARNING" in out
+    assert "spread" in out.lower()
+
+
 def test_schemas_returns_only_allowed(tmp_path):
     ctx = make_ctx(tmp_path)
     reg = ToolRegistry(ctx, READ_ONLY_TOOLS)

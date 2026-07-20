@@ -26,14 +26,23 @@ def run_scoring_session(
         account_state=account, agent_name="scoring",
     )
     registry = ToolRegistry(ctx, READ_ONLY_TOOLS)
+
+    from ..analytics.counterfactuals import outcomes_summary
+
+    cf_block = outcomes_summary(journal, limit=15)
+    user_message = (
+        "Review today's journal and closed trades, then output your lessons "
+        "as '- ' lines.\n\n"
+        f"{cf_block}"
+    )
+
     result = run_agent(
         client,
         model=config.settings.agents.model_for("scoring"),
         max_tokens=config.settings.agents.max_tokens,
         system_prompt=prompts.SCORING_SYSTEM,
         registry=registry,
-        user_message="Review today's journal and closed trades, then output "
-                     "your lessons as '- ' lines.",
+        user_message=user_message,
         max_iterations=config.settings.agents.max_tool_iterations,
         journal=journal,
         agent_name="scoring",
@@ -45,6 +54,11 @@ def run_scoring_session(
     ]
     if lessons:
         append_lessons(config, lessons)
+        try:
+            from ..data.memory_vectors import remember_lessons
+            remember_lessons(config, lessons)
+        except Exception:
+            pass
     return lessons
 
 
@@ -64,7 +78,6 @@ def append_lessons(config: Config, lessons: list[str]) -> None:
 
     if not added:
         return
-    header = "# Lessons\n\n" if not existing_lines else ""
     body_lines = [ln for ln in existing_lines if ln.startswith("- ")] + added
     body_lines = body_lines[-MAX_LESSONS:]  # keep the most recent
     path.write_text("# Lessons\n\n" + "\n".join(body_lines) + "\n", encoding="utf-8")

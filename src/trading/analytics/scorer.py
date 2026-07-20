@@ -30,8 +30,10 @@ def score_closed_trades(journal: Journal) -> ScoreReport:
         pnl = float(lot.get("realized_pnl") or 0.0)
         term = lot.get("term") or "short"
         tag = lot.get("strategy_tag") or "untagged"
+        proposal_id = lot.get("proposal_id")
         journal.record_score(
             strategy_tag=tag, pnl_usd=pnl, term=term,
+            proposal_id=int(proposal_id) if proposal_id is not None else None,
             grade="win" if pnl > 0 else ("loss" if pnl < 0 else "scratch"),
             notes=f"{lot['symbol']} lot#{lot['id']}",
         )

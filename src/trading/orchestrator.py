@@ -202,6 +202,15 @@ class Orchestrator:
                 reason=verdict.reason,
             )
             self._record_reasoning(result.proposal_id, session)
+            try:
+                from .data.memory_vectors import remember_proposal
+                remember_proposal(
+                    self.config, result.proposal_id, symbol=draft.symbol,
+                    strategy_tag=draft.strategy_tag, thesis=draft.thesis,
+                    status=result.status,
+                )
+            except Exception:
+                pass
             if result.status == "submitted":
                 report.submitted += 1
             elif result.status == "pending_approval":
@@ -255,6 +264,15 @@ class Orchestrator:
                                      if verdict.concerns else ""),
         )
         self.journal.set_proposal_status(pid, "vetoed")
+        try:
+            from .data.memory_vectors import remember_proposal
+            remember_proposal(
+                self.config, pid, symbol=draft.symbol,
+                strategy_tag=draft.strategy_tag, thesis=draft.thesis,
+                status="vetoed",
+            )
+        except Exception:
+            pass
         return pid
 
     def _record_reasoning(self, proposal_id: int, session) -> None:
@@ -303,6 +321,35 @@ class Orchestrator:
         report.notes.append(
             f"scored {score_report.scored} trades (gross ${score_report.gross_pnl:+.2f})"
         )
+
+        # 1b. Counterfactual outcomes for aged vetoed/rejected proposals — grades
+        # the analysis loop even when no trade was taken.
+        try:
+            from .analytics.counterfactuals import evaluate_pending
+            from .data.memory_vectors import remember_outcome
+
+            cf = evaluate_pending(self.journal, self.broker)
+            if cf.evaluated:
+                report.notes.append(
+                    f"counterfactuals: {cf.evaluated} graded "
+                    f"(right={cf.right} wrong={cf.wrong})"
+                )
+                for row in self.journal.all_proposal_outcomes()[-cf.evaluated:]:
+                    prop = self.journal.get_proposal(row["proposal_id"])
+                    if prop:
+                        remember_outcome(
+                            self.config, row["proposal_id"],
+                            symbol=prop["symbol"],
+                            hyp_pnl=float(row["hypothetical_pnl"] or 0),
+                            verdict_was_right=(
+                                None if row["verdict_was_right"] is None
+                                else bool(row["verdict_was_right"])
+                            ),
+                            notes=row.get("notes"),
+                        )
+        except Exception as e:
+            report.notes.append(f"counterfactuals failed: {e}")
+
         # 2. Qualitative lessons from the scoring agent -> memory/lessons.md.
         #    Deterministic scoring above always runs; the LLM lessons pause under the
         #    cost cap.
@@ -387,16 +434,83 @@ class Orchestrator:
         persist_allocations(self.journal, allocations)
         top = ", ".join(f"{a.tag} {a.weight*100:.0f}%" for a in allocations[:3] if a.weight > 0)
         report.notes.append(f"allocation: {top or 'no positive-expectancy strategies'}")
+
+        # Confidence calibration + veto-quality — the back-analysis of the analysis.
+        calibration_text = ""
+        try:
+            from .analytics.calibration import (
+                build_calibration_report, persist_calibration,
+            )
+            calib = build_calibration_report(self.journal)
+            persist_calibration(
+                self.journal, calib, self.config.settings.paths.memory_dir
+            )
+            calibration_text = calib.text
+            report.notes.append(
+                f"calibration: outcomes={calib.n_outcomes} "
+                f"veto_hit={calib.veto_hit_rate}"
+            )
+        except Exception as e:
+            report.notes.append(f"calibration failed: {e}")
+
+        # Sentiment → forward-return studies (no fills required).
+        signal_text = ""
+        try:
+            from .analytics.signal_research_runner import (
+                persist_signal_research, run_signal_research,
+            )
+            sig = run_signal_research(self.config, self.broker)
+            persist_signal_research(self.config, sig)
+            signal_text = sig.text
+            report.notes.append(
+                f"signal_research: {len(sig.studies)} studies, "
+                f"{len(sig.promising)} promising"
+            )
+        except Exception as e:
+            report.notes.append(f"signal_research failed: {e}")
+
         # Deterministic weekly rollup + allocation above always run; the research
         # agent pauses under the cost cap.
         if self._cost_capped():
             report.notes.append("weekend research agent skipped (cost cap)")
             return
+        extra_parts = []
+        if calibration_text:
+            extra_parts.append(
+                "Weekly calibration report (use this to propose playbook edits):\n"
+                + calibration_text
+            )
+        if signal_text:
+            extra_parts.append(
+                "Sentiment→return signal research (promising = candidate for backtest):\n"
+                + signal_text
+            )
+        extra = ("\n\n" + "\n\n".join(extra_parts)) if extra_parts else ""
         session = self._run_strategy(
-            self.client, self.config, self.journal, self.broker, account, cycle="weekend"
+            self.client, self.config, self.journal, self.broker, account,
+            cycle="weekend", extra_context=extra,
         )
         self._record_usage("weekend", "research", session.usage, report)
         self._write_memory("weekend_research.md", "weekend", session.final_text)
+
+        # Paper mode: auto-apply structured playbook edits from the research note.
+        try:
+            from .analytics.playbooks import apply_playbook_edits
+            pb = apply_playbook_edits(
+                session.final_text,
+                playbooks_dir=self.config.settings.paths.playbooks_dir,
+                memory_dir=self.config.settings.paths.memory_dir,
+                paper_mode=not self.config.is_live,
+            )
+            report.notes.append(f"playbook edits: {pb.summary()}")
+            if pb.applied:
+                self.journal.heartbeat(
+                    "playbooks", status="ok",
+                    detail="; ".join(pb.applied[:5]),
+                )
+        except Exception as e:
+            report.notes.append(f"playbook apply failed: {e}")
+
         report.notes.append(f"weekly: {len(weekly.changes)} stage changes; "
                             "wrote memory/weekend_research.md")
 
