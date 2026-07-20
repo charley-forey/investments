@@ -97,6 +97,15 @@ class LifecycleGates(BaseModel):
     demote_after_losing_weeks: int = 2
 
 
+class ExitLimits(BaseModel):
+    """Deterministic exit management (Track B) — all optional, opt-in per rule."""
+    stop_loss_pct: float | None = 8.0
+    take_profit_pct: float | None = 25.0
+    trailing_pct: float | None = None       # off until a high-water source is wired
+    max_holding_days: int | None = None
+    option_roll_dte: int | None = 7         # roll/close options inside a week of expiry
+
+
 class Limits(BaseModel):
     mode: Literal["paper", "live"] = "paper"
     position: PositionLimits
@@ -111,6 +120,7 @@ class Limits(BaseModel):
     lifecycle: LifecycleGates
     portfolio: PortfolioLimits = PortfolioLimits()
     reconciliation: Reconciliation = Reconciliation()
+    exits: ExitLimits = ExitLimits()
 
 
 class Schedule(BaseModel):
@@ -169,6 +179,11 @@ class AgentSettings(BaseModel):
     news_limit: int = 10
     options_chain_strikes: int = 5
     options_chain_max_dte: int = 60
+    # Intraday signal depth (Track A): bars timeframe for intraday features + the
+    # opening-range window (in bars) and how far out the calendar looks.
+    intraday_timeframe: str = "5Min"
+    opening_range_bars: int = 6
+    calendar_horizon_days: int = 14
     # Cost-aware routing: per-role model overrides (None -> use `model`). Route a
     # cheap model to screening/watchlists and the top model to real decisions.
     strategy_model: str | None = None

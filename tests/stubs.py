@@ -26,7 +26,7 @@ class StubBroker:
     def get_quote(self, symbol: str) -> Quote:
         return self._quotes.get(symbol.upper(), Quote(symbol=symbol.upper(), bid=99.9, ask=100.1))
 
-    def get_bars(self, symbol: str, days: int = 30):
+    def get_bars(self, symbol: str, days: int = 30, timeframe: str = "1Day"):
         return None
 
     def get_options_chain(self, symbol: str):

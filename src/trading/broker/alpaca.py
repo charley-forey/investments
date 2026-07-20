@@ -88,16 +88,25 @@ class AlpacaBroker:
             ask=float(q.ask_price or 0),
         )
 
-    def get_bars(self, symbol: str, days: int = 30):
+    def get_bars(self, symbol: str, days: int = 30, timeframe: str = "1Day"):
         from alpaca.data.requests import StockBarsRequest
-        from alpaca.data.timeframe import TimeFrame
+        from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
         from datetime import timedelta
 
-        req = StockBarsRequest(
-            symbol_or_symbols=symbol.upper(),
-            timeframe=TimeFrame.Day,
-            start=datetime.now(timezone.utc) - timedelta(days=days * 2),
-        )
+        tf_map = {
+            "1Day": TimeFrame.Day,
+            "1Min": TimeFrame(1, TimeFrameUnit.Minute),
+            "5Min": TimeFrame(5, TimeFrameUnit.Minute),
+            "15Min": TimeFrame(15, TimeFrameUnit.Minute),
+            "1Hour": TimeFrame(1, TimeFrameUnit.Hour),
+        }
+        tf = tf_map.get(timeframe, TimeFrame.Day)
+        # Intraday: pull from the start of today's session; daily: a lookback window.
+        if timeframe != "1Day":
+            start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        else:
+            start = datetime.now(timezone.utc) - timedelta(days=days * 2)
+        req = StockBarsRequest(symbol_or_symbols=symbol.upper(), timeframe=tf, start=start)
         return self.stock_data.get_stock_bars(req).df
 
     def get_options_chain(self, underlying: str):

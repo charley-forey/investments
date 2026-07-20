@@ -179,10 +179,10 @@ def utcnow() -> str:
 class Journal:
     def __init__(self, db_path: str | Path):
         db_path = Path(db_path)
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(str(db_path))
-        self.conn.row_factory = sqlite3.Row
-        self.conn.execute("PRAGMA journal_mode=WAL")
+        from .db_util import open_connection
+        # busy_timeout so the daemon + dashboard + CLI writers wait on the lock
+        # instead of raising "database is locked".
+        self.conn = open_connection(db_path)
         self.conn.executescript(SCHEMA)
         self._migrate()
         self.conn.commit()

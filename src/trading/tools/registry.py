@@ -134,6 +134,17 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "properties": {"symbol": {"type": "string"}},
         },
     },
+    "get_intraday_features": {
+        "description": "Intraday microstructure for a symbol from today's session: VWAP, "
+                       "opening-range high/low and breakout, intraday momentum, and relative "
+                       "volume. Use it to time entries within the day — a daily setup still "
+                       "needs an intraday trigger.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
     "get_market_intel": {
         "description": "The latest curated market-intelligence digest (what's moving the "
                        "market and why, from continuously ingested news + social).",
@@ -180,10 +191,16 @@ STRATEGY_TOOLS = sorted(TOOL_SCHEMAS)
 
 
 def _bars_shim(df):
-    """Adapt a bars DataFrame into the .open/.high/.low/.close row shape that
-    compute_features expects."""
+    """Adapt a bars DataFrame into the .open/.high/.low/.close/.volume row shape that
+    compute_features and compute_intraday_features expect."""
+    def _vol(r):
+        try:
+            return float(r["volume"])
+        except (KeyError, TypeError, ValueError):
+            return 0.0
     return [type("B", (), {"open": float(r["open"]), "high": float(r["high"]),
-                           "low": float(r["low"]), "close": float(r["close"])})()
+                           "low": float(r["low"]), "close": float(r["close"]),
+                           "volume": _vol(r)})()
             for _, r in df.iterrows()]
 
 
@@ -394,6 +411,21 @@ class ToolRegistry:
             return f"no bars for {inp['symbol']}"
         feats = compute_features(_bars_shim(df))
         return feats.summary() if feats else f"insufficient history for {inp['symbol']}"
+
+    def _t_get_intraday_features(self, inp: dict) -> str:
+        from ..analytics.intraday import compute_intraday_features
+
+        agents = self.ctx.config.settings.agents
+        tf = getattr(agents, "intraday_timeframe", "5Min")
+        try:
+            df = self.ctx.broker.get_bars(inp["symbol"], days=1, timeframe=tf)
+        except TypeError:
+            df = self.ctx.broker.get_bars(inp["symbol"], days=1)  # broker without timeframe
+        if df is None or len(df) == 0:
+            return f"no intraday bars for {inp['symbol']}"
+        feats = compute_intraday_features(
+            _bars_shim(df), or_bars=getattr(agents, "opening_range_bars", 6))
+        return feats.summary() if feats else f"insufficient intraday history for {inp['symbol']}"
 
     def _t_get_calendar(self, inp: dict) -> str:
         import json

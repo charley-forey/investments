@@ -47,8 +47,12 @@ Options — a first-class tool, not an afterthought:
   a falsifiable thesis, honest expected edge net of the wide spread, and a
   strategy_tag naming the pattern (e.g. debit-call-vertical, csp-wheel, earnings-iv).
   The guardrail engine recomputes max loss from your legs independently — size so it
-  stays within the options max-loss cap. Buy premium only when you can name why IV is
-  cheap; selling premium into a binary event is usually a trap.
+  stays within the options max-loss cap. Choose the contract count so the structure's
+  computed worst-case loss (net debit x 100 x contracts for a debit spread;
+  strike-width x 100 x contracts for a credit spread) stays at or under the options
+  max-loss cap; if even one contract exceeds it, do not propose the trade. Buy premium
+  only when you can name why IV is cheap; selling premium into a binary event is usually
+  a trap.
 
 Communication: end with a brief summary of what you examined, what you proposed
 (or why nothing), and what you'd watch next cycle.
