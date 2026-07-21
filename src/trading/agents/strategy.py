@@ -7,7 +7,7 @@ from datetime import datetime, time, timezone
 from ..broker.models import AccountState
 from ..config import Config
 from ..data.journal import Journal
-from ..tools.registry import STRATEGY_TOOLS, ToolContext, ToolRegistry
+from ..tools.registry import ToolContext, ToolRegistry
 from . import prompts
 from .runner import AgentResult, run_agent
 
@@ -87,11 +87,12 @@ def run_strategy_session(
     cycle: str = "intraday",
     extra_context: str = "",
 ) -> AgentResult:
+    resolved = config.settings.agents.tools_for("strategy")
     ctx = ToolContext(
         config=config, journal=journal, broker=broker,
         account_state=account, agent_name="strategy",
     )
-    registry = ToolRegistry(ctx, STRATEGY_TOOLS)
+    registry = ToolRegistry(ctx, list(resolved.registry))
 
     universe = ", ".join(config.settings.universe.core)
     if cycle == "premarket":
@@ -126,4 +127,6 @@ def run_strategy_session(
         max_iterations=config.settings.agents.max_tool_iterations,
         journal=journal,
         agent_name="strategy",
+        web_search=resolved.web_search,
+        web_search_max_uses=resolved.web_search_max_uses,
     )

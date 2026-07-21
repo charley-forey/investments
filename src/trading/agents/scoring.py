@@ -11,7 +11,7 @@ from pathlib import Path
 from ..broker.models import AccountState
 from ..config import Config
 from ..data.journal import Journal
-from ..tools.registry import READ_ONLY_TOOLS, ToolContext, ToolRegistry
+from ..tools.registry import ToolContext, ToolRegistry
 from . import prompts
 from .runner import run_agent
 
@@ -21,11 +21,12 @@ MAX_LESSONS = 40  # keep the file small so it stays cheap in cached context
 def run_scoring_session(
     client, config: Config, journal: Journal, broker, account: AccountState
 ) -> list[str]:
+    resolved = config.settings.agents.tools_for("scoring")
     ctx = ToolContext(
         config=config, journal=journal, broker=broker,
         account_state=account, agent_name="scoring",
     )
-    registry = ToolRegistry(ctx, READ_ONLY_TOOLS)
+    registry = ToolRegistry(ctx, list(resolved.registry))
 
     from ..analytics.counterfactuals import outcomes_summary
 
@@ -46,6 +47,8 @@ def run_scoring_session(
         max_iterations=config.settings.agents.max_tool_iterations,
         journal=journal,
         agent_name="scoring",
+        web_search=resolved.web_search,
+        web_search_max_uses=resolved.web_search_max_uses,
     )
     lessons = [
         line.strip()[2:].strip()

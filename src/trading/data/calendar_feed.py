@@ -84,7 +84,14 @@ def _merge_events(existing: list[dict], fetched: list[dict],
         ev = str(e.get("event") or "event")
         if not d or d < cutoff:
             continue
-        by_key[(d, sym, ev)] = {"date": d, "symbol": sym, "event": ev}
+        event_type = str(e.get("event_type") or (
+            "macro" if not sym and ev.upper() in {
+                "FOMC", "CPI", "NFP", "PCE", "GDP", "PPI", "JOBLESS",
+            } else "earnings" if "earn" in ev.lower() else "event"
+        ))
+        by_key[(d, sym, ev)] = {
+            "date": d, "symbol": sym, "event": ev, "event_type": event_type,
+        }
     return sorted(by_key.values(), key=lambda x: (x["date"], x["symbol"]))
 
 
@@ -92,6 +99,8 @@ def refresh_calendar(config, *, symbols: list[str] | None = None,
                      fetch_fn=_fetch_yahoo_earnings) -> CalendarRefreshReport:
     """Refresh calendar.json for the universe. `fetch_fn` is injectable for tests."""
     import time
+
+    from .macro_calendar import macro_event_dicts
 
     path = Path(config.settings.paths.calendar_file)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -101,6 +110,9 @@ def refresh_calendar(config, *, symbols: list[str] | None = None,
     for i, sym in enumerate(symbols):
         try:
             events = fetch_fn(sym)
+            # Tag earnings from Yahoo with event_type
+            for e in events:
+                e.setdefault("event_type", "earnings")
             fetched.extend(events)
             report.symbols_ok += 1
         except Exception as e:  # network/parse — never abort the whole refresh
@@ -110,6 +122,7 @@ def refresh_calendar(config, *, symbols: list[str] | None = None,
         if i + 1 < len(symbols) and fetch_fn is _fetch_yahoo_earnings:
             time.sleep(0.15)
 
+    fetched.extend(macro_event_dicts())
     merged = _merge_events(_load_existing(path), fetched)
     path.write_text(json.dumps(merged, indent=2) + "\n", encoding="utf-8")
     report.events_written = len(merged)

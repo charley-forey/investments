@@ -36,3 +36,44 @@ agents:
   options_chain_strikes: 5          # strikes each side of the money
   options_chain_max_dte: 60
   redteam_confidence_threshold: 0.7  # adversarial pass on high-conviction drafts (1.0=off)
+  # Per-role tool assignment. Registry tools are listed by name; `web_search` is a
+  # server-side Anthropic pseudo-tool (not in TOOL_SCHEMAS). `all` expands to every
+  # registry tool; `{same_as: role}` copies another role's list. propose_order is
+  # only ever granted to strategy regardless of config.
+  tools:
+    strategy:
+      - all
+      - web_search
+    risk:
+      - get_account_state
+      - get_quote
+      - get_bars
+      - get_options_chain
+      - search_news
+      - get_calendar
+      - get_market_context
+      - get_features
+      - get_intraday_features
+      - read_journal
+      - get_market_intel
+      - recall_similar
+      - scan_universe
+      - get_fundamentals
+      - get_open_orders
+    redteam:
+      - same_as: risk
+    scoring:
+      - read_journal
+      - read_memory
+      - read_playbook
+      - get_bars
+      - get_market_context
+      - recall_similar
+    intel:
+      - web_search
+  web_search_max_uses:
+    strategy: 3
+    intel: 5
+    risk: 0
+    redteam: 0
+    scoring: 0

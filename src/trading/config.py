@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from functools import lru_cache
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from dotenv import load_dotenv
@@ -154,6 +154,7 @@ class Paths(BaseModel):
     bars_db: str = "data/bars.db"
     intel_db: str = "data/intel.db"
     vectors_db: str = "data/vectors.db"
+    fundamentals_db: str = "data/fundamentals.db"
     memory_dir: str = "memory"
     playbooks_dir: str = "playbooks"
     calendar_file: str = "data/calendar.json"  # user-provided events feed (optional)
@@ -165,6 +166,7 @@ class Paths(BaseModel):
             bars_db=str(root / self.bars_db),
             intel_db=str(root / self.intel_db),
             vectors_db=str(root / self.vectors_db),
+            fundamentals_db=str(root / self.fundamentals_db),
             memory_dir=str(root / self.memory_dir),
             playbooks_dir=str(root / self.playbooks_dir),
             calendar_file=str(root / self.calendar_file),
@@ -197,9 +199,19 @@ class AgentSettings(BaseModel):
     # Runaway-cost protection: pause agent work if 24h Anthropic spend hits this.
     # 0 = no cap (code default); settings.yaml sets 15.0 in prod.
     max_daily_cost_usd: float = 0.0
+    # Per-role tool assignment (see tools/assignment.py). Empty -> role defaults.
+    # Values are lists of tool names, `all` / `all_readonly`, or `{same_as: role}`.
+    # `web_search` is a server-side Anthropic pseudo-tool.
+    tools: dict[str, Any] = Field(default_factory=dict)
+    web_search_max_uses: dict[str, int] = Field(default_factory=dict)
 
     def model_for(self, role: str) -> str:
         return getattr(self, f"{role}_model", None) or self.model
+
+    def tools_for(self, role: str):
+        """Resolve registry + web_search tools for an agent role."""
+        from .tools.assignment import resolve_tools_for
+        return resolve_tools_for(self, role)
 
 
 class Universe(BaseModel):

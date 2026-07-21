@@ -13,7 +13,8 @@ from ..broker.models import AccountState
 from ..config import Config
 from ..data.journal import Journal
 from ..guardrails.models import OrderProposal
-from ..tools.registry import READ_ONLY_TOOLS, ToolContext, ToolRegistry
+from ..tools.assignment import web_search_tool_schema
+from ..tools.registry import ToolContext, ToolRegistry
 from . import prompts
 
 VERDICT_SCHEMA = {
@@ -74,11 +75,12 @@ def review_proposal(
     model: str | None = None,
     agent_name: str = "risk",
 ) -> RiskVerdict:
+    resolved = config.settings.agents.tools_for(agent_name)
     ctx = ToolContext(
         config=config, journal=journal, broker=broker,
         account_state=account, agent_name=agent_name,
     )
-    registry = ToolRegistry(ctx, READ_ONLY_TOOLS)
+    registry = ToolRegistry(ctx, list(resolved.registry))
 
     user_message = (
         "Review this proposal and return your verdict in the required JSON format.\n\n"
@@ -94,17 +96,21 @@ def review_proposal(
                "cache_control": {"type": "ephemeral"}}]
     review_model = model or config.settings.agents.model_for("risk")
     messages: list[dict] = [{"role": "user", "content": user_message}]
-    tools = registry.schemas()
+    tools = list(registry.schemas())
+    if resolved.web_search:
+        tools.append(web_search_tool_schema(resolved.web_search_max_uses))
 
     for _ in range(config.settings.agents.max_tool_iterations):
-        response = client.messages.create(
+        create_kwargs: dict = dict(
             model=review_model,
             max_tokens=config.settings.agents.max_tokens,
             thinking={"type": "adaptive"},
             system=system,
-            tools=tools,
             messages=messages,
         )
+        if tools:
+            create_kwargs["tools"] = tools
+        response = client.messages.create(**create_kwargs)
         if response.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": response.content})
             continue
@@ -112,14 +118,24 @@ def review_proposal(
             break
         messages.append({"role": "assistant", "content": response.content})
         results = []
+        called = []
         for block in response.content:
-            if block.type == "tool_use":
-                out = registry.dispatch(block.name, block.input or {})
-                results.append({
-                    "type": "tool_result", "tool_use_id": block.id,
-                    "content": out, "is_error": out.startswith("error:"),
-                })
-        messages.append({"role": "user", "content": results})
+            btype = getattr(block, "type", None)
+            if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
+                called.append("web_search")
+                continue
+            if btype != "tool_use":
+                continue
+            out = registry.dispatch(block.name, block.input or {})
+            called.append(block.name)
+            results.append({
+                "type": "tool_result", "tool_use_id": block.id,
+                "content": out, "is_error": out.startswith("error:"),
+            })
+        if journal is not None and called:
+            journal.heartbeat(f"agent:{agent_name}", detail=f"tools: {', '.join(called)}")
+        if results:
+            messages.append({"role": "user", "content": results})
 
     # Constrained final verdict.
     messages.append({

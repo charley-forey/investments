@@ -107,10 +107,12 @@ class TestCalendarRefresh:
             return [{"date": "2099-01-15", "symbol": sym, "event": "earnings"}]
 
         report = refresh_calendar(config, fetch_fn=fake_fetch)
-        assert report.events_written == 2
+        assert report.events_written >= 2
         assert report.symbols_ok == 2
         data = __import__("json").loads(cal.read_text(encoding="utf-8"))
-        assert {e["symbol"] for e in data} == {"AAPL", "META"}
+        syms = {e["symbol"] for e in data if e.get("symbol")}
+        assert {"AAPL", "META"} <= syms
+        assert any(e.get("event_type") == "macro" for e in data)
 
 
 class TestSignalResearchRunner:

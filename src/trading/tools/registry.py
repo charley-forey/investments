@@ -159,6 +159,37 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "required": ["query"],
         },
     },
+    "scan_universe": {
+        "description": "Batch screener across the configured universe: one ranked table of "
+                       "last price, day %, gap %, RVOL, ATR%, momentum, SMA distance. Use "
+                       "this instead of calling get_features on every symbol.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "sort_by": {
+                    "type": "string",
+                    "enum": ["momentum", "day_pct", "gap_pct", "rvol", "atr_pct", "sma_gap"],
+                    "description": "Column to rank by (default: momentum)",
+                },
+            },
+        },
+    },
+    "get_fundamentals": {
+        "description": "Fundamental snapshot for a symbol: market cap, trailing/forward P/E, "
+                       "revenue growth, profit margin, short % of float, beta, next earnings. "
+                       "Cached daily from Yahoo Finance.",
+        "input_schema": {
+            "type": "object",
+            "properties": {"symbol": {"type": "string"}},
+            "required": ["symbol"],
+        },
+    },
+    "get_open_orders": {
+        "description": "List pending/unfilled broker orders so you do not double-propose "
+                       "against a resting limit. Call before proposing a new entry in a "
+                       "symbol that may already have working orders.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
     "propose_order": {
         "description": "Register a trade proposal for independent risk review. It is NOT "
                        "executed by this call. Every proposal needs a falsifiable thesis, "
@@ -441,13 +472,123 @@ class ToolRegistry:
             return "calendar feed is unreadable"
         today = date.today().isoformat()
         sym = (inp.get("symbol") or "").upper()
-        upcoming = [e for e in events if e.get("date", "") >= today
-                    and (not sym or e.get("symbol", "").upper() == sym)]
+        upcoming = []
+        for e in events:
+            if e.get("date", "") < today:
+                continue
+            e_sym = (e.get("symbol") or "").upper()
+            is_macro = (not e_sym) and (
+                e.get("event_type") == "macro"
+                or str(e.get("event", "")).upper() in {
+                    "FOMC", "CPI", "NFP", "PCE", "GDP",
+                }
+            )
+            if not sym or e_sym == sym or is_macro:
+                upcoming.append(e)
         upcoming.sort(key=lambda e: e.get("date", ""))
         if not upcoming:
             return f"no upcoming events{(' for ' + sym) if sym else ''}"
-        return "\n".join(f"{e['date']} {e.get('symbol', '')} {e.get('event', '')}"
-                         for e in upcoming[:20])
+        lines = []
+        for e in upcoming[:30]:
+            et = e.get("event_type") or ("macro" if not e.get("symbol") else "event")
+            sym_s = e.get("symbol") or "MARKET"
+            lines.append(f"{e['date']} [{et}] {sym_s} {e.get('event', '')}")
+        return "\n".join(lines)
+
+    def _t_scan_universe(self, inp: dict) -> str:
+        from ..analytics.features import compute_features
+
+        sort_by = (inp.get("sort_by") or "momentum").lower()
+        days = max(self.ctx.config.settings.agents.bars_lookback_days, 40)
+        rows = []
+        for sym in self.ctx.config.settings.universe.core:
+            try:
+                df = self.ctx.broker.get_bars(sym, days=days)
+            except Exception:
+                continue
+            if df is None or len(df) < 30:
+                continue
+            bars = _bars_shim(df)
+            feats = compute_features(bars)
+            if feats is None:
+                continue
+            closes = [b.close for b in bars]
+            opens = [b.open for b in bars]
+            vols = [b.volume for b in bars]
+            last = closes[-1]
+            prev = closes[-2] if len(closes) > 1 else last
+            day_pct = (last - prev) / prev if prev else 0.0
+            gap_pct = (opens[-1] - prev) / prev if prev else 0.0
+            avg_vol = (sum(vols[-21:-1]) / 20) if len(vols) > 21 else (sum(vols[:-1]) / max(1, len(vols) - 1))
+            rvol = (vols[-1] / avg_vol) if avg_vol > 0 else 0.0
+            sma20 = sum(closes[-20:]) / 20 if len(closes) >= 20 else last
+            sma50 = sum(closes[-50:]) / 50 if len(closes) >= 50 else sma20
+            dist20 = (last - sma20) / sma20 if sma20 else 0.0
+            dist50 = (last - sma50) / sma50 if sma50 else 0.0
+            rows.append({
+                "symbol": sym,
+                "last": last,
+                "day_pct": day_pct,
+                "gap_pct": gap_pct,
+                "rvol": rvol,
+                "atr_pct": feats.atr_pct,
+                "momentum": feats.momentum_20,
+                "sma_gap": feats.sma_gap,
+                "dist20": dist20,
+                "dist50": dist50,
+            })
+        if not rows:
+            return "no universe data available"
+        key = sort_by if sort_by in rows[0] else "momentum"
+        rows.sort(key=lambda r: r[key], reverse=True)
+        lines = [
+            f"universe scan ({len(rows)} syms) sorted by {key}",
+            "sym    last   day%   gap%   rvol  atr%   mom%  smaGap  vs20   vs50",
+        ]
+        for r in rows:
+            lines.append(
+                f"{r['symbol']:<6}{r['last']:>6.1f} "
+                f"{r['day_pct']*100:>+5.1f} {r['gap_pct']*100:>+5.1f} "
+                f"{r['rvol']:>5.1f} {r['atr_pct']*100:>5.1f} "
+                f"{r['momentum']*100:>+5.1f} {r['sma_gap']*100:>+6.1f} "
+                f"{r['dist20']*100:>+5.1f} {r['dist50']*100:>+5.1f}"
+            )
+        return "\n".join(lines)
+
+    def _t_get_fundamentals(self, inp: dict) -> str:
+        from ..data.fundamentals import get_fundamentals
+
+        feats = get_fundamentals(self.ctx.config, inp["symbol"])
+        return feats.summary()
+
+    def _t_get_open_orders(self, _inp: dict) -> str:
+        list_fn = getattr(self.ctx.broker, "list_open_orders", None)
+        if list_fn is None:
+            return "broker does not support listing open orders"
+        try:
+            orders = list_fn() or []
+        except Exception as e:
+            return f"error listing open orders: {e}"
+        if not orders:
+            return "no open/pending orders"
+        lines = ["open orders:"]
+        for o in orders[:50]:
+            sym = getattr(o, "symbol", "?")
+            side = getattr(o, "side", "?")
+            if hasattr(side, "value"):
+                side = side.value
+            qty = getattr(o, "qty", None) or getattr(o, "quantity", "?")
+            otype = getattr(o, "order_type", None) or getattr(o, "type", "?")
+            if hasattr(otype, "value"):
+                otype = otype.value
+            limit = getattr(o, "limit_price", None)
+            status = getattr(o, "status", "open")
+            if hasattr(status, "value"):
+                status = status.value
+            oid = getattr(o, "id", "")
+            lim_s = f" @{limit}" if limit is not None else ""
+            lines.append(f"- {side} {qty} {sym} {otype}{lim_s} [{status}] id={oid}")
+        return "\n".join(lines)
 
     def _t_propose_order(self, inp: dict) -> str:
         max_props = self.ctx.config.settings.agents.max_proposals_per_cycle

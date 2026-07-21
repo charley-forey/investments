@@ -4,6 +4,11 @@ We run the loop by hand (not the SDK tool runner) so every tool call is
 journaled and `propose_order` can only register drafts. The system prompt is
 frozen text with a cache_control breakpoint; all volatile data (account state,
 quotes) reaches the model through tool results.
+
+Anthropic server-side tools (web_search) are appended to the tools list when
+enabled; they execute on Anthropic's infrastructure and appear as
+server_tool_use / web_search_tool_result blocks — we journal them but do not
+dispatch them locally.
 """
 
 from __future__ import annotations
@@ -14,6 +19,7 @@ from ..cost import Usage, usage_from_response
 from ..data.journal import Journal
 from ..guardrails.models import OrderProposal
 from ..resilience import RetryConfig, with_retry
+from ..tools.assignment import WEB_SEARCH, web_search_tool_schema
 from ..tools.registry import ToolRegistry
 
 
@@ -45,9 +51,13 @@ def run_agent(
     max_iterations: int,
     journal: Journal | None = None,
     agent_name: str = "agent",
+    web_search: bool = False,
+    web_search_max_uses: int = 0,
 ) -> AgentResult:
     system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
-    tools = registry.schemas()
+    tools = list(registry.schemas())
+    if web_search and web_search_max_uses > 0:
+        tools.append(web_search_tool_schema(web_search_max_uses))
     messages: list[dict] = [{"role": "user", "content": user_message}]
 
     stop_reason = "max_iterations"
@@ -59,19 +69,22 @@ def run_agent(
 
     while iterations < max_iterations:
         iterations += 1
-        response = with_retry(
-            lambda: client.messages.create(
+
+        def _create():
+            kwargs = dict(
                 model=model,
                 max_tokens=max_tokens,
                 # summarized thinking so the agent's reasoning can be captured for
                 # transparency (the raw chain of thought is never exposed).
                 thinking={"type": "adaptive", "display": "summarized"},
                 system=system,
-                tools=tools,
                 messages=messages,
-            ),
-            config=RetryConfig(retries=2),
-        )
+            )
+            if tools:
+                kwargs["tools"] = tools
+            return client.messages.create(**kwargs)
+
+        response = with_retry(_create, config=RetryConfig(retries=2))
         total_usage.add(usage_from_response(response))
         for block in response.content:
             if getattr(block, "type", None) == "thinking":
@@ -88,6 +101,14 @@ def run_agent(
             final_text = "\n".join(text_parts)
 
         if response.stop_reason != "tool_use":
+            # Still journal any server-side searches that completed this turn.
+            for block in response.content:
+                if (getattr(block, "type", None) == "server_tool_use"
+                        and getattr(block, "name", "") == WEB_SEARCH):
+                    tool_calls.append({
+                        "name": WEB_SEARCH,
+                        "input": getattr(block, "input", None) or {},
+                    })
             stop_reason = response.stop_reason or "end_turn"
             break
 
@@ -95,7 +116,15 @@ def run_agent(
         tool_results = []
         called = []
         for block in response.content:
-            if block.type != "tool_use":
+            btype = getattr(block, "type", None)
+            if btype == "server_tool_use" and getattr(block, "name", "") == WEB_SEARCH:
+                called.append(WEB_SEARCH)
+                tool_calls.append({
+                    "name": WEB_SEARCH,
+                    "input": getattr(block, "input", None) or {},
+                })
+                continue
+            if btype != "tool_use":
                 continue
             result = registry.dispatch(block.name, block.input or {})
             called.append(block.name)
@@ -108,8 +137,9 @@ def run_agent(
                     "is_error": result.startswith("error:"),
                 }
             )
-        messages.append({"role": "user", "content": tool_results})
-        if journal is not None:
+        if tool_results:
+            messages.append({"role": "user", "content": tool_results})
+        if journal is not None and called:
             journal.heartbeat(f"agent:{agent_name}", detail=f"tools: {', '.join(called)}")
 
     return AgentResult(
