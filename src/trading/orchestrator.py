@@ -182,10 +182,17 @@ class Orchestrator:
                     )
         except Exception as e:
             report.notes.append(f"candidate context failed: {e}")
-        session = self._run_strategy(
-            self.client, self.config, self.journal, self.broker, account,
-            cycle="intraday", extra_context=extra,
-        )
+        try:
+            session = self._run_strategy(
+                self.client, self.config, self.journal, self.broker, account,
+                cycle="intraday", extra_context=extra,
+            )
+        except Exception as e:
+            # Losing analysis is survivable; losing the rest of the cycle is not.
+            # Deterministic exit management has already run above.
+            report.notes.append(f"strategy agent failed: {e}")
+            self._alert_llm_down(e)
+            return
         self._record_usage("intraday", "strategy", session.usage, report)
         report.proposals = len(session.drafts)
 
@@ -237,10 +244,16 @@ class Orchestrator:
 
             # Approved by risk -> run the deterministic guardrail pipeline.
             quote = self._quote_for(draft)
-            result = self.pipeline.process(
-                draft, account, quote,
-                market_is_open=market_open, would_be_day_trade=would_be_dt,
-            )
+            try:
+                result = self.pipeline.process(
+                    draft, account, quote,
+                    market_is_open=market_open, would_be_day_trade=would_be_dt,
+                )
+            except Exception as e:
+                # A broker rejection must not abort the cycle: position management
+                # and the remaining stages still need to run.
+                report.notes.append(f"submit {draft.symbol} failed: {e}")
+                continue
             # Attach the risk approval + captured strategy reasoning to the proposal.
             self.journal.record_verdict(
                 result.proposal_id, source="risk_agent", verdict="approve",
@@ -420,6 +433,23 @@ class Orchestrator:
             return True
         return False
 
+    def _alert_llm_down(self, exc: Exception) -> None:
+        """Loud alarm when the agent can no longer think. Credit exhaustion is
+        called out by name: it silently blinded the system mid-session on 7/22,
+        leaving an open position unmanaged for the rest of the day."""
+        detail = str(exc)
+        out_of_credit = "credit balance is too low" in detail.lower()
+        title = "Anthropic credit exhausted" if out_of_credit else "Strategy agent down"
+        self.journal.heartbeat("llm", status="error", detail=detail[:400])
+        try:
+            notify.notify_event(
+                self.config, self.journal, title,
+                f"{detail[:300]}\nDeterministic exits still running; "
+                "no new proposals until this is resolved.",
+            )
+        except Exception:
+            pass
+
     def _record_usage(self, cycle: str, agent: str, usage, report: CycleReport) -> None:
         model = self.config.settings.agents.model_for(agent, cycle=cycle)
         cost_usd = cost.estimate_cost(usage, model)
@@ -508,11 +538,13 @@ class Orchestrator:
 
         # 1b. Counterfactual outcomes for aged vetoed/rejected proposals — grades
         # the analysis loop even when no trade was taken.
+        graded = 0
         try:
             from .analytics.counterfactuals import evaluate_pending
             from .data.memory_vectors import remember_outcome
 
             cf = evaluate_pending(self.journal, self.broker)
+            graded = cf.evaluated
             if cf.evaluated:
                 report.notes.append(
                     f"counterfactuals: {cf.evaluated} graded "
@@ -539,6 +571,11 @@ class Orchestrator:
         #    cost cap.
         if self._cost_capped():
             report.notes.append("scoring agent skipped (cost cap)")
+        elif not score_report.scored and not graded:
+            # No graded outcome and no closed trade means there is nothing to learn
+            # from. Asked anyway, the agent writes lessons from recalled P&L — on
+            # 7/22 it invented three day-move figures and got UNH's sign wrong.
+            report.notes.append("scoring agent skipped (no graded evidence)")
         else:
             try:
                 lessons = self._score(

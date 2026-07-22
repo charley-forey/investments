@@ -1,5 +1,12 @@
 # Non-safety settings. Safety limits live in limits.yaml.
 
+# Market data feed. 'iex' is free but covers ~2% of volume: it returns ask=0 and
+# multi-percent spreads on liquid names, which poisons veto quality, cost-hurdle
+# math and exit pricing. 'sip' is the consolidated tape and is the single highest
+# -value upgrade available to this system — switch this one line once the Alpaca
+# Algo Trader Plus subscription is active (it returned 403 as of 2026-07-22).
+data_feed: iex
+
 universe:
   # Mega-caps + liquid mid-caps for a $50k account (ADV/spread still enforced by limits).
   core: [SPY, QQQ, IWM, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AMD, AVGO, MU,

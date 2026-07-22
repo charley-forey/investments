@@ -25,6 +25,17 @@ class AlpacaBroker:
         self._stock_data = None
         self._option_data = None
 
+    @property
+    def _feed(self):
+        """Market data feed. IEX (the free default) covers ~2% of volume and
+        returns one-sided books and multi-percent spreads for liquid names, which
+        the risk agent correctly but uselessly reads as 'do not enter'. SIP is the
+        consolidated tape and requires an Algo Trader Plus subscription."""
+        from alpaca.data.enums import DataFeed
+
+        name = str(getattr(self.config.settings, "data_feed", "iex") or "iex").lower()
+        return DataFeed.SIP if name == "sip" else DataFeed.IEX
+
     # Lazy clients so importing this module never requires network/credentials.
     @property
     def trading(self):
@@ -66,7 +77,7 @@ class AlpacaBroker:
         from alpaca.data.requests import StockLatestQuoteRequest
 
         symbol = symbol.upper()
-        req = StockLatestQuoteRequest(symbol_or_symbols=symbol)
+        req = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=self._feed)
         q = self.stock_data.get_stock_latest_quote(req)[symbol]
         return Quote(
             symbol=symbol,
@@ -106,7 +117,8 @@ class AlpacaBroker:
             start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
         else:
             start = datetime.now(timezone.utc) - timedelta(days=days * 2)
-        req = StockBarsRequest(symbol_or_symbols=symbol.upper(), timeframe=tf, start=start)
+        req = StockBarsRequest(symbol_or_symbols=symbol.upper(), timeframe=tf,
+                               start=start, feed=self._feed)
         return self.stock_data.get_stock_bars(req).df
 
     def get_options_chain(self, underlying: str):
@@ -241,8 +253,13 @@ class AlpacaBroker:
             order = self.trading.submit_order(order_data=req)
             return str(order.id)
 
+        # Bracket children inherit the parent's TIF: a DAY bracket has its target
+        # expire at the close, which cancels the sibling stop and leaves the
+        # position naked overnight. GTC keeps protection alive; an unfilled GTC
+        # entry is swept by cancel_stale_orders (orders.stale_order_ttl_minutes).
+        tif = TimeInForce.GTC if bracket_kwargs else TimeInForce.DAY
         common = dict(symbol=symbol.upper(), qty=qty, side=side_enum,
-                      time_in_force=TimeInForce.DAY, client_order_id=client_order_id)
+                      time_in_force=tif, client_order_id=client_order_id)
         if order_type == "limit":
             if limit_price is None:
                 raise ValueError("limit order requires limit_price")

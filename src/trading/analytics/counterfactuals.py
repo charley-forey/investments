@@ -14,7 +14,10 @@ from ..data.journal import Journal
 
 
 DEFAULT_HORIZON_DAYS = 5
-DEFAULT_MIN_AGE_DAYS = 5
+# Grade a veto the day after it was made. At 5 days nothing was ever eligible, so
+# proposal_outcomes stayed empty and the scoring agent wrote lessons from recalled
+# P&L instead of arithmetic — and got the sign wrong on one of three names.
+DEFAULT_MIN_AGE_DAYS = 1
 
 
 @dataclass

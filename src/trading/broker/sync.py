@@ -228,6 +228,96 @@ def cancel_stale_orders(config: Config, journal: Journal, broker) -> int:
     return cancelled
 
 
+def release_held_orders(broker, symbol: str, side: str) -> int:
+    """Cancel resting orders that hold the shares a closing order needs.
+
+    A live bracket reserves the whole position (held_for_orders == qty), so any
+    discretionary exit is rejected with "insufficient qty available" until the
+    protective legs are cancelled. Only orders on the *closing* side are touched;
+    an opening order sits on the opposite side and is left alone.
+    Returns the number cancelled.
+    """
+    symbol, side = symbol.upper(), side.lower()
+    released = 0
+    try:
+        orders = broker.list_open_orders()
+    except Exception:
+        return 0
+    for order in orders:
+        if str(getattr(order, "symbol", "") or "").upper() != symbol:
+            continue
+        if str(getattr(order, "side", "") or "").lower().endswith(side):
+            try:
+                broker.cancel_order(str(order.id))
+                released += 1
+            except Exception:
+                continue
+    return released
+
+
+def ensure_protective_stops(config: Config, journal: Journal, broker) -> int:
+    """Attach a GTC stop to any position that has no resting stop order.
+
+    Backstop for the gap that left a position naked overnight: bracket legs can
+    be cancelled or expire, and nothing re-armed them. Stop level comes from the
+    open lot's recorded stop, else exits.stop_loss_pct off the entry price.
+    Returns the number of stops attached.
+    """
+    pct = abs(getattr(config.limits.exits, "stop_loss_pct", 0) or 0)
+    try:
+        account = broker.get_account_state(journal)
+        orders = broker.list_open_orders()
+    except Exception as e:
+        journal.heartbeat("protective_stops", status="error", detail=str(e))
+        return 0
+
+    protected = {
+        str(getattr(o, "symbol", "") or "").upper()
+        for o in orders
+        if "stop" in str(getattr(o, "order_type", getattr(o, "type", "")) or "").lower()
+    }
+    attached = 0
+    for pos in account.positions:
+        if pos.asset_class != "stock" or pos.qty == 0:
+            continue
+        if pos.symbol.upper() in protected:
+            continue
+        stop_px = _recorded_stop(journal, pos.symbol)
+        if stop_px is None:
+            if pct <= 0:
+                continue
+            stop_px = (pos.avg_entry_price * (1 - pct / 100.0) if pos.qty > 0
+                       else pos.avg_entry_price * (1 + pct / 100.0))
+        try:
+            broker.submit_order(
+                symbol=pos.symbol,
+                side="sell" if pos.qty > 0 else "buy",
+                qty=abs(pos.qty),
+                order_type="stop",
+                limit_price=None,
+                stop_loss_price=round(float(stop_px), 2),
+                client_order_id=f"protect-{pos.symbol.lower()}-{int(abs(pos.qty))}",
+            )
+            attached += 1
+        except Exception:
+            continue
+    if attached:
+        journal.heartbeat("protective_stops", detail=f"attached {attached} stop(s)")
+    return attached
+
+
+def _recorded_stop(journal: Journal, symbol: str) -> float | None:
+    """Stop price from the most recent proposal that opened this symbol."""
+    try:
+        row = journal.conn.execute(
+            "SELECT stop_price FROM proposals WHERE symbol=? AND stop_price IS NOT NULL "
+            "AND status='submitted' ORDER BY id DESC LIMIT 1", (symbol.upper(),)
+        ).fetchone()
+    except Exception:
+        return None
+    return float(row["stop_price"]) if row and row["stop_price"] else None
+
+
 def _reconcile(config: Config, journal: Journal, broker, report: SyncReport) -> None:
     """Compare journal open-lot quantities to broker positions. Drift beyond the
     tolerance is a warning and — if configured — trips a halt flag that blocks new

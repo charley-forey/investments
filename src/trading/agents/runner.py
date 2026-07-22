@@ -40,6 +40,26 @@ class AgentResult:
             self.tool_calls = []
 
 
+def _roll_cache_breakpoint(messages: list[dict]) -> None:
+    """Keep one cache breakpoint on the newest tool-result block.
+
+    Only the system prompt was cached, so every tool result was re-billed at full
+    rate on each of up to 25 iterations — a ~30% cache hit rate on calls running
+    20k-160k input tokens. Moving a single breakpoint to the tail caches the whole
+    accumulated history as a prefix. Assistant turns hold SDK objects rather than
+    dicts, so the marker rides on the tool-result blocks we build ourselves.
+    """
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                if isinstance(block, dict):
+                    block.pop("cache_control", None)
+    tail = messages[-1].get("content") if messages else None
+    if isinstance(tail, list) and tail and isinstance(tail[-1], dict):
+        tail[-1]["cache_control"] = {"type": "ephemeral"}
+
+
 def run_agent(
     client,
     *,
@@ -139,6 +159,7 @@ def run_agent(
             )
         if tool_results:
             messages.append({"role": "user", "content": tool_results})
+            _roll_cache_breakpoint(messages)
         if journal is not None and called:
             journal.heartbeat(f"agent:{agent_name}", detail=f"tools: {', '.join(called)}")
 

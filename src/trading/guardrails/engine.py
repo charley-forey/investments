@@ -507,6 +507,12 @@ class OrderPipeline:
 
         broker_order_id = None
         if self.broker is not None:
+            if proposal.reduces_position:
+                # Protective legs reserve the whole position; free the shares or
+                # the close is rejected with "insufficient qty available".
+                from ..broker.sync import release_held_orders
+
+                release_held_orders(self.broker, proposal.symbol, proposal.side)
             broker_order_id = self.broker.submit_order(
                 symbol=proposal.symbol,
                 side=proposal.side,

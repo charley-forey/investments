@@ -71,7 +71,15 @@ class Quote(BaseModel):
         return self.ask or self.bid
 
     @property
+    def is_two_sided(self) -> bool:
+        """A book with a real price on both sides. IEX routinely returns ask=0
+        outside its own liquidity, which is unquotable — not tight."""
+        return self.bid > 0 and self.ask > 0
+
+    @property
     def spread(self) -> float:
-        if self.bid > 0 and self.ask > 0:
+        """Infinite on a one-sided book: an unpriceable trade must fail the cost
+        hurdle, never pass it as a perfect zero-spread fill."""
+        if self.is_two_sided:
             return max(self.ask - self.bid, 0.0)
-        return 0.0
+        return float("inf")
