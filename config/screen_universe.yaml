@@ -1,0 +1,102 @@
+# Expanded liquid screen pool for the deterministic movers scanner.
+# Unioned with universe.core at runtime. Names must clear the filters below
+# (and config/limits.yaml symbol floors) before promotion to candidates.
+
+symbols:
+  # Broad liquid US names (mega + mid) — keep liquid; no penny names.
+  - SPY
+  - QQQ
+  - IWM
+  - DIA
+  - XLF
+  - XLE
+  - XLK
+  - XBI
+  - SMH
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+  - AMD
+  - AVGO
+  - MU
+  - CRM
+  - NFLX
+  - JPM
+  - BAC
+  - GS
+  - LLY
+  - UNH
+  - XOM
+  - CVX
+  - COST
+  - WMT
+  - PLTR
+  - COIN
+  - GLD
+  - SLV
+  - SMCI
+  - DELL
+  - APP
+  - HIMS
+  - SOFI
+  - HOOD
+  - RBLX
+  - NET
+  - CRWD
+  - SNOW
+  - DDOG
+  - MDB
+  - SHOP
+  - SQ
+  - PYPL
+  - UBER
+  - ABNB
+  - ROKU
+  - SNAP
+  - PINS
+  - TTD
+  - DKNG
+  - MARA
+  - RIOT
+  - AFRM
+  - UPST
+  - PATH
+  - IONQ
+  - RKLB
+  - ASTS
+  - JOBY
+  - LCID
+  - RIVN
+  - NIO
+  - BABA
+  - PDD
+  - SE
+  - MELI
+  - NU
+  - TSM
+  - ASML
+  - ARM
+  - INTC
+  - QCOM
+  - TXN
+  - AMAT
+  - LRCX
+  - KLAC
+  - MRVL
+  - ON
+  - GME
+  - AMC
+  - BB
+  - CLOV
+
+filters:
+  min_price: 5.0
+  min_avg_daily_volume: 1000000
+  max_spread_bps: 40.0          # reject if quote spread wider than this
+  top_n: 8                      # candidates kept per scan
+  ttl_hours: 36                 # candidate expiry
+  wake_score: 55.0              # OpportunityScore threshold to wake LLM

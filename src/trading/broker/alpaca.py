@@ -209,14 +209,15 @@ class AlpacaBroker:
     ) -> str:
         from alpaca.trading.enums import OrderClass, OrderSide, TimeInForce
         from alpaca.trading.requests import (
-            LimitOrderRequest, MarketOrderRequest, StopLossRequest, TakeProfitRequest,
+            LimitOrderRequest, MarketOrderRequest, StopLossRequest,
+            StopOrderRequest, TakeProfitRequest,
         )
 
         side_enum = OrderSide.BUY if side == "buy" else OrderSide.SELL
         # A protective stop (optionally a target) turns this into an atomic bracket
         # so the position is protected the instant the entry fills.
         bracket_kwargs = {}
-        if stop_loss_price is not None:
+        if stop_loss_price is not None and order_type != "stop":
             bracket_kwargs["order_class"] = OrderClass.BRACKET
             bracket_kwargs["stop_loss"] = StopLossRequest(
                 stop_price=round(float(stop_loss_price), 2)
@@ -225,6 +226,20 @@ class AlpacaBroker:
                 bracket_kwargs["take_profit"] = TakeProfitRequest(
                     limit_price=round(float(take_profit_price), 2)
                 )
+
+        # Standalone protective stops (e.g. re-attach after a bracket was cancelled)
+        # use GTC so overnight protection survives the session.
+        if order_type == "stop":
+            stop_px = stop_loss_price if stop_loss_price is not None else limit_price
+            if stop_px is None:
+                raise ValueError("stop order requires stop_loss_price or limit_price")
+            req = StopOrderRequest(
+                symbol=symbol.upper(), qty=qty, side=side_enum,
+                stop_price=round(float(stop_px), 2),
+                time_in_force=TimeInForce.GTC, client_order_id=client_order_id,
+            )
+            order = self.trading.submit_order(order_data=req)
+            return str(order.id)
 
         common = dict(symbol=symbol.upper(), qty=qty, side=side_enum,
                       time_in_force=TimeInForce.DAY, client_order_id=client_order_id)

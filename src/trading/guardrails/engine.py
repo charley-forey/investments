@@ -342,6 +342,8 @@ class OrderPipeline:
             expected_edge_usd=proposal.expected_edge_usd,
             max_loss_usd=proposal.max_loss_usd,
             confidence=proposal.confidence,
+            discovery_source=getattr(proposal, "discovery_source", None),
+            score_at_entry=getattr(proposal, "score_at_entry", None),
         )
 
         option_leg_spreads = self._option_leg_spreads(proposal)

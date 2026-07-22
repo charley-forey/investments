@@ -84,7 +84,7 @@ def _option_signals(journal, broker, symbol: str, spot, realized_vol):
 
 
 def snapshot_universe(config, journal, broker, *, cycle: str = "intraday") -> int:
-    """Record one signal_snapshot row per universe symbol. Returns rows written."""
+    """Record one signal_snapshot row per universe + active candidate symbol."""
     from ..data.intel import IntelStore
 
     store = None
@@ -92,8 +92,16 @@ def snapshot_universe(config, journal, broker, *, cycle: str = "intraday") -> in
     if os.path.exists(intel_path):
         store = IntelStore(intel_path)
     try:
+        symbols = list(config.settings.universe.core)
+        try:
+            from ..scanner.movers import active_candidate_symbols
+            for s in active_candidate_symbols(config):
+                if s not in symbols:
+                    symbols.append(s)
+        except Exception:
+            pass
         n = 0
-        for symbol in config.settings.universe.core:
+        for symbol in symbols:
             s = _snapshot_symbol(config, journal, broker, store, symbol)
             journal.record_snapshot(cycle=cycle, symbol=symbol, **s)
             n += 1

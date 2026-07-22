@@ -39,7 +39,13 @@ class StubBroker:
         return self._market_open
 
     def list_orders_since(self, since):
-        return self._orders
+        # Mirror Alpaca: `after` filters on submitted_at (not updated_at).
+        out = []
+        for o in self._orders:
+            submitted = getattr(o, "submitted_at", None)
+            if submitted is None or since is None or submitted > since:
+                out.append(o)
+        return out
 
     def submit_order(self, *, symbol, side, qty, order_type, limit_price,
                      stop_loss_price=None, take_profit_price=None, client_order_id=None):

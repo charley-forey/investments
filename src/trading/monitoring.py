@@ -39,24 +39,35 @@ def check_health(journal: Journal, *, max_stale_minutes: float = 60.0,
     last = journal.last_heartbeat()
     last_success = journal.last_successful_cycle()
     last_ts = last["ts"] if last else None
+    success_ts = last_success["ts"] if last_success else None
     dt = _parse(last_ts)
 
     if dt is None:
-        return Health(False, None, None, None, "no heartbeats recorded yet")
+        return Health(False, None, success_ts, None, "no heartbeats recorded yet")
 
     minutes = (now - dt).total_seconds() / 60.0
     if minutes > max_stale_minutes:
-        return Health(False, last_ts, last_success["ts"] if last_success else None,
-                      minutes, f"stale > {max_stale_minutes:.0f}m")
+        return Health(False, last_ts, success_ts, minutes,
+                      f"stale > {max_stale_minutes:.0f}m")
+
+    # Trading is blocked — surface as unhealthy so watchdog/status alert.
+    if journal.kill_switch_active():
+        reason = journal.get_state("kill_switch_reason") or "engaged"
+        return Health(False, last_ts, success_ts, minutes,
+                      f"kill switch active ({reason})")
+
+    halt = (journal.get_state("reconcile_halt") or "").strip()
+    if halt:
+        return Health(False, last_ts, success_ts, minutes,
+                      f"reconcile halt — new entries blocked ({halt})")
 
     # Look for recent error heartbeats.
     errors = [h for h in journal.recent_heartbeats(20) if h["status"] == "error"]
     if errors:
-        return Health(True, last_ts, last_success["ts"] if last_success else None,
-                      minutes, f"alive but {len(errors)} recent error(s)")
+        return Health(True, last_ts, success_ts, minutes,
+                      f"alive but {len(errors)} recent error(s)")
 
-    return Health(True, last_ts, last_success["ts"] if last_success else None,
-                  minutes, "ok")
+    return Health(True, last_ts, success_ts, minutes, "ok")
 
 
 def run_watchdog(config: Config, journal: Journal, *, max_stale_minutes: float = 60.0) -> Health:
@@ -86,8 +97,13 @@ def metrics_snapshot(config: Config, journal: Journal) -> dict:
         "healthy": health.healthy,
         "health": health.summary(),
         "kill_switch": journal.kill_switch_active(),
+        "reconcile_halt": (journal.get_state("reconcile_halt") or "").strip() or None,
         "cycles_24h": len(cycles),
         "cost_24h_usd": round(journal.cost_since(day_ago), 4),
+        "submitted_24h": journal.conn.execute(
+            "SELECT COUNT(*) AS n FROM proposals WHERE status='submitted' AND ts >= ?",
+            (day_ago,),
+        ).fetchone()["n"],
         "pending_approvals": len(journal.pending_approvals()),
         "equity_peak": float(journal.get_state("equity_peak", "0") or 0),
         "live_scale_level": scaling.current_level(journal),
@@ -103,11 +119,24 @@ def daily_summary(config: Config, journal: Journal) -> str:
     cycles = [h for h in journal.recent_heartbeats(100)
               if h["job"].startswith("cycle:") and h["status"] == "end"
               and (h["ts"] or "") >= day_ago]
+    submitted = journal.conn.execute(
+        "SELECT COUNT(*) AS n FROM proposals WHERE status='submitted' AND ts >= ?",
+        (day_ago,),
+    ).fetchone()["n"]
+    cost_per_trade = (cost / submitted) if submitted else None
     lines = [
         f"**Daily summary** — {health.summary()}",
         f"cycles completed (24h): {len(cycles)}",
+        f"submitted trades (24h): {submitted}",
         f"Anthropic cost (24h): ${cost:.2f}",
     ]
+    if cost_per_trade is not None:
+        lines.append(f"cost per submitted trade: ${cost_per_trade:.2f}")
+    halt = (journal.get_state("reconcile_halt") or "").strip()
+    if halt:
+        lines.append(f"⚠️ reconcile halt: {halt}")
+    if journal.kill_switch_active():
+        lines.append(f"🛑 kill switch: {journal.get_state('kill_switch_reason')}")
     pending = journal.pending_approvals()
     if pending:
         lines.append(f"⏳ {len(pending)} order(s) awaiting approval")

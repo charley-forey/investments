@@ -82,12 +82,42 @@ def run_intel_safe() -> None:
     store = IntelStore(config.settings.paths.intel_db)
     try:
         report = ingest_intel(config, store, AlpacaBroker(config))
-        log.info("intel ingest: news+%d sentiment+%d", report.news_saved,
-                 report.sentiment_snapshots)
+        log.info("intel ingest: news+%d social+%d sentiment+%d",
+                 report.news_saved, report.social_saved, report.sentiment_snapshots)
     except Exception:
         log.exception("intel ingest failed")
     finally:
         store.close()
+
+
+def run_movers_safe() -> None:
+    from .broker.alpaca import AlpacaBroker
+    from .scanner.movers import run_movers_scan
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        report = run_movers_scan(config, AlpacaBroker(config), journal=journal)
+        log.info("movers: screened=%d candidates=%d", report.screened, report.candidates)
+    except Exception:
+        log.exception("movers scan failed")
+        journal.heartbeat("movers", status="error", detail="scan failed")
+    finally:
+        journal.close()
+
+
+def run_scanner_learning_safe() -> None:
+    from .scanner.learning import run_scanner_learning
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        report = run_scanner_learning(config, journal)
+        log.info("scanner learning: %s", report.detail)
+    except Exception:
+        log.exception("scanner learning failed")
+    finally:
+        journal.close()
 
 
 def run_calendar_safe() -> None:
@@ -164,6 +194,19 @@ def build_scheduler():
         CronTrigger(day_of_week="mon-fri", hour="8-17",
                     minute=f"*/{sched.intel_every_minutes}"),
         id="intel", max_instances=1)
+    # Deterministic movers / OpportunityScore scan (no LLM).
+    movers_every = getattr(sched, "movers_every_minutes", None) or sched.intraday_scan_every_minutes
+    scheduler.add_job(
+        run_movers_safe,
+        CronTrigger(day_of_week="mon-fri", hour="9-15",
+                    minute=f"*/{movers_every}"),
+        id="movers", max_instances=1)
+    # Weekly scanner weight retune + core promote/demote (after weekend research).
+    scheduler.add_job(
+        run_scanner_learning_safe,
+        CronTrigger(day_of_week=sched.weekend_research_day, hour=wk_h,
+                    minute=min(59, int(wk_m) + 30)),
+        id="scanner_learning", max_instances=1)
     return scheduler
 
 

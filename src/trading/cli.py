@@ -108,6 +108,9 @@ def cmd_status(_args) -> int:
     if journal.kill_switch_active():
         print(f"  reason: {journal.get_state('kill_switch_reason')}")
         print(f"  since:  {journal.get_state('kill_switch_ts')}")
+    halt = (journal.get_state("reconcile_halt") or "").strip()
+    if halt:
+        print(f"reconcile halt: {halt}")
     print(f"trades today: {journal.trades_since(day_start)}/{config.limits.orders.max_new_trades_per_day}")
     print(f"trades this week: {journal.trades_since(week_start)}/{config.limits.orders.max_new_trades_per_week}")
     print(f"day trades (5d, journal): {journal.day_trades_last_n_days(5)}")
@@ -122,7 +125,23 @@ def cmd_status(_args) -> int:
     if last:
         print(f"last successful cycle: {last['ts']} ({last['detail']})")
     day_ago = (now - timedelta(days=1)).isoformat()
-    print(f"Anthropic cost (24h): ${journal.cost_since(day_ago):.2f}")
+    cost_24h = journal.cost_since(day_ago)
+    submitted_24h = journal.conn.execute(
+        "SELECT COUNT(*) AS n FROM proposals WHERE status='submitted' AND ts >= ?",
+        (day_ago,),
+    ).fetchone()["n"]
+    print(f"Anthropic cost (24h): ${cost_24h:.2f}")
+    print(f"submitted trades (24h): {submitted_24h}")
+    if submitted_24h:
+        print(f"cost per submitted trade: ${cost_24h / submitted_24h:.2f}")
+    try:
+        equity = float(journal.conn.execute(
+            "SELECT equity FROM equity_snapshots ORDER BY id DESC LIMIT 1"
+        ).fetchone()["equity"])
+        if equity > 0:
+            print(f"cost as % of equity (24h): {100.0 * cost_24h / equity:.3f}%")
+    except Exception:
+        pass
     return 0
 
 
@@ -161,6 +180,23 @@ def cmd_calendar(_args) -> int:
     for err in report.errors[:5]:
         print(f"  warn: {err}")
     return 0 if report.events_written > 0 or report.symbols_ok > 0 else 1
+
+
+def cmd_notify_test(_args) -> int:
+    """Send a one-shot Discord ping to verify DISCORD_WEBHOOK_URL is wired."""
+    from . import notify
+
+    config = get_config()
+    if not config.secrets.discord_webhook_url:
+        print("DISCORD_WEBHOOK_URL is empty in .env — paste a webhook URL first.")
+        print("See .env.example for setup steps, then re-run: trading notify-test")
+        return 1
+    ok = notify.send(config, "✅ Trading notify-test: Discord webhook is working.")
+    if ok:
+        print("sent — check your Discord channel")
+        return 0
+    print("failed to post (check the webhook URL / network)")
+    return 1
 
 
 def cmd_watchdog(_args) -> int:
@@ -206,14 +242,35 @@ def cmd_run_once(args) -> int:
     return 0
 
 
+def cmd_movers(_args) -> int:
+    """Run one deterministic movers / OpportunityScore scan."""
+    from .scanner.movers import load_candidates, run_movers_scan
+
+    config = get_config()
+    journal = _journal()
+    report = run_movers_scan(config, _broker(), journal=journal)
+    print(f"screened={report.screened} candidates={report.candidates} -> {report.path}")
+    for c in load_candidates(config):
+        print(
+            f"  {c['symbol']:<6} score={c.get('score', 0):5.1f} "
+            f"day={100*float(c.get('day_pct') or 0):+5.1f}% "
+            f"rvol={float(c.get('rvol') or 0):4.1f}x "
+            f"tmpl={c.get('template')} src={c.get('discovery_source')}"
+        )
+    return 0
+
+
 def cmd_stats(_args) -> int:
     from .analytics.lifecycle import stages_summary
     from .analytics.stats import portfolio_summary
+    from .scanner.learning import stats_by_source
 
     config = get_config()
     journal = _journal()
     print(portfolio_summary(journal, config.settings.tax))
     print("\nStrategy stages: " + stages_summary(journal))
+    print()
+    print(stats_by_source(journal))
     return 0
 
 
@@ -538,6 +595,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("stats", help="per-strategy performance and lifecycle stages").set_defaults(
         fn=cmd_stats
     )
+    sub.add_parser(
+        "movers", help="run one deterministic movers / OpportunityScore scan",
+    ).set_defaults(fn=cmd_movers)
 
     bt = sub.add_parser("backtest", help="backtest a reference strategy on a symbol")
     bt.add_argument("symbol")
@@ -616,6 +676,9 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("watchdog", help="check daemon health, alert if stale").set_defaults(
         fn=cmd_watchdog
     )
+    sub.add_parser(
+        "notify-test", help="send a one-shot Discord ping to verify the webhook",
+    ).set_defaults(fn=cmd_notify_test)
     sub.add_parser("backup", help="back up the journal database").set_defaults(fn=cmd_backup)
 
     sub.add_parser("status", help="kill switch / budgets / queue").set_defaults(fn=cmd_status)

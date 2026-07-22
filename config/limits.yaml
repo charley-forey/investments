@@ -1,24 +1,27 @@
 # Hard limits enforced by the guardrail engine (pure Python — the LLM cannot bypass these).
 # All percentage limits are percent of current account equity, so they scale with the account.
+# Tuned for a $50k paper/live target: 10% position = $5k, 1% risk/trade = $500,
+# 3% daily kill = $1,500. Reset the Alpaca paper account to $50k so equity matches.
 
 mode: paper            # paper | live. Live also requires ALPACA_LIVE_* keys in .env.
 
 position:
   max_position_pct: 10.0        # max % of equity in any single position
-  max_position_usd: 5000.0      # absolute cap per position, whichever is smaller
+  max_position_usd: 5000.0      # absolute cap per position, whichever is smaller ($50k * 10%)
   max_open_positions: 8
   risk_per_trade_pct: 1.0       # sizing: max % of equity risked per trade (stop distance / max loss)
 
 orders:
-  max_order_notional_usd: 5000.0
+  max_order_notional_usd: 5000.0  # matches max_position_usd for $50k account
   max_new_trades_per_day: 5
   max_new_trades_per_week: 15
   allow_market_orders: false    # limit orders only unless explicitly allowed
-  stale_order_ttl_minutes: 30   # cancel unfilled working orders older than this
+  stale_order_ttl_minutes: 30   # cancel unfilled *entry* orders older than this (not bracket legs)
   bracket_default_target_r: 2.0 # take-profit at N x risk when no target given
 
 portfolio:
-  max_gross_exposure_pct: 150.0     # sum of |position value| as % of equity
+  # Tier 1: keep gross <= 100% while proving edge; Tier 2 may use up to 150% margin.
+  max_gross_exposure_pct: 100.0     # sum of |position value| as % of equity
   max_positions_per_underlying: 2   # cap concentration in one name
   drawdown_circuit_pct: 15.0        # peak-to-trough equity drawdown halt (0 = off)
   elevated_vol_gross_scale: 0.5     # scale the gross-exposure cap in high-vol regimes

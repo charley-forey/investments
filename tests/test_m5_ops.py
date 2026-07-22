@@ -111,6 +111,22 @@ class TestHealth:
         assert h.healthy
         assert "error" in h.reason
 
+    def test_reconcile_halt_is_unhealthy(self, tmp_path):
+        journal = Journal(tmp_path / "j.db")
+        journal.heartbeat("cycle:intraday", status="end", detail="ok")
+        journal.set_state("reconcile_halt", "AAPL: broker=15 journal_lots=0")
+        h = check_health(journal, max_stale_minutes=60)
+        assert not h.healthy
+        assert "reconcile halt" in h.reason
+
+    def test_kill_switch_is_unhealthy(self, tmp_path):
+        journal = Journal(tmp_path / "j.db")
+        journal.heartbeat("cycle:intraday", status="end", detail="ok")
+        journal.trip_kill_switch("daily loss")
+        h = check_health(journal, max_stale_minutes=60)
+        assert not h.healthy
+        assert "kill switch" in h.reason
+
 
 class TestBackup:
     def test_backup_creates_and_rotates(self, tmp_path):

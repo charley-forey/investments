@@ -1,14 +1,16 @@
 # Non-safety settings. Safety limits live in limits.yaml.
 
 universe:
-  # starting watch universe; the research agent may propose additions within symbol limits
+  # Mega-caps + liquid mid-caps for a $50k account (ADV/spread still enforced by limits).
   core: [SPY, QQQ, IWM, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AMD, AVGO, MU,
-         CRM, NFLX, JPM, LLY, UNH, XOM, COST, PLTR, COIN, GLD]
+         CRM, NFLX, JPM, LLY, UNH, XOM, COST, PLTR, COIN, GLD,
+         SMCI, DELL, APP, HIMS, SOFI, HOOD, RBLX, NET]
 
 schedule:
   timezone: America/New_York
   premarket_research: "08:30"
   intraday_scan_every_minutes: 15
+  movers_every_minutes: 15
   postclose_review: "16:30"
   weekend_research_day: sat
   weekend_research_time: "10:00"
@@ -28,14 +30,23 @@ paths:
 agents:
   model: claude-opus-4-8
   max_tokens: 16000
-  max_daily_cost_usd: 15.0       # pause agent cycles if 24h Anthropic spend hits this (0=off)
+  max_daily_cost_usd: 8.0       # pause agent cycles if 24h Anthropic spend hits this (0=off)
   max_proposals_per_cycle: 2
+  max_proposals_intraday: 1     # one idea per gated scan — quality over quantity
   max_tool_iterations: 25
+  max_tool_iterations_intraday: 12  # cut second-guessing loops on cheap scans
   bars_lookback_days: 30
   news_limit: 10
   options_chain_strikes: 5          # strikes each side of the money
   options_chain_max_dte: 60
   redteam_confidence_threshold: 0.7  # adversarial pass on high-conviction drafts (1.0=off)
+  trigger_gate_enabled: true         # skip LLM on calm no-signal intraday cycles
+  # Sonnet for intraday (tool-driven, guardrail-backed); Opus for research depth.
+  model_by_cycle:
+    intraday: claude-sonnet-4-6
+    premarket: claude-opus-4-8
+    postclose: claude-opus-4-8
+    weekend: claude-opus-4-8
   # Per-role tool assignment. Registry tools are listed by name; `web_search` is a
   # server-side Anthropic pseudo-tool (not in TOOL_SCHEMAS). `all` expands to every
   # registry tool; `{same_as: role}` copies another role's list. propose_order is

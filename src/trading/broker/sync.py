@@ -36,15 +36,17 @@ def _parse_ts(value) -> datetime:
     return datetime.fromisoformat(str(value))
 
 
+# Alpaca's `after` filters on submitted_at, not updated_at. A tight watermark
+# advanced past an order's submission time permanently hides later fills — the
+# day-one AAPL bug. Always query a wide rolling lookback; synced_qty:* makes
+# re-processing idempotent.
+_FILL_LOOKBACK_DAYS = 3
+
+
 def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
     report = SyncReport()
 
-    watermark = journal.get_state("last_fill_sync")
-    since = (
-        _parse_ts(watermark)
-        if watermark
-        else datetime.now(timezone.utc) - timedelta(days=7)
-    )
+    since = datetime.now(timezone.utc) - timedelta(days=_FILL_LOOKBACK_DAYS)
 
     orders = with_retry(lambda: broker.list_orders_since(since),
                         config=RetryConfig(retries=2))
@@ -187,9 +189,19 @@ def _close_lots_hifo(journal: Journal, symbol: str, qty: float, price: float,
     return {"closed": closed, "day_trade": day_trade}
 
 
+def _is_cancellable_entry(order) -> bool:
+    """Only cancel entry orders we submitted (client_order_id prop-<id>).
+    Bracket stop/target legs get broker-generated IDs — never cancel those."""
+    status = str(getattr(order, "status", "") or "").lower()
+    if "held" in status:
+        return False
+    coid = str(getattr(order, "client_order_id", None) or "")
+    return coid.startswith("prop-")
+
+
 def cancel_stale_orders(config: Config, journal: Journal, broker) -> int:
-    """Cancel working (unfilled) orders older than the configured TTL, so stale
-    limit orders don't sit all day. Returns the number cancelled."""
+    """Cancel working (unfilled) *entry* orders older than the configured TTL.
+    Protective bracket legs are never cancelled. Returns the number cancelled."""
     ttl = config.limits.orders.stale_order_ttl_minutes
     if ttl <= 0:
         return 0
@@ -201,6 +213,8 @@ def cancel_stale_orders(config: Config, journal: Journal, broker) -> int:
         journal.heartbeat("cancel_stale", status="error", detail=str(e))
         return 0
     for order in orders:
+        if not _is_cancellable_entry(order):
+            continue
         submitted = _parse_ts(getattr(order, "submitted_at", None)
                               or getattr(order, "created_at", None))
         if submitted <= cutoff:

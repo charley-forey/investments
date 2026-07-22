@@ -144,14 +144,59 @@ class TestStaleOrders:
         journal = Journal(tmp_path / "j.db")
         old = StubOrder(id="old", symbol="AAPL", side="buy", filled_qty=0,
                         filled_avg_price=0, status="new",
+                        client_order_id="prop-1",
                         submitted_at=datetime.now(timezone.utc) - timedelta(hours=2))
         fresh = StubOrder(id="fresh", symbol="MSFT", side="buy", filled_qty=0,
-                          filled_avg_price=0, status="new")
+                          filled_avg_price=0, status="new",
+                          client_order_id="prop-2")
         broker = StubBroker(make_account())
         broker._open_orders = [old, fresh]
         n = cancel_stale_orders(config, journal, broker)
         assert n == 1
         assert broker.canceled == ["old"]
+
+    def test_spares_bracket_legs_without_prop_id(self, tmp_path):
+        """Day-one bug: sweeper cancelled AAPL stop/target legs. Bracket children
+        use broker-generated client IDs and must survive the TTL sweep."""
+        config = make_config()
+        journal = Journal(tmp_path / "j.db")
+        stop_leg = StubOrder(
+            id="stop-leg", symbol="AAPL", side="sell", filled_qty=0,
+            filled_avg_price=0, status="new",
+            client_order_id="abc123-broker-generated",
+            submitted_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        target_leg = StubOrder(
+            id="tp-leg", symbol="AAPL", side="sell", filled_qty=0,
+            filled_avg_price=0, status="new",
+            client_order_id=None,
+            submitted_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        stale_entry = StubOrder(
+            id="entry", symbol="MSFT", side="buy", filled_qty=0,
+            filled_avg_price=0, status="new",
+            client_order_id="prop-9",
+            submitted_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        broker = StubBroker(make_account())
+        broker._open_orders = [stop_leg, target_leg, stale_entry]
+        n = cancel_stale_orders(config, journal, broker)
+        assert n == 1
+        assert broker.canceled == ["entry"]
+
+    def test_spares_held_status(self, tmp_path):
+        config = make_config()
+        journal = Journal(tmp_path / "j.db")
+        held = StubOrder(
+            id="held", symbol="AAPL", side="buy", filled_qty=0,
+            filled_avg_price=0, status="held",
+            client_order_id="prop-3",
+            submitted_at=datetime.now(timezone.utc) - timedelta(hours=2),
+        )
+        broker = StubBroker(make_account())
+        broker._open_orders = [held]
+        assert cancel_stale_orders(config, journal, broker) == 0
+        assert getattr(broker, "canceled", []) == []
 
 
 class TestReconciliationGate:

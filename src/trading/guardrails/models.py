@@ -36,6 +36,8 @@ class OrderProposal(BaseModel):
     max_loss_usd: float | None = None       # agent's stated max loss (recomputed independently)
     confidence: float | None = Field(default=None, ge=0, le=1)
     reduces_position: bool = False          # closing/trimming an existing position
+    discovery_source: str | None = None     # 'core' | 'scanner'
+    score_at_entry: float | None = None     # OpportunityScore when proposed
 
     def model_post_init(self, __context) -> None:
         self.symbol = self.symbol.upper()

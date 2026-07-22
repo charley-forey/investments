@@ -144,12 +144,44 @@ class Orchestrator:
         except Exception as e:
             report.notes.append(f"manage_positions failed: {e}")
 
+        # Cost gate: skip the expensive strategy LLM unless a trigger fires,
+        # a position needs attention, or we're in a forced situational-awareness slot.
+        from .triggers import should_run_intraday_llm
+        gate = should_run_intraday_llm(self.config, self.journal, self.broker, account)
+        if not gate.run_llm:
+            report.skipped = gate.reason
+            report.notes.append(f"LLM skipped: {gate.reason}")
+            try:
+                from .analytics.snapshot import snapshot_universe
+                snapshot_universe(self.config, self.journal, self.broker, cycle="intraday")
+            except Exception as e:
+                report.notes.append(f"snapshot failed: {e}")
+            return
+        report.notes.append(f"LLM gate: {gate.reason}")
+
         stages = lifecycle.stages_summary(self.journal)
         perf = portfolio_summary(self.journal, self.config.settings.tax)
         extra = f"Strategy stages: {stages}\n{perf}"
         digest = self._intel_digest()
         if digest:
             extra += f"\n\nMarket intelligence digest:\n{digest}"
+        try:
+            from .scanner.movers import candidate_context, load_candidates
+            cand = candidate_context(self.config)
+            if cand:
+                extra += f"\n\n{cand}"
+                templates = {
+                    c.get("template") for c in load_candidates(self.config)[:5]
+                    if c.get("template")
+                }
+                if templates:
+                    extra += (
+                        "\nSuggested playbook templates for candidates "
+                        f"(prefer these strategy_tags when they fit): "
+                        f"{', '.join(sorted(t for t in templates if t))}."
+                    )
+        except Exception as e:
+            report.notes.append(f"candidate context failed: {e}")
         session = self._run_strategy(
             self.client, self.config, self.journal, self.broker, account,
             cycle="intraday", extra_context=extra,
@@ -176,6 +208,8 @@ class Orchestrator:
             report.notes.append(f"snapshot failed: {e}")
 
         for draft in session.drafts:
+            # Tag discovery source from active scanner candidates / core universe.
+            self._tag_discovery(draft)
             # Volatility-targeted sizing: shrink an oversized stock entry to a
             # risk-appropriate size (never grow it), then apply a drawdown throttle.
             self._risk_size(draft, account, report)
@@ -228,6 +262,26 @@ class Orchestrator:
                 report.pending_approval += 1
             else:
                 report.rejected += 1
+
+    def _tag_discovery(self, draft: OrderProposal) -> None:
+        """Stamp discovery_source + score_at_entry from the scanner candidate pool."""
+        if getattr(draft, "discovery_source", None):
+            return
+        try:
+            from .scanner.movers import load_candidates
+            core = {s.upper() for s in self.config.settings.universe.core}
+            for c in load_candidates(self.config):
+                if str(c.get("symbol", "")).upper() == draft.symbol.upper():
+                    draft.discovery_source = c.get("discovery_source") or "scanner"
+                    draft.score_at_entry = float(c.get("score") or 0)
+                    # Prefer scanner template as strategy_tag when still generic.
+                    tmpl = c.get("template")
+                    if tmpl and draft.strategy_tag in ("manual", "t", ""):
+                        draft.strategy_tag = tmpl
+                    return
+            draft.discovery_source = "core" if draft.symbol.upper() in core else "scanner"
+        except Exception:
+            pass
 
     def _manage_positions(self, account, report: CycleReport, market_open: bool) -> None:
         """Deterministic exits (no LLM): stop/target/trailing/time/expiry rules from
@@ -367,7 +421,7 @@ class Orchestrator:
         return False
 
     def _record_usage(self, cycle: str, agent: str, usage, report: CycleReport) -> None:
-        model = self.config.settings.agents.model
+        model = self.config.settings.agents.model_for(agent, cycle=cycle)
         cost_usd = cost.estimate_cost(usage, model)
         report.cost_usd += cost_usd
         self.journal.record_usage(
@@ -385,6 +439,8 @@ class Orchestrator:
             legs=[l.model_dump(mode="json") for l in draft.legs] or None,
             thesis=draft.thesis, expected_edge_usd=draft.expected_edge_usd,
             max_loss_usd=draft.max_loss_usd, confidence=draft.confidence,
+            discovery_source=getattr(draft, "discovery_source", None),
+            score_at_entry=getattr(draft, "score_at_entry", None),
         )
         self.journal.record_verdict(
             pid, source=source, verdict="veto",
@@ -514,8 +570,28 @@ class Orchestrator:
             self.client, self.config, self.journal, self.broker, account, cycle=cycle
         )
         self._record_usage(cycle, "strategy", session.usage, report)
-        self._write_memory("watchlist.md", cycle, session.final_text)
+        # Fold overnight scanner leftovers into the premarket user context was already
+        # available via tools; append candidate digest to the watchlist note.
+        note = session.final_text
+        if cycle == "premarket":
+            try:
+                from .scanner.movers import candidate_context, run_movers_scan
+                # Fresh premarket scan so the watchlist agent + note see overnight movers.
+                run_movers_scan(self.config, self.broker, journal=self.journal)
+                cand = candidate_context(self.config)
+                if cand:
+                    note = f"{note}\n\n---\n{cand}"
+            except Exception as e:
+                report.notes.append(f"premarket movers failed: {e}")
+        self._write_memory("watchlist.md", cycle, note)
         report.notes.append("wrote memory/watchlist.md")
+        if cycle == "premarket":
+            try:
+                from .triggers import extract_and_save_from_watchlist
+                triggers = extract_and_save_from_watchlist(self.config, note)
+                report.notes.append(f"parsed {len(triggers)} intraday trigger(s)")
+            except Exception as e:
+                report.notes.append(f"trigger parse failed: {e}")
 
     def _intel_digest(self) -> str:
         import os

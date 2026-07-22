@@ -26,7 +26,14 @@ def ingest_intel(config: Config, store: IntelStore, broker, provider=None) -> In
 
     provider = provider or get_provider(config)
     report = IngestReport()
-    universe = config.settings.universe.core
+    universe = list(config.settings.universe.core)
+    try:
+        from ..scanner.movers import active_candidate_symbols
+        for s in active_candidate_symbols(config):
+            if s not in universe:
+                universe.append(s)
+    except Exception:
+        pass
 
     for symbol in universe:
         # News (always available via the broker).
@@ -48,8 +55,20 @@ def ingest_intel(config: Config, store: IntelStore, broker, provider=None) -> In
                                mention_count=sig.reddit_mentions,
                                source_mix=f"news+reddit({sig.reddit_mentions})")
         report.sentiment_snapshots += 1
-        # Store notable headlines as social/news context is already saved above;
-        # reddit titles aren't returned by the signal, so mentions are the signal here.
+        # Persist Reddit posts when the provider returned them (confirmation overlay).
+        posts = getattr(sig, "reddit_posts", None) or []
+        if posts:
+            social = [
+                SocialPost(
+                    symbol=symbol,
+                    text=p.get("title") or "",
+                    platform="reddit",
+                    author=p.get("author") or "",
+                    score=int(p.get("score") or 0),
+                )
+                for p in posts if p.get("title")
+            ]
+            report.social_saved += store.save_social(social)
 
     report.symbols = len(universe)
     return report

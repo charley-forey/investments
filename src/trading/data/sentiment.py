@@ -30,6 +30,7 @@ class SentimentSignal:
     reddit_score: int
     polarity: float           # -1..1 crude lean from headlines + reddit titles
     top_headlines: list[str]
+    reddit_posts: list[dict] | None = None  # {title, score, author, subreddit}
 
     def summary(self) -> str:
         lean = "positive" if self.polarity > 0.15 else "negative" if self.polarity < -0.15 else "neutral"
@@ -92,6 +93,7 @@ def get_symbol_sentiment(
     # Reddit (optional).
     mentions = 0
     score = 0
+    reddit_posts: list[dict] = []
     client = reddit if reddit is not None else _reddit_client(config)
     if client is not None:
         try:
@@ -100,8 +102,15 @@ def get_symbol_sentiment(
                     title = getattr(post, "title", "")
                     if symbol in title.upper() or f"${symbol}" in title.upper():
                         mentions += 1
-                        score += int(getattr(post, "score", 0) or 0)
+                        pscore = int(getattr(post, "score", 0) or 0)
+                        score += pscore
                         texts.append(title)
+                        reddit_posts.append({
+                            "title": title,
+                            "score": pscore,
+                            "author": str(getattr(post, "author", "") or ""),
+                            "subreddit": sub,
+                        })
         except Exception:
             pass
 
@@ -111,6 +120,7 @@ def get_symbol_sentiment(
         reddit_score=score,
         polarity=round(_polarity(texts), 3),
         top_headlines=headlines,
+        reddit_posts=reddit_posts,
     )
 
 

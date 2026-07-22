@@ -28,8 +28,10 @@ CREATE TABLE IF NOT EXISTS proposals (
     expected_edge_usd REAL,
     max_loss_usd REAL,
     confidence REAL,
-    status TEXT NOT NULL DEFAULT 'proposed'
+    status TEXT NOT NULL DEFAULT 'proposed',
         -- proposed | rejected | vetoed | pending_approval | submitted | filled | canceled
+    discovery_source TEXT,
+    score_at_entry REAL
 );
 
 CREATE TABLE IF NOT EXISTS verdicts (
@@ -224,6 +226,11 @@ class Journal:
             "target_hit INTEGER NOT NULL DEFAULT 0, "
             "verdict_was_right INTEGER, notes TEXT)"
         )
+        prop_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(proposals)")}
+        if "discovery_source" not in prop_cols:
+            self.conn.execute("ALTER TABLE proposals ADD COLUMN discovery_source TEXT")
+        if "score_at_entry" not in prop_cols:
+            self.conn.execute("ALTER TABLE proposals ADD COLUMN score_at_entry REAL")
 
     def close(self) -> None:
         self.conn.close()
@@ -247,18 +254,20 @@ class Journal:
         expected_edge_usd: float | None = None,
         max_loss_usd: float | None = None,
         confidence: float | None = None,
+        discovery_source: str | None = None,
+        score_at_entry: float | None = None,
     ) -> int:
         cur = self.conn.execute(
             """INSERT INTO proposals
                (ts, agent, strategy_tag, symbol, asset_class, side, qty, order_type,
                 limit_price, stop_price, legs_json, thesis, expected_edge_usd,
-                max_loss_usd, confidence)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                max_loss_usd, confidence, discovery_source, score_at_entry)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 utcnow(), agent, strategy_tag, symbol.upper(), asset_class, side, qty,
                 order_type, limit_price, stop_price,
                 json.dumps(legs) if legs else None, thesis, expected_edge_usd,
-                max_loss_usd, confidence,
+                max_loss_usd, confidence, discovery_source, score_at_entry,
             ),
         )
         self.conn.commit()

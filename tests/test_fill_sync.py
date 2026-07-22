@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from conftest import make_config
 
@@ -81,3 +81,31 @@ def test_reconciliation_warns_on_drift(tmp_path):
     ]), orders=[])
     report = sync_fills(config, journal, broker)
     assert any("MSFT" in w for w in report.reconciliation_warnings)
+
+
+def test_fill_recorded_when_watermark_past_submission(tmp_path):
+    """Regression (day-one AAPL): watermark advanced past submitted_at must not
+    hide a fill that lands later. Rolling lookback + Alpaca-style submitted_at
+    filter must still see the order."""
+    config = make_config()
+    journal = Journal(tmp_path / "j.db")
+    submitted = datetime.now(timezone.utc) - timedelta(minutes=5)
+    filled_at = submitted + timedelta(seconds=12)
+    # Simulate the bug: watermark sits between submission and fill.
+    journal.set_state("last_fill_sync", (submitted + timedelta(seconds=1)).isoformat())
+    order = StubOrder(
+        id="aapl-day1", symbol="AAPL", side="buy", filled_qty=15,
+        filled_avg_price=324.74, submitted_at=submitted, updated_at=filled_at,
+        client_order_id="prop-5",
+    )
+    broker = StubBroker(make_account(positions=[
+        PositionView(symbol="AAPL", qty=15, avg_entry_price=324.74,
+                     market_value=4871.1, unrealized_pl=-3.6)
+    ]), orders=[order])
+
+    report = sync_fills(config, journal, broker)
+    assert report.fills_recorded == 1
+    assert report.lots_opened == 1
+    assert len(journal.open_lots("AAPL")) == 1
+    # Halt should clear once journal matches broker.
+    assert not journal.get_state("reconcile_halt")

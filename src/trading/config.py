@@ -132,6 +132,7 @@ class Schedule(BaseModel):
     weekend_research_day: str = "sat"
     weekend_research_time: str = "10:00"
     intel_every_minutes: int = 10          # continuous market-intelligence ingestion
+    movers_every_minutes: int = 15         # deterministic opportunity scanner
 
 
 class TaxRates(BaseModel):
@@ -177,7 +178,9 @@ class AgentSettings(BaseModel):
     model: str = "claude-opus-4-8"
     max_tokens: int = 16000
     max_proposals_per_cycle: int = 2
+    max_proposals_intraday: int | None = None  # None -> max_proposals_per_cycle
     max_tool_iterations: int = 25
+    max_tool_iterations_intraday: int | None = None  # None -> max_tool_iterations
     bars_lookback_days: int = 30
     news_limit: int = 10
     options_chain_strikes: int = 5
@@ -193,6 +196,12 @@ class AgentSettings(BaseModel):
     risk_model: str | None = None
     scoring_model: str | None = None
     redteam_model: str | None = None
+    # Per-cycle model overrides (e.g. sonnet for intraday, opus for research).
+    # Checked before per-role overrides when cycle is provided to model_for.
+    model_by_cycle: dict[str, str] = Field(default_factory=dict)
+    # Deterministic pre-gate: skip the intraday LLM unless a trigger fires.
+    # False in code default (tests); settings.yaml enables it in prod.
+    trigger_gate_enabled: bool = False
     # Adversarial red-team pass triggers at/above this proposal confidence.
     # 1.0 effectively disables it (code default); settings.yaml sets 0.7 in prod.
     redteam_confidence_threshold: float = 1.0
@@ -205,8 +214,20 @@ class AgentSettings(BaseModel):
     tools: dict[str, Any] = Field(default_factory=dict)
     web_search_max_uses: dict[str, int] = Field(default_factory=dict)
 
-    def model_for(self, role: str) -> str:
+    def model_for(self, role: str, cycle: str | None = None) -> str:
+        if cycle and self.model_by_cycle.get(cycle):
+            return self.model_by_cycle[cycle]
         return getattr(self, f"{role}_model", None) or self.model
+
+    def proposals_cap(self, cycle: str = "intraday") -> int:
+        if cycle == "intraday" and self.max_proposals_intraday is not None:
+            return self.max_proposals_intraday
+        return self.max_proposals_per_cycle
+
+    def tool_iterations(self, cycle: str = "intraday") -> int:
+        if cycle == "intraday" and self.max_tool_iterations_intraday is not None:
+            return self.max_tool_iterations_intraday
+        return self.max_tool_iterations
 
     def tools_for(self, role: str):
         """Resolve registry + web_search tools for an agent role."""

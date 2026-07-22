@@ -103,9 +103,10 @@ def run_strategy_session(
         user_message = f"{prompts.WEEKEND_RESEARCH_PROMPT}\nUniverse: {universe}"
     else:
         failures = _recent_failures_context(journal)
+        cap = config.settings.agents.proposals_cap("intraday")
         user_message = (
             f"Intraday scan. Universe: {universe}. "
-            f"You may register at most {config.settings.agents.max_proposals_per_cycle} "
+            f"You may register at most {cap} "
             f"proposals this cycle. Begin by reading memory, journal, and account state. "
             f"FIRST review every open position for exit conditions — hit stop, thesis "
             f"invalidated, profit target reached, or an option nearing expiry — and "
@@ -119,12 +120,12 @@ def run_strategy_session(
 
     return run_agent(
         client,
-        model=config.settings.agents.model_for("strategy"),
+        model=config.settings.agents.model_for("strategy", cycle=cycle),
         max_tokens=config.settings.agents.max_tokens,
         system_prompt=prompts.STRATEGY_SYSTEM,
         registry=registry,
         user_message=user_message,
-        max_iterations=config.settings.agents.max_tool_iterations,
+        max_iterations=config.settings.agents.tool_iterations(cycle),
         journal=journal,
         agent_name="strategy",
         web_search=resolved.web_search,
