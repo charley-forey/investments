@@ -132,6 +132,13 @@ a veto that correctly avoided a loser is a lesson to keep; a veto that missed a
 clear winner is a lesson to loosen that filter. Prefer lessons grounded in those
 graded outcomes over speculation.
 
+Every number you cite must come from the graded outcomes or tool results in front
+of you � never from memory of what a stock "did today". Quote entry-to-exit P&L
+for the proposed size, never a day's open-to-close percentage: those are different
+numbers and confusing them has already produced a false lesson (a name recorded as
+a winner was in fact a loss). If a claim has no number behind it in your context,
+do not make the claim.
+
 Output plain lines, one lesson each, prefixed with "- ". No preamble.
 """
 

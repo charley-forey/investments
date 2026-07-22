@@ -36,6 +36,24 @@ def run_cycle_safe(cycle: str) -> None:
         journal.close()
 
 
+def run_protect_safe() -> None:
+    """Backstop: every position carries a live GTC stop. Runs at daemon start and
+    before the close, so a cancelled/expired bracket leg can't leave a position
+    naked overnight."""
+    from .broker.sync import ensure_protective_stops
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        n = ensure_protective_stops(config, journal, AlpacaBroker(config))
+        log.info("protective stops: attached %d", n)
+    except Exception:
+        log.exception("protective stop sweep failed")
+        journal.heartbeat("protective_stops", status="error", detail="sweep failed")
+    finally:
+        journal.close()
+
+
 def run_watchdog_safe() -> None:
     from .monitoring import run_watchdog
 
@@ -180,6 +198,10 @@ def build_scheduler():
         CronTrigger(day_of_week=sched.weekend_research_day, hour=wk_h, minute=wk_m),
         args=["weekend"], id="weekend", max_instances=1,
     )
+    # Protective-stop backstop 5 minutes before the close.
+    scheduler.add_job(run_protect_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="15", minute="55"),
+                      id="protect", max_instances=1)
     # Liveness: watchdog every 30 min; daily summary after the close; nightly backup.
     scheduler.add_job(run_watchdog_safe, CronTrigger(minute="*/30"),
                       id="watchdog", max_instances=1)
@@ -214,6 +236,7 @@ def run_daemon() -> int:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     scheduler = build_scheduler()
+    run_protect_safe()  # never start the daemon with an unprotected position
     log.info("scheduler starting; jobs: %s", [j.id for j in scheduler.get_jobs()])
     try:
         scheduler.start()

@@ -245,6 +245,7 @@ class Settings(BaseModel):
     tax: TaxRates
     paths: Paths
     agents: AgentSettings
+    data_feed: str = "iex"   # 'sip' (consolidated tape) needs Algo Trader Plus
 
 
 class Secrets(BaseModel):
