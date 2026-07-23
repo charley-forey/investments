@@ -109,10 +109,48 @@ values stay reachable in the drill-down sheet and the table view. The side drawe
 becomes a bottom sheet. Long tables are page-capped with filter and "show more":
 an 800-row table is a 40,000px page on a phone and nobody scrolls it.
 
+## Was the agent right?
+
+P&L only grades the trades the agent took. The Performance view also grades the
+calls it *declined*: every vetoed or rejected proposal is replayed against what
+the price actually did, so a veto that saved money and a veto that cost an entry
+are told apart. `/api/outcomes` joins those counterfactual grades with realized
+scores and the confidence-calibration report.
+
+The important part is the empty state. Both tables start empty for legitimate
+reasons — nothing has closed, or no proposal has aged past the grading threshold —
+so the payload reports what the pipeline is waiting on, per item, with the date
+each becomes gradable and whether the broker is reachable. "No data" and "not
+eligible yet" are different answers and the UI says which. A button grades
+whatever is ready without waiting for the end-of-day cycle; it is deterministic
+and makes no model calls.
+
+## Scale
+
+The read paths that grow without bound are indexed (`Journal._indexes`), and the
+two that did work proportional to data size were moved server-side:
+
+- **`/api/trades`** issued one fills query per order. Now two queries total,
+  regardless of order count.
+- **`/api/signals`** shipped every snapshot to the browser so it could reduce
+  them. Now `/api/signals/latest` does the latest-per-symbol reduction in SQL, and
+  `/api/signals/grid` buckets the heatmap in SQLite and returns the shape the
+  chart consumes. The metric name is interpolated into SQL, so it is whitelisted.
+
+## Auth
+
+The API fails closed. Loopback with no token configured stays open — that is the
+existing single-user local workflow. Set `DASHBOARD_TOKEN` and every `/api`
+request must present it (`X-Dashboard-Token`, `Bearer`, or cookie, compared with
+`compare_digest`). A non-loopback request without a configured token is refused
+outright, and `trading dashboard` refuses to bind a non-loopback host without one.
+
+The shell and its static assets stay unauthenticated — they hold no data, and the
+page has to load in order to ask for the token. This is one shared secret, not
+identity; multi-user accounts and roles remain an M13 item.
+
 ## Deliberately not built
 
-- **No auth.** Still localhost-only and unauthenticated, as before. Remote access
-  needs auth first — the action endpoints submit orders.
 - **No WebSocket.** 20s polling is enough at this cadence; live streaming is worth
   it only once intraday tick data drives the page.
 - **No build step, no framework, no dependency.** Four static files. Revisit if
@@ -121,3 +159,5 @@ an 800-row table is a 40,000px page on a phone and nobody scrolls it.
   virtualisation when a table genuinely needs thousands of visible rows.
 - **Bars are cached daily-only.** Intraday timeframes pass through to the broker
   each request; `bars` is keyed by `(symbol, date)`.
+- **No server-side pagination.** Endpoints take a `limit`; the cursor pagination
+  that a hundred thousand orders would need can wait until there are.

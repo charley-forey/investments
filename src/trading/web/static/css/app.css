@@ -423,7 +423,9 @@ td .clip { display: block; max-width: 46ch; overflow: hidden; text-overflow: ell
 .drawer > header { display: flex; align-items: center; gap: 10px; padding: 15px 18px;
   border-bottom: 1px solid var(--hairline); }
 .drawer > header h2 { font-size: 16px; }
-.drawer .body { padding: 18px; overflow: auto; flex: 1; display: grid; gap: 14px; }
+/* align-content:start — otherwise a short panel spreads its rows down the sheet. */
+.drawer .body { padding: 18px; overflow: auto; flex: 1; display: grid; gap: 14px;
+  align-content: start; }
 @media (max-width: 720px) {
   .drawer { top: auto; bottom: 0; right: 0; left: 0; width: auto; height: 92dvh;
     border-left: 0; border-top: 1px solid var(--hairline);

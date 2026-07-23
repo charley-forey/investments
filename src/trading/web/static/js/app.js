@@ -13,6 +13,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c =>
   ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
 /* ==========================================================================
    State
@@ -40,19 +41,60 @@ const inRange = ts => { const t = +new Date(ts); return t >= rangeStart() && t <
    API — one fetch per URL in flight; failures become toasts, not blank pages
    ======================================================================== */
 const inflight = {};
+/** The token, when the console is served with one. Kept in localStorage and sent
+    on every API call; a 401 re-prompts rather than blanking the page. */
+const authHeaders = () => localStorage.dashToken
+  ? { 'X-Dashboard-Token': localStorage.dashToken } : {};
+let promptingAuth = false;
+
 async function api(path, opts) {
   if (!opts && inflight[path]) return inflight[path];
-  const p = fetch(path, opts).then(async r => {
+  const o = Object.assign({}, opts, {
+    headers: Object.assign({}, (opts && opts.headers) || {}, authHeaders()),
+  });
+  const p = fetch(path, o).then(async r => {
+    if (r.status === 401 || r.status === 403) { promptAuth(r.status); throw new Error('not authorised'); }
     if (!r.ok) throw new Error(`${r.status} ${await r.text().catch(() => '')}`.slice(0, 180));
     return r.json();
   }).finally(() => { delete inflight[path]; });
   if (!opts) inflight[path] = p;
-  return p.catch(e => { toast(`${path} — ${e.message}`, 'critical'); throw e; });
+  return p.catch(e => {
+    if (e.message !== 'not authorised') toast(`${path} — ${e.message}`, 'critical');
+    throw e;
+  });
 }
 const post = (path, body) => api(path, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify(body || {}),
 });
+
+function promptAuth(status) {
+  if (promptingAuth) return;
+  promptingAuth = true;
+  openDrawer('Authentication required', `
+    <p class="hint">${status === 403
+      ? 'This console is being reached from a non-loopback address. Remote access needs a token: start it with <code>DASHBOARD_TOKEN</code> set in the environment, then paste the same value here.'
+      : 'The token is missing or wrong. Paste the value of <code>DASHBOARD_TOKEN</code> from the environment the dashboard was started in.'}</p>
+    <p class="hint">These endpoints approve proposals, submit orders and rewrite the
+      risk limits, so they are not served unauthenticated off this machine.</p>
+    <div class="row">
+      <input id="tokBox" type="password" placeholder="dashboard token" style="flex:1"
+             autocomplete="current-password">
+      <button class="primary" onclick="saveToken()">Unlock</button>
+    </div>`);
+  setTimeout(() => {
+    const b = $('#tokBox');
+    if (b) { b.focus(); b.onkeydown = e => { if (e.key === 'Enter') saveToken(); }; }
+  }, 60);
+}
+function saveToken() {
+  const v = ($('#tokBox') || {}).value;
+  if (!v) return;
+  localStorage.dashToken = v.trim();
+  promptingAuth = false;
+  closeDrawer();
+  render();
+}
 /** Fetch a set of endpoints; a failure yields null for that slot, never a dead view. */
 async function pull(map) {
   const keys = Object.keys(map);
@@ -530,21 +572,21 @@ async function viewPortfolio(main) {
    VIEW · Markets — price charts, signals, news
    ======================================================================== */
 async function viewMarkets(main) {
+  // The grid and the latest-per-symbol reduction both happen in SQLite now; the
+  // browser never holds the raw snapshot history just to bucket it.
   const d = await pull({
-    sig: '/api/signals?limit=400', pos: '/api/positions', watch: '/api/watchlist',
+    rows: '/api/signals/latest', pos: '/api/positions', watch: '/api/watchlist',
     news: '/api/news?limit=60', sent: '/api/sentiment', intel: '/api/intel',
+    grid: `/api/signals/grid?metric=${encodeURIComponent(state.heatMetric)}` +
+      `&days=${RANGE_DAYS[state.range]}&points=24`,
   });
-  const snaps = d.sig || [];
+  const rows = d.rows || [];
   const universe = [...new Set([
     ...((d.pos && d.pos.positions) || []).map(p => p.symbol),
-    ...snaps.map(s => s.symbol),
+    ...rows.map(s => s.symbol),
   ])].filter(Boolean).sort();
   if (!state.symbol && universe.length) state.symbol = universe[0];
-
-  // latest snapshot per symbol
-  const latest = {};
-  snaps.forEach(s => { if (!latest[s.symbol] || s.ts > latest[s.symbol].ts) latest[s.symbol] = s; });
-  const rows = Object.values(latest);
+  const latest = Object.fromEntries(rows.map(r => [r.symbol, r]));
 
   main.innerHTML = `
     <div class="toolbar">
@@ -564,8 +606,9 @@ async function viewMarkets(main) {
         <option value="realized_vol">Realized vol</option>
         <option value="atr_pct">ATR %</option>
         <option value="dist_from_high">Distance off high</option>
-        <option value="_iv_rank">IV rank</option>
-        <option value="_sentiment">News sentiment</option>
+        <option value="iv_rank">IV rank</option>
+        <option value="sentiment">News sentiment</option>
+        <option value="pc_skew">Put/call skew</option>
       </select>
     </div>
     <div class="grid">
@@ -575,7 +618,8 @@ async function viewMarkets(main) {
       ${card({ title: 'Signal heatmap', cls: 'col-12',
         hint: 'every symbol the agent tracked, over time — click a row to open it' })}
       ${card({ title: 'Latest signal snapshot', cls: 'col-12', chart: false, body: '<div id="sigT"></div>' })}
-      ${card({ title: 'News sentiment', cls: 'col-5' })}
+      ${card({ title: 'News sentiment', cls: 'col-5',
+        hint: 'strongest 12 by polarity' })}
       ${card({ title: 'Watchlist', cls: 'col-7', chart: false,
         body: `<div class="prose md">${d.watch && d.watch.markdown
           ? md(d.watch.markdown) : 'No watchlist yet — run a premarket cycle.'}</div>` })}
@@ -612,26 +656,16 @@ async function viewMarkets(main) {
     </div><div class="hint" style="margin-top:10px">As of ${F.dt(q.ts)}</div>`
     : '<p class="empty">No snapshot for this symbol yet.</p>';
 
-  // Heatmap: symbols × recent cycles
+  // Heatmap comes pre-bucketed from the server in the shape the chart consumes.
   const metric = state.heatMetric;
-  const val = s => metric === '_iv_rank' ? (s.iv_rank == null ? null : s.iv_rank / 100)
-    : metric === '_sentiment' ? s.sentiment
-    : (s.features ? s.features[metric] : null);
-  const bySym = {};
-  snaps.filter(s => inRange(s.ts)).forEach(s => (bySym[s.symbol] = bySym[s.symbol] || []).push(s));
-  const stamps = [...new Set(snaps.filter(s => inRange(s.ts)).map(s => s.ts))].sort().slice(-24);
-  const heatRows = Object.entries(bySym).sort().map(([sym, list]) => ({
-    label: sym,
-    cells: stamps.map(t => {
-      const hit = list.find(s => s.ts === t) || list.reduce((a, b) =>
-        Math.abs(+new Date(b.ts) - +new Date(t)) < Math.abs(+new Date(a.ts) - +new Date(t)) ? b : a, list[0]);
-      return { label: F.dt(t), v: hit ? val(hit) : null };
-    }),
-  }));
+  const grid = d.grid || { rows: [], cols: [] };
   V.heat(hosts[1], {
-    rows: heatRows, cols: stamps.map(t => F.date(t)),
-    diverging: metric === 'momentum_20' || metric === '_sentiment' || metric === 'dist_from_high',
-    fmt: v => metric === '_sentiment' ? F.num(v, 2) : F.pct(v, 1),
+    rows: grid.rows.map(r => ({ label: r.label,
+      cells: r.cells.map(c => ({ label: F.dt(c.label), v: c.v })) })),
+    cols: (grid.cols || []).map(t => F.date(t)),
+    diverging: ['momentum_20', 'sentiment', 'dist_from_high', 'pc_skew'].includes(metric),
+    fmt: v => ['sentiment', 'iv_rank', 'last', 'spread_bps'].includes(metric)
+      ? F.num(v, 2) : F.pct(v, 1),
     measure: $('#heatSel').selectedOptions[0].text,
     onPick: sym => { state.symbol = sym; render(); },
     empty: 'No signal snapshots in this range — widen the time range or run a cycle.',
@@ -655,8 +689,12 @@ async function viewMarkets(main) {
     { sec: true, k: 'ts', label: 'As of', fmt: r => F.dt(r.ts), sortVal: r => +new Date(r.ts) },
   ], rows, { sort: { k: 'symbol', dir: 'asc' }, empty: 'No signal snapshots yet.' });
 
+  // Strongest opinions only — 40 flat bars in a narrow card reads as noise, and
+  // the neutral names are exactly the ones nobody scans for.
+  const sent = (d.sent || []).slice()
+    .sort((a, b) => Math.abs(b.polarity) - Math.abs(a.polarity)).slice(0, 12);
   V.bar(hosts[2], {
-    data: (d.sent || []).map(s => ({ label: s.symbol, value: s.polarity,
+    data: sent.map(s => ({ label: s.symbol, value: s.polarity,
       note: `${s.mention_count} mentions` })),
     diverging: true, fmt: v => F.num(v, 2), measure: 'Polarity', dimension: 'Symbol',
     empty: 'No sentiment recorded yet.', onPick: p => { state.symbol = p.label; render(); },
@@ -795,6 +833,7 @@ async function viewPerformance(main) {
   const d = await pull({
     perf: '/api/performance', pnl: '/api/pnl', eq: '/api/equity', edge: '/api/edge',
     usage: `/api/usage?days=${RANGE_DAYS[state.range]}`, pos: '/api/positions',
+    out: '/api/outcomes',
   });
   const eq = eqPoints(d.eq).filter(x => inRange(x.ts));
   const strat = Object.entries((d.perf && d.perf.per_strategy) || {})
@@ -824,7 +863,14 @@ async function viewPerformance(main) {
       ${card({ title: 'Capital allocation', cls: 'col-6', chart: false, body: '<div id="allocT"></div>' })}
       ${card({ title: 'Agent spend over time', cls: 'col-6', hint: 'stacked by cycle' })}
       ${card({ title: 'Edge vs benchmark', cls: 'col-12', chart: false, body: '<div id="edgeBox"></div>' })}
-    </div>`;
+    </div>
+
+    <h2 style="margin:26px 0 4px;font-size:15px">Was the agent right?</h2>
+    <p class="hint" style="margin:0 0 14px">P&amp;L only grades the trades it took. This
+      grades the calls it declined — every vetoed proposal is replayed against what the
+      price actually did, so a veto that saved you money and a veto that cost you an
+      entry are told apart.</p>
+    <div id="outBox" class="grid"></div>`;
 
   const hosts = $$('.chart-host', main);
   V.line(hosts[0], { height: 260, area: true, series: [{ name: 'Equity', points: eq }],
@@ -888,6 +934,104 @@ async function viewPerformance(main) {
         ? signed(e.benchmark.excess_return, v => F.pct(v, 2)) : '—', { sm: true })}
     </div>
     <pre class="raw">${esc(JSON.stringify(e, null, 2)).slice(0, 4000)}</pre>` : '<p class="empty">Edge stats unavailable.</p>';
+
+  renderOutcomes($('#outBox'), d.out);
+}
+
+/** "Was the agent right?" — counterfactual grades, veto quality, calibration.
+ *  When there is nothing graded yet it explains what the pipeline is waiting on
+ *  rather than showing an empty card, because "no data" and "not eligible yet"
+ *  are different answers. */
+function renderOutcomes(host, o) {
+  if (!host) return;
+  if (!o) { host.innerHTML = card({ title: 'Outcome grading', chart: false,
+    body: '<p class="empty">Outcome data unavailable.</p>' }); return; }
+  const rows = o.outcomes || [], cal = o.calibration || {}, pipe = o.pipeline || {};
+  const buckets = Object.entries(cal.confidence_buckets || {});
+  const graded = rows.length;
+  const vetoRate = cal.veto_hit_rate;
+
+  host.innerHTML = `
+    ${card({ title: 'Grading pipeline', cls: 'col-4', chart: false, body: `
+      <div class="tiles" style="grid-template-columns:1fr 1fr">
+        ${tile('Declined calls graded', F.int(graded), { sm: true })}
+        ${tile('Trades scored', F.int(cal.n_scores || 0), { sm: true })}
+      </div>
+      ${vetoRate != null ? `<div style="margin-top:12px">${
+        tile('Veto hit rate', F.pct(vetoRate, 0),
+          { sub: `${cal.veto_right} of ${cal.veto_n} vetoes were the right call` })}</div>` : ''}
+      <div class="hint" style="margin-top:12px">
+        A declined proposal becomes gradable ${plural(pipe.min_age_days, 'day')} after it
+        was raised, then is replayed over a ${pipe.horizon_days}-day horizon.
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button onclick="runScoring()">Grade what's ready now</button></div>` })}
+
+    ${card({ title: 'Confidence calibration', cls: 'col-8',
+      hint: 'does stated confidence predict outcome? bars should rise left to right' })}
+
+    ${graded ? card({ title: 'Graded decisions', cls: 'col-12', chart: false,
+      hint: 'hypothetical P&L had the proposal been allowed through',
+      body: '<div id="outT"></div>' })
+      : card({ title: 'Nothing graded yet', cls: 'col-12', chart: false, body: `
+        <p class="hint" style="margin:0 0 10px">This is expected early on, not a fault —
+          here is exactly what each item is waiting on.</p>
+        ${(pipe.waiting || []).length ? '<div id="waitT"></div>' : `
+          <p class="empty">No declined proposals are queued for grading.
+            ${pipe.lots_closed ? '' : 'No position has closed yet either, so there is nothing to score.'}</p>`}
+        ${!pipe.broker_available ? `<p class="hint" style="color:var(--warning);margin-top:10px">
+          The broker is unavailable, so price history cannot be fetched — grading will
+          skip every proposal until it reconnects.</p>` : ''}` })}`;
+
+  const chart = $$('.chart-host', host)[0];
+  V.bar(chart, {
+    data: buckets.map(([b, v]) => ({ label: b, value: v.avg_pnl,
+      note: `${v.n} graded · ${F.pct(v.win_rate || 0, 0)} positive` })),
+    diverging: true, fmt: v => F.usd(v, 2), measure: 'Average outcome',
+    dimension: 'Stated confidence',
+    empty: 'No graded decision carries a confidence score yet.',
+  });
+
+  if (graded) {
+    table($('#outT'), [
+      { k: 'proposal_id', label: '#', fmt: r => `<a onclick="go('#/decision/${r.proposal_id}')">#${r.proposal_id}</a>` },
+      { k: 'proposal_ts', label: 'Raised', fmt: r => F.dt(r.proposal_ts), sortVal: r => +new Date(r.proposal_ts) },
+      { k: 'symbol', label: 'Symbol', fmt: r => symLink(r.symbol) },
+      { k: 'status', label: 'Outcome of', fmt: r => `<span class="badge">${esc(r.status)}</span>` },
+      { k: 'confidence', label: 'Confidence', r: true, sec: true,
+        fmt: r => r.confidence == null ? '—' : F.num(r.confidence, 2) },
+      { k: 'hypothetical_pnl', label: 'Hypothetical P&L', r: true,
+        fmt: r => signed(r.hypothetical_pnl) },
+      { k: 'max_adverse_usd', label: 'Worst drawdown', r: true, sec: true,
+        fmt: r => F.usd(r.max_adverse_usd) },
+      { k: 'verdict_was_right', label: 'Verdict', fmt: r => r.verdict_was_right == null
+        ? '<span class="muted">unclear</span>'
+        : r.verdict_was_right
+          ? '<span class="badge good"><span class="dot"></span>right call</span>'
+          : '<span class="badge critical"><span class="dot"></span>cost us</span>' },
+      { k: 'notes', label: 'Notes', sec: true, fmt: r => clip(r.notes, 70) },
+    ], rows, { sort: { k: 'proposal_ts', dir: 'desc' } });
+  } else if ((pipe.waiting || []).length) {
+    table($('#waitT'), [
+      { k: 'id', label: '#', fmt: r => `<a onclick="go('#/decision/${r.id}')">#${r.id}</a>` },
+      { k: 'symbol', label: 'Symbol', fmt: r => symLink(r.symbol) },
+      { k: 'status', label: 'Status', fmt: r => `<span class="badge">${esc(r.status)}</span>` },
+      { k: 'ts', label: 'Raised', fmt: r => F.dt(r.ts), sortVal: r => +new Date(r.ts) },
+      { k: 'gradable_on', label: 'Gradable on', fmt: r => F.dt(r.gradable_on) },
+      { k: 'blocked_by', label: 'Waiting on', fmt: r => `<span class="muted">${esc(r.blocked_by)}</span>` },
+    ], pipe.waiting, { sort: { k: 'gradable_on', dir: 'asc' } });
+  }
+  wireCards();
+}
+
+async function runScoring() {
+  const r = await post('/api/actions/run-scoring').catch(() => null);
+  if (!r) return;
+  toast(`Scored ${r.scored} closed trade${r.scored === 1 ? '' : 's'}; graded ${r.graded} `
+    + `declined proposal${r.graded === 1 ? '' : 's'}`
+    + (r.skipped ? ` (${r.skipped} not gradable yet)` : '')
+    + (r.error ? ` — ${r.error}` : ''), r.error ? 'critical' : 'good');
+  render();
 }
 
 /* ==========================================================================
@@ -913,7 +1057,10 @@ async function viewControl(main) {
           <button onclick="runCycle('premarket')">▶ Premarket</button>
           <button onclick="runCycle('intraday')">▶ Intraday</button>
           <button onclick="runCycle('eod')">▶ End of day</button>
-        </div>` })}
+        </div>
+        <p class="hint" style="margin:12px 0 8px">Grading is deterministic and free —
+          no model calls.</p>
+        <button onclick="runScoring()">Score trades & grade declined calls</button>` })}
       ${card({ title: 'Safety state', cls: 'col-4', chart: false, body: `
         <div class="row" style="margin-bottom:10px">${statusBadge(m)}
           ${m && m.kill_switch ? '<button class="danger" onclick="resetKill()">Reset kill switch</button>' : ''}</div>

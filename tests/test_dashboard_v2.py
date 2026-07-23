@@ -187,3 +187,153 @@ class TestStaticBundle:
             path = raw.rstrip("/")
             # Templated calls ("/api/symbol/" + sym) match their parameterised route.
             assert any(path == k or k.startswith(path) for k in known), path
+
+
+class TestScaleAndAggregation:
+    def test_trades_uses_two_queries_regardless_of_order_count(self, tmp_path):
+        """The fills lookup was one query per order; assert it no longer scales
+        with the number of orders."""
+        client, journal, _ = client_and_journal(tmp_path)
+        for i in range(25):
+            oid = journal.record_order(proposal_id=None, broker_order_id=f"b{i}",
+                                       mode="paper", symbol="AAPL", side="buy", qty=1,
+                                       order_type="limit", limit_price=10.0)
+            journal.record_fill(order_id=oid, qty=1, price=10.0)
+
+        seen = []
+        real = journal.conn.execute
+
+        import trading.web.app as appmod
+        orig = appmod.Journal
+
+        class Counting(orig):
+            def __init__(self, *a, **k):
+                super().__init__(*a, **k)
+                outer = self
+
+                class Conn:
+                    def __getattr__(self, n):
+                        return getattr(outer._raw, n)
+
+                    def execute(self, sql, *a):
+                        seen.append(sql)
+                        return outer._raw.execute(sql, *a)
+                self._raw = self.conn
+                self.conn = Conn()
+
+        appmod.Journal = Counting
+        try:
+            rows = client.get("/api/trades").json()
+        finally:
+            appmod.Journal = orig
+        assert len(rows) == 25
+        assert all(len(r["fills"]) == 1 for r in rows)
+        fill_queries = [s for s in seen if "FROM fills" in s]
+        assert len(fill_queries) == 1, f"expected one batched fills query, got {len(fill_queries)}"
+        assert real is not None
+
+    def test_signals_latest_returns_one_row_per_symbol(self, tmp_path):
+        client, journal, _ = client_and_journal(tmp_path)
+        for _ in range(3):
+            snap(journal, "AAPL")
+        snap(journal, "NVDA")
+        rows = client.get("/api/signals/latest").json()
+        assert [r["symbol"] for r in rows] == ["AAPL", "NVDA"]
+
+    def test_signals_grid_buckets_server_side(self, tmp_path):
+        client, journal, _ = client_and_journal(tmp_path)
+        snap(journal, "AAPL", features={"momentum_20": 0.2})
+        snap(journal, "AAPL", features={"momentum_20": 0.4})
+        g = client.get("/api/signals/grid?metric=momentum_20&days=7&points=4").json()
+        assert len(g["cols"]) == 4
+        assert g["rows"][0]["label"] == "AAPL"
+        vals = [c["v"] for c in g["rows"][0]["cells"] if c["v"] is not None]
+        assert vals and abs(vals[-1] - 0.3) < 1e-9      # both rows averaged in one bucket
+
+    def test_signals_grid_rejects_an_unknown_metric(self, tmp_path):
+        """The metric is interpolated into SQL, so it must be whitelisted."""
+        client, _, _ = client_and_journal(tmp_path)
+        r = client.get("/api/signals/grid?metric=1);DROP TABLE proposals;--")
+        assert r.status_code == 400
+
+    def test_hot_read_paths_are_indexed(self, tmp_path):
+        _, journal, _ = client_and_journal(tmp_path)
+        names = {r["name"] for r in journal.conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='index'")}
+        assert {"ix_fills_order", "ix_snapshot_symbol_id", "ix_equity_ts"} <= names
+
+
+class TestOutcomes:
+    def test_reports_why_nothing_is_graded_yet(self, tmp_path):
+        """An empty grading table is usually 'not eligible yet', not a fault —
+        the payload has to say which."""
+        client, journal, _ = client_and_journal(tmp_path)
+        pid = prop(journal, "AAPL")
+        journal.set_proposal_status(pid, "vetoed")
+        d = client.get("/api/outcomes").json()
+        assert d["outcomes"] == []
+        waiting = d["pipeline"]["waiting"]
+        assert waiting[0]["id"] == pid
+        assert waiting[0]["blocked_by"] == "not yet aged"
+        assert waiting[0]["gradable_on"] > waiting[0]["ts"]
+
+    def test_surfaces_graded_outcomes_and_veto_quality(self, tmp_path):
+        client, journal, _ = client_and_journal(tmp_path)
+        pid = prop(journal, "AAPL", confidence=0.9)
+        journal.set_proposal_status(pid, "vetoed")
+        journal.record_proposal_outcome(
+            proposal_id=pid, horizon_days=5, entry_price=10.0, stop_price=9.0,
+            target_price=12.0, max_favorable_usd=5.0, max_adverse_usd=-20.0,
+            hypothetical_pnl=-15.0, stop_hit=True, target_hit=False,
+            verdict_was_right=True, notes="stop would have hit")
+        d = client.get("/api/outcomes").json()
+        assert d["outcomes"][0]["symbol"] == "AAPL"
+        assert d["outcomes"][0]["verdict_was_right"] == 1
+        assert d["calibration"]["veto_hit_rate"] == 1.0
+        assert d["pipeline"]["waiting"] == []
+
+    def test_run_scoring_action_is_deterministic_and_safe(self, tmp_path):
+        client, _, _ = client_and_journal(tmp_path)
+        r = client.post("/api/actions/run-scoring").json()
+        assert r["ok"] and r["scored"] == 0 and r["graded"] == 0
+
+
+class TestAuth:
+    def test_loopback_without_a_token_stays_open(self, tmp_path):
+        client, _, _ = client_and_journal(tmp_path)
+        assert client.get("/api/metrics").status_code == 200
+        assert client.get("/api/auth").json()["required"] is False
+
+    def test_a_configured_token_is_required(self, tmp_path):
+        config = make_config()
+        config.settings.paths.journal_db = str(tmp_path / "j.db")
+        app = create_app(get_config_fn=lambda: config,
+                         broker_factory=lambda c: None, token="s3cret")
+        client = TestClient(app)
+        assert client.get("/api/metrics").status_code == 401
+        assert client.post("/api/actions/reset-kill-switch").status_code == 401
+        ok = client.get("/api/metrics", headers={"X-Dashboard-Token": "s3cret"})
+        assert ok.status_code == 200
+        bearer = client.get("/api/metrics", headers={"Authorization": "Bearer s3cret"})
+        assert bearer.status_code == 200
+        assert client.get("/api/metrics", headers={"X-Dashboard-Token": "wrong"}).status_code == 401
+
+    def test_the_shell_loads_unauthenticated_so_it_can_ask_for_the_token(self, tmp_path):
+        config = make_config()
+        config.settings.paths.journal_db = str(tmp_path / "j.db")
+        client = TestClient(create_app(get_config_fn=lambda: config,
+                                       broker_factory=lambda c: None, token="s3cret"))
+        assert client.get("/").status_code == 200
+        assert client.get("/static/js/app.js").status_code == 200
+        assert client.get("/api/auth").json() == {"required": True, "authenticated": False,
+                                                  "loopback": True}
+
+    def test_non_loopback_without_a_token_is_refused(self, tmp_path):
+        """Fail closed: these endpoints submit orders."""
+        config = make_config()
+        config.settings.paths.journal_db = str(tmp_path / "j.db")
+        client = TestClient(create_app(get_config_fn=lambda: config,
+                                       broker_factory=lambda c: None),
+                            client=("10.0.0.7", 5000))
+        r = client.get("/api/metrics")
+        assert r.status_code == 403 and "token" in r.json()["detail"]

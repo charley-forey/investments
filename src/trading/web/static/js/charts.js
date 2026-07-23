@@ -67,6 +67,20 @@ function autoFmt(ticks, kind) {
   return step >= 1000 ? fmt.usdc : v => fmt.usd(v, dp);
 }
 
+/** Evenly spaced label positions, de-duplicated — with 3 buckets and room for 6
+    labels the naive version rounds two ticks onto the same bar and they collide. */
+function tickIndices(count, width, minSpacing) {
+  if (count <= 0) return [];
+  const want = Math.max(1, Math.min(count, Math.floor(width / minSpacing)));
+  if (want === 1) return [Math.floor((count - 1) / 2)];
+  const out = [];
+  for (let i = 0; i < want; i++) {
+    const idx = Math.round(i * (count - 1) / (want - 1));
+    if (!out.includes(idx)) out.push(idx);
+  }
+  return out;
+}
+
 /* -- shared tooltip -------------------------------------------------------- */
 let tip;
 function tipEl() {
@@ -335,14 +349,12 @@ function candles(host, o) {
     svgEl('text', { x: f.m.l - 8, y: f.m.t + f.ih, 'text-anchor': 'end', class: 'chart-axis' },
       svgEl('g', { class: 'chart-axis' }, f.svg)).textContent = 'vol';
 
-    const n = Math.max(2, Math.min(6, Math.floor(f.iw / 90)));
     const ax = svgEl('g', { class: 'chart-axis' }, f.svg);
-    for (let i = 0; i < n; i++) {
-      const idx = Math.round(i * (bars.length - 1) / (n - 1));
+    tickIndices(bars.length, f.iw, 90).forEach((idx, i, arr) =>
       svgEl('text', { x: cx(idx), y: f.h - 8,
-        'text-anchor': i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle' }, ax)
-        .textContent = fmt.date(bars[idx].date);
-    }
+        'text-anchor': arr.length === 1 ? 'middle' : i === 0 ? 'start'
+          : i === arr.length - 1 ? 'end' : 'middle' }, ax)
+        .textContent = fmt.date(bars[idx].date));
 
     const cross = svgEl('line', { class: 'chart-crosshair', y1: f.m.t, y2: f.m.t + f.ih, opacity: 0 }, f.svg);
     const hit = svgEl('rect', { class: 'chart-hit', x: f.m.l, y: f.m.t, width: f.iw, height: f.ih }, f.svg);
@@ -489,14 +501,12 @@ function stack(host, o) {
         tipRow('Total', vFmt(totals[i]))));
       hit.addEventListener('pointerleave', hideTip);
     });
-    const n = Math.max(2, Math.min(6, Math.floor(f.iw / 80)));
     const ax = svgEl('g', { class: 'chart-axis' }, f.svg);
-    for (let i = 0; i < n; i++) {
-      const idx = Math.round(i * (rows.length - 1) / (n - 1));
+    tickIndices(rows.length, f.iw, 80).forEach((idx, i, arr) =>
       svgEl('text', { x: f.m.l + step * (idx + .5), y: f.h - 8,
-        'text-anchor': i === 0 ? 'start' : i === n - 1 ? 'end' : 'middle' }, ax)
-        .textContent = rows[idx].label;
-    }
+        'text-anchor': arr.length === 1 ? 'middle' : i === 0 ? 'start'
+          : i === arr.length - 1 ? 'end' : 'middle' }, ax)
+        .textContent = rows[idx].label);
     const box = document.createElement('div');
     box.className = 'legend';
     box.innerHTML = keys.map((k, ki) =>
