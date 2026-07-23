@@ -529,9 +529,18 @@ def cmd_dashboard(args) -> int:
     except ImportError:
         print("dashboard needs the web extra: pip install -e \".[web]\"")
         return 2
-    from .web.app import create_app
+    import os
 
-    print(f"observability dashboard on http://{args.host}:{args.port}")
+    from .web.app import _LOOPBACK, create_app
+
+    token = os.environ.get("DASHBOARD_TOKEN") or None
+    if args.host not in _LOOPBACK and not token:
+        print(f"refusing to bind {args.host} without a token: these endpoints approve\n"
+              "proposals and submit orders. Set DASHBOARD_TOKEN in the environment,\n"
+              "or bind 127.0.0.1 for local-only access.")
+        return 2
+    print(f"observability dashboard on http://{args.host}:{args.port}"
+          + ("  (token required)" if token else ""))
     uvicorn.run(create_app(), host=args.host, port=args.port, log_level="info")
     return 0
 

@@ -231,6 +231,40 @@ class Journal:
             self.conn.execute("ALTER TABLE proposals ADD COLUMN discovery_source TEXT")
         if "score_at_entry" not in prop_cols:
             self.conn.execute("ALTER TABLE proposals ADD COLUMN score_at_entry REAL")
+        self._indexes()
+
+    def _indexes(self) -> None:
+        """Covering indexes for the read paths that grow without bound.
+
+        Every one of these backs a query that is a full table scan otherwise —
+        fine at a thousand rows, a stall at a million. Cheap to create, and
+        SQLite keeps them current on its own.
+        """
+        for stmt in (
+            # dashboard: fills fetched in one batch keyed by order
+            "CREATE INDEX IF NOT EXISTS ix_fills_order ON fills(order_id)",
+            # time-ranged reads (equity curve, cost, liveness, funnel windows)
+            "CREATE INDEX IF NOT EXISTS ix_equity_ts ON equity_snapshots(ts)",
+            "CREATE INDEX IF NOT EXISTS ix_usage_ts ON usage(ts)",
+            "CREATE INDEX IF NOT EXISTS ix_heartbeats_ts ON heartbeats(ts)",
+            "CREATE INDEX IF NOT EXISTS ix_orders_ts ON orders(ts)",
+            "CREATE INDEX IF NOT EXISTS ix_proposals_ts ON proposals(ts)",
+            "CREATE INDEX IF NOT EXISTS ix_verdicts_ts ON verdicts(ts)",
+            # per-entity drill-downs
+            "CREATE INDEX IF NOT EXISTS ix_orders_symbol ON orders(symbol)",
+            "CREATE INDEX IF NOT EXISTS ix_proposals_symbol ON proposals(symbol)",
+            "CREATE INDEX IF NOT EXISTS ix_verdicts_proposal ON verdicts(proposal_id)",
+            "CREATE INDEX IF NOT EXISTS ix_reasoning_proposal ON reasoning(proposal_id)",
+            "CREATE INDEX IF NOT EXISTS ix_lots_symbol ON tax_lots(symbol)",
+            "CREATE INDEX IF NOT EXISTS ix_scores_tag ON scores(strategy_tag)",
+            # signal history: the biggest table, read by symbol and by time
+            "CREATE INDEX IF NOT EXISTS ix_snapshot_symbol_id ON signal_snapshot(symbol, id)",
+            "CREATE INDEX IF NOT EXISTS ix_snapshot_ts ON signal_snapshot(ts)",
+        ):
+            try:
+                self.conn.execute(stmt)
+            except sqlite3.OperationalError:
+                pass    # table not present on an older DB; the migration above covers it
 
     def close(self) -> None:
         self.conn.close()
