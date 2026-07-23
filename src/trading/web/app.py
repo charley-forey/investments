@@ -28,6 +28,47 @@ def _ts_gap(a: str | None, b: str | None) -> float:
         return 1e18
 
 
+def _fetch_bars(brk, symbol: str, days: int, timeframe: str) -> list[dict]:
+    """Broker OHLCV -> plain dicts. Returns [] rather than raising: a price chart
+    is never worth failing a dashboard request over."""
+    if brk is None:
+        return []
+    try:
+        df = brk.get_bars(symbol, days=days, timeframe=timeframe)
+        if df is None or getattr(df, "empty", True):
+            return []
+        df = df.reset_index()
+        ts_col = "timestamp" if "timestamp" in df.columns else df.columns[1]
+        out = []
+        for _, r in df.iterrows():
+            stamp = r[ts_col]
+            date = (stamp.isoformat() if timeframe != "1Day"
+                    else str(stamp)[:10])
+            out.append({"symbol": symbol.upper(), "date": date,
+                        "open": float(r["open"]), "high": float(r["high"]),
+                        "low": float(r["low"]), "close": float(r["close"]),
+                        "volume": float(r.get("volume", 0) or 0)})
+        return out
+    except Exception:
+        return []
+
+
+def _yaml_help(path: Path) -> dict[str, str]:
+    """Harvest the inline `# ...` comments from a config file as field help text.
+    The YAML is already the documentation — this just surfaces it in the UI."""
+    help_map: dict[str, str] = {}
+    if not path.exists():
+        return help_map
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if "#" not in line or ":" not in line.split("#")[0]:
+            continue
+        key, comment = line.split("#", 1)[0], line.split("#", 1)[1]
+        key = key.split(":")[0].strip().lstrip("- ")
+        if key and comment.strip():
+            help_map[key] = comment.strip()
+    return help_map
+
+
 def _default_broker_factory(config):
     try:
         from ..broker.alpaca import AlpacaBroker
@@ -305,6 +346,125 @@ def create_app(get_config_fn=get_config, broker_factory=None):
         return [{"proposal_id": r.proposal_id, "summary": r.summary_line(),
                  "reasoning": r.reasoning} for r in hits[:20]]
 
+    # -- price history --------------------------------------------------------
+
+    @app.get("/api/bars/{symbol}")
+    def bars(symbol: str, days: int = 180, timeframe: str = "1Day"):
+        """OHLCV for the price chart. Daily bars are cached in bars.db; a cold
+        cache (or any intraday request) falls through to the broker."""
+        from ..data.bars import Bar, BarStore
+        symbol = symbol.upper()
+        daily = timeframe == "1Day"
+        store = BarStore(cfg().settings.paths.bars_db)
+        try:
+            rows = store.load_bars(symbol) if daily else []
+            if len(rows) < 5:
+                fetched = _fetch_bars(broker(), symbol, days, timeframe)
+                if fetched and daily:
+                    store.save_bars([Bar(**b) for b in fetched])
+                    rows = store.load_bars(symbol)
+                else:
+                    return {"symbol": symbol, "timeframe": timeframe,
+                            "source": "broker" if fetched else "none", "bars": fetched}
+            out = [{"date": b.date, "open": b.open, "high": b.high, "low": b.low,
+                    "close": b.close, "volume": b.volume} for b in rows][-days:]
+            return {"symbol": symbol, "timeframe": timeframe, "source": "cache",
+                    "bars": out}
+        finally:
+            store.close()
+
+    # -- observability --------------------------------------------------------
+
+    @app.get("/api/usage")
+    def usage(days: int = 14):
+        """Token/cost history — what the agent spends, by cycle, agent and model."""
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = [dict(r) for r in journal().conn.execute(
+            "SELECT ts, cycle, agent, model, input_tokens, output_tokens, "
+            "cache_read_tokens, cost_usd FROM usage WHERE ts >= ? ORDER BY ts",
+            (since,)).fetchall()]
+        return {"rows": rows, "total_usd": round(sum(r["cost_usd"] or 0 for r in rows), 4)}
+
+    @app.get("/api/heartbeats")
+    def heartbeats(limit: int = 300):
+        rows = journal().recent_heartbeats(limit)
+        return [{"ts": r["ts"], "job": r["job"], "status": r["status"],
+                 "detail": r["detail"]} for r in rows]
+
+    @app.get("/api/funnel")
+    def funnel(days: int = 7):
+        """The agent pipeline, stage by stage: what it looked at vs what it traded.
+        The drop between two stages is the answer to 'why so few trades?'."""
+        j = journal()
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        one = lambda q, a=(): j.conn.execute(q, a).fetchone()[0]  # noqa: E731
+        examined = one("SELECT COUNT(DISTINCT symbol) FROM signal_snapshot WHERE ts >= ?",
+                       (since,))
+        proposed = one("SELECT COUNT(*) FROM proposals WHERE ts >= ?", (since,))
+        vetoed = one("SELECT COUNT(DISTINCT proposal_id) FROM verdicts "
+                     "WHERE verdict='veto' AND ts >= ?", (since,))
+        submitted = one("SELECT COUNT(*) FROM orders WHERE ts >= ?", (since,))
+        filled = one("SELECT COUNT(DISTINCT order_id) FROM fills WHERE ts >= ?", (since,))
+        closed = one("SELECT COUNT(*) FROM tax_lots WHERE close_ts IS NOT NULL "
+                     "AND close_ts >= ?", (since,))
+        return {"days": days, "stages": [
+            {"stage": "Symbols examined", "count": examined},
+            {"stage": "Proposals raised", "count": proposed},
+            {"stage": "Cleared guardrails", "count": max(proposed - vetoed, 0)},
+            {"stage": "Orders submitted", "count": submitted},
+            {"stage": "Orders filled", "count": filled},
+            {"stage": "Positions closed", "count": closed},
+        ]}
+
+    @app.get("/api/verdicts")
+    def verdicts(days: int = 30):
+        """Which guardrail rules actually fire — the agent's real constraints."""
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        rows = [dict(r) for r in journal().conn.execute(
+            "SELECT rule, verdict, COUNT(*) AS n FROM verdicts WHERE ts >= ? "
+            "GROUP BY rule, verdict ORDER BY n DESC", (since,)).fetchall()]
+        recent = [dict(r) for r in journal().conn.execute(
+            "SELECT proposal_id, ts, source, verdict, rule, reason FROM verdicts "
+            "WHERE ts >= ? ORDER BY id DESC LIMIT 100", (since,)).fetchall()]
+        return {"by_rule": rows, "recent": recent}
+
+    @app.get("/api/symbol/{symbol}")
+    def symbol_detail(symbol: str):
+        """Everything the system knows about one name, in one payload — the
+        drill-down behind every symbol link in the UI."""
+        import json as _json
+        symbol = symbol.upper()
+        c, j = cfg(), journal()
+        state = _account_state(j)
+        position = next((p.model_dump() for p in state.positions
+                         if p.symbol.upper().startswith(symbol)), None) if state else None
+        snaps = j.recent_snapshots(symbol, 200)
+        for s in snaps:
+            s["features"] = _json.loads(s["features_json"]) if s.get("features_json") else None
+            s.pop("features_json", None)
+        proposals = [dict(r) for r in j.conn.execute(
+            "SELECT id, ts, strategy_tag, side, qty, status, thesis, confidence, "
+            "expected_edge_usd FROM proposals WHERE symbol=? ORDER BY id DESC LIMIT 25",
+            (symbol,)).fetchall()]
+        orders = [dict(r) for r in j.conn.execute(
+            "SELECT id, ts, side, qty, order_type, limit_price, status FROM orders "
+            "WHERE symbol=? ORDER BY id DESC LIMIT 25", (symbol,)).fetchall()]
+        lots = [dict(r) for r in j.conn.execute(
+            "SELECT id, qty, open_ts, open_price, close_ts, close_price, realized_pnl, "
+            "term, strategy_tag FROM tax_lots WHERE symbol=? ORDER BY id DESC LIMIT 25",
+            (symbol,)).fetchall()]
+        news = []
+        import os
+        if os.path.exists(c.settings.paths.intel_db):
+            from ..data.intel import IntelStore
+            store = IntelStore(c.settings.paths.intel_db)
+            try:
+                news = store.recent_news(symbol, 20)
+            finally:
+                store.close()
+        return {"symbol": symbol, "position": position, "snapshots": snaps,
+                "proposals": proposals, "orders": orders, "lots": lots, "news": news}
+
     # -- config ---------------------------------------------------------------
 
     @app.get("/api/config")
@@ -312,6 +472,18 @@ def create_app(get_config_fn=get_config, broker_factory=None):
         c = cfg()
         return {"limits": c.limits.model_dump(mode="json"),
                 "settings": c.settings.model_dump(mode="json")}
+
+    @app.get("/api/config/schema")
+    def config_schema():
+        """Pydantic already knows every field's type, bound and default — hand that
+        to the UI so the config editor is a real form, not a JSON textarea."""
+        from ..config import PROJECT_ROOT
+        return {
+            "limits": {"schema": Limits.model_json_schema(),
+                       "help": _yaml_help(PROJECT_ROOT / "config" / "limits.yaml")},
+            "settings": {"schema": Settings.model_json_schema(),
+                         "help": _yaml_help(PROJECT_ROOT / "config" / "settings.yaml")},
+        }
 
     @app.post("/api/config/validate")
     def config_validate(payload: dict):
@@ -338,9 +510,18 @@ def create_app(get_config_fn=get_config, broker_factory=None):
         from ..config import PROJECT_ROOT
         fname = "limits.yaml" if section == "limits" else "settings.yaml"
         path = PROJECT_ROOT / "config" / fname
+        # Snapshot before overwrite — these files govern real money limits.
+        backup = None
+        if path.exists():
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            bdir = Path(cfg().settings.paths.journal_db).parent / "backups" / "config"
+            bdir.mkdir(parents=True, exist_ok=True)
+            backup = bdir / f"{path.stem}.{stamp}.yaml"
+            backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
         path.write_text(yaml.safe_dump(payload["data"], sort_keys=False), encoding="utf-8")
         get_config.cache_clear()
-        return {"ok": True, "saved": str(path)}
+        return {"ok": True, "saved": str(path),
+                "backup": str(backup) if backup else None}
 
     # -- human actions (localhost-only) --------------------------------------
 
@@ -396,5 +577,8 @@ def create_app(get_config_fn=get_config, broker_factory=None):
         if idx.exists():
             return FileResponse(str(idx))
         return HTMLResponse("<h1>dashboard static file missing</h1>", status_code=500)
+
+    from fastapi.staticfiles import StaticFiles
+    app.mount("/static", StaticFiles(directory=str(_STATIC)), name="static")
 
     return app

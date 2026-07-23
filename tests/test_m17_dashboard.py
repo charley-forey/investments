@@ -97,7 +97,9 @@ class TestReadEndpoints:
         client, _, _ = client_and_journal(tmp_path)
         r = client.get("/")
         assert r.status_code == 200
-        assert "Agentic Trading" in r.text and "Opportunities" in r.text
+        # The shell is a skeleton; views render client-side from /static/js/app.js.
+        assert "Agentic Trading" in r.text and "/static/js/app.js" in r.text
+        assert "Opportunities considered" in client.get("/static/js/app.js").text
 
 
 class TestConfig:
