@@ -159,9 +159,26 @@ class Orchestrator:
             return
         report.notes.append(f"LLM gate: {gate.reason}")
 
+        # Current regime — used to condition strategy selection on where each
+        # template has actually shown edge, and passed to the agent as context.
+        regime_trend = regime_vol = None
+        try:
+            from .tools.market_context import market_regime
+            reg = market_regime(self.broker)
+            regime_trend, regime_vol = reg.trend, reg.vol_state
+        except Exception:
+            pass
+
         stages = lifecycle.stages_summary(self.journal)
         perf = portfolio_summary(self.journal, self.config.settings.tax)
         extra = f"Strategy stages: {stages}\n{perf}"
+        try:
+            from .analytics.candidate_grading import regime_context
+            rc = regime_context(self.journal, regime_trend, regime_vol)
+            if rc:
+                extra += f"\n\n{rc}"
+        except Exception:
+            pass
         digest = self._intel_digest()
         if digest:
             extra += f"\n\nMarket intelligence digest:\n{digest}"
@@ -236,6 +253,25 @@ class Orchestrator:
                 ))
                 self._record_reasoning(pid, session)
                 continue
+
+            # Regime conditioning: skip an entry whose template has a real adverse
+            # track record in the current tape (enough samples, sub-coinflip hit
+            # rate). No-op until the graded ledger has evidence — safe by default.
+            if not draft.reduces_position:
+                from .analytics.candidate_grading import REGIME_SKIP_HIT_RATE, regime_edge
+                edge = regime_edge(self.journal, draft.strategy_tag,
+                                   regime_trend, regime_vol)
+                if edge and edge["hit_rate"] < REGIME_SKIP_HIT_RATE:
+                    report.vetoed += 1
+                    pid = self._journal_veto(draft, "regime_guard", risk_mod.RiskVerdict(
+                        verdict="veto",
+                        reason=f"{draft.strategy_tag} hit rate {edge['hit_rate']:.0%} in "
+                               f"{regime_trend}/{regime_vol} over {edge['n']} graded "
+                               f"samples (< {REGIME_SKIP_HIT_RATE:.0%}) — wrong regime",
+                        concerns=[],
+                    ))
+                    self._record_reasoning(pid, session)
+                    continue
 
             would_be_dt = self._would_be_day_trade(draft)
             verdict = self._review(

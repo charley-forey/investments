@@ -100,6 +100,54 @@ def grade_pending_candidates(journal: Journal, broker, *,
     return report
 
 
+# Regime conditioning: a template only gets skipped when it has a real adverse
+# track record in the *current* tape — enough samples and a sub-coinflip hit rate.
+REGIME_MIN_N = 20
+REGIME_SKIP_HIT_RATE = 0.45
+
+
+def regime_edge(journal: Journal, template: str | None,
+                regime_trend: str | None, regime_vol: str | None,
+                *, min_n: int = REGIME_MIN_N) -> dict | None:
+    """The template's graded track record in exactly this regime, or None if the
+    regime is unknown or the sample is too small to condition on."""
+    if not template or not regime_trend or not regime_vol:
+        return None
+    row = journal.conn.execute(
+        "SELECT COUNT(*) n, AVG(direction_right) hit, AVG(forward_return) fwd "
+        "FROM candidate_outcomes WHERE template=? AND regime_trend=? AND regime_vol=? "
+        "AND direction_right IS NOT NULL", (template, regime_trend, regime_vol),
+    ).fetchone()
+    n = int(row["n"] or 0)
+    if n < min_n:
+        return None
+    return {"n": n, "hit_rate": round(float(row["hit"] or 0.0), 3),
+            "avg_forward_return": round(float(row["fwd"] or 0.0), 5)}
+
+
+def regime_context(journal: Journal, regime_trend: str | None,
+                   regime_vol: str | None, *, min_n: int = 5) -> str:
+    """Compact per-template edge in the current regime for the strategy prompt, so
+    the agent sees which setups actually work in this tape."""
+    if not regime_trend or not regime_vol:
+        return ""
+    rows = journal.conn.execute(
+        "SELECT template, COUNT(*) n, AVG(direction_right) hit, AVG(forward_return) fwd "
+        "FROM candidate_outcomes WHERE regime_trend=? AND regime_vol=? "
+        "AND direction_right IS NOT NULL AND template IS NOT NULL "
+        "GROUP BY template HAVING n >= ? ORDER BY hit DESC",
+        (regime_trend, regime_vol, min_n),
+    ).fetchall()
+    if not rows:
+        return ""
+    lines = [f"Template edge in the current regime ({regime_trend}/{regime_vol}), "
+             f"from shadow-graded candidates:"]
+    for r in rows:
+        lines.append(f"  {r['template']}: {r['n']} samples, hit {r['hit']*100:.0f}%, "
+                     f"avg fwd {r['fwd']*100:+.2f}%")
+    return "\n".join(lines)
+
+
 def template_stats(journal: Journal, *, by_regime: bool = False) -> list[dict]:
     """Per-template (optionally per (template, regime)) forward-return statistics
     from the graded candidate ledger: sample size, mean forward return, and
