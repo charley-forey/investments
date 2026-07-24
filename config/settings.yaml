@@ -48,6 +48,13 @@ agents:
   options_chain_max_dte: 60
   redteam_confidence_threshold: 0.7  # adversarial pass on high-conviction drafts (1.0=off)
   trigger_gate_enabled: true         # skip LLM on calm no-signal intraday cycles
+  # Auto-calibration of bounded params (wake score, per-strategy sizing) from the
+  # graded ledger. Starts in dry-run: it logs proposed changes but applies nothing
+  # until you flip auto_calibrate_dry_run to false. Applies nothing until the
+  # ledger has >= min_outcomes graded samples regardless.
+  auto_calibrate_enabled: true
+  auto_calibrate_dry_run: true
+  auto_calibrate_min_outcomes: 30
   # Sonnet for intraday (tool-driven, guardrail-backed); Opus for research depth.
   model_by_cycle:
     intraday: claude-sonnet-4-6

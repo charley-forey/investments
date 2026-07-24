@@ -196,9 +196,9 @@ def should_run_intraday_llm(config: Config, journal: Journal, broker, account,
 
     # High OpportunityScore candidates wake the LLM without waiting for a price print.
     try:
+        from .analytics.autocalibrate import effective_wake_score
         from .scanner.movers import load_candidates
-        from .scanner.universe import load_screen_universe
-        wake = load_screen_universe().filters.wake_score
+        wake = effective_wake_score(config, journal)
         hot = [c for c in load_candidates(config)
                if float(c.get("score") or 0) >= wake]
         if hot:

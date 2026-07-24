@@ -208,6 +208,13 @@ class AgentSettings(BaseModel):
     # Runaway-cost protection: pause agent work if 24h Anthropic spend hits this.
     # 0 = no cap (code default); settings.yaml sets 15.0 in prod.
     max_daily_cost_usd: float = 0.0
+    # Auto-calibration: nightly, adjust bounded params (wake score, per-strategy
+    # sizing) from the graded ledger. Off in code default; settings.yaml enables it.
+    # dry_run logs proposed changes without applying them (the graduation window).
+    # No change is applied until the ledger has >= min_outcomes graded samples.
+    auto_calibrate_enabled: bool = False
+    auto_calibrate_dry_run: bool = True
+    auto_calibrate_min_outcomes: int = 30
     # Per-role tool assignment (see tools/assignment.py). Empty -> role defaults.
     # Values are lists of tool names, `all` / `all_readonly`, or `{same_as: role}`.
     # `web_search` is a server-side Anthropic pseudo-tool.

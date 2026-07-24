@@ -399,13 +399,18 @@ class Orchestrator:
         except Exception:
             pass
         circuit = (pl.drawdown_circuit_pct / 100.0) if pl.drawdown_circuit_pct > 0 else 0.15
-        sized = int(target * drawdown_throttle(dd, soft=circuit / 2, hard=circuit))
+        # Auto-calibrated per-strategy sizing multiplier (<=1.0): scale into what
+        # the graded ledger shows works, out of what doesn't. Bounded in kv_state.
+        from .analytics.autocalibrate import size_multiplier
+        cal_mult = size_multiplier(self.journal, draft.strategy_tag)
+        sized = int(target * drawdown_throttle(dd, soft=circuit / 2, hard=circuit) * cal_mult)
         if sized < draft.qty:
             old = draft.qty
             draft.qty = max(sized, 0)
             report.notes.append(
                 f"vol-sized {draft.symbol} {old:g}->{draft.qty:g} "
                 f"(vol {vol:.0%}"
+                + (f", cal x{cal_mult:g}" if cal_mult < 1.0 else "")
                 + (f", dd {dd:.0%}" if dd > 0 else "") + ")"
             )
 
