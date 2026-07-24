@@ -151,9 +151,30 @@ CREATE TABLE IF NOT EXISTS signal_snapshot (
     mention_count INTEGER,
     atm_iv REAL,
     iv_rank REAL,
-    pc_skew REAL
+    pc_skew REAL,
+    regime_trend TEXT,
+    regime_vol TEXT,
+    template TEXT,
+    trigger_direction TEXT,
+    trigger_level REAL,
+    cand_score REAL
 );
 CREATE INDEX IF NOT EXISTS idx_snapshot_symbol ON signal_snapshot (symbol, id);
+
+CREATE TABLE IF NOT EXISTS candidate_outcomes (
+    id INTEGER PRIMARY KEY,
+    snapshot_id INTEGER NOT NULL UNIQUE REFERENCES signal_snapshot(id),
+    ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    template TEXT,
+    regime_trend TEXT,
+    regime_vol TEXT,
+    horizon_days INTEGER NOT NULL,
+    entry_price REAL,
+    forward_return REAL,
+    direction_right INTEGER
+);
+CREATE INDEX IF NOT EXISTS ix_cand_outcome_template ON candidate_outcomes (template, id);
 
 CREATE TABLE IF NOT EXISTS proposal_outcomes (
     id INTEGER PRIMARY KEY,
@@ -169,7 +190,9 @@ CREATE TABLE IF NOT EXISTS proposal_outcomes (
     stop_hit INTEGER NOT NULL DEFAULT 0,
     target_hit INTEGER NOT NULL DEFAULT 0,
     verdict_was_right INTEGER,
-    notes TEXT
+    notes TEXT,
+    regime_trend TEXT,
+    regime_vol TEXT
 );
 """
 
@@ -208,9 +231,25 @@ class Journal:
         if "slippage_bps" not in fill_cols:
             self.conn.execute("ALTER TABLE fills ADD COLUMN slippage_bps REAL")
         snap_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(signal_snapshot)")}
-        for col in ("atm_iv", "iv_rank", "pc_skew"):
+        for col in ("atm_iv", "iv_rank", "pc_skew", "trigger_level", "cand_score"):
             if col not in snap_cols:
                 self.conn.execute(f"ALTER TABLE signal_snapshot ADD COLUMN {col} REAL")
+        for col in ("regime_trend", "regime_vol", "template", "trigger_direction"):
+            if col not in snap_cols:
+                self.conn.execute(f"ALTER TABLE signal_snapshot ADD COLUMN {col} TEXT")
+        # Learning ledger for passed-over scanner candidates (graded by forward return).
+        self.conn.execute(
+            "CREATE TABLE IF NOT EXISTS candidate_outcomes ("
+            "id INTEGER PRIMARY KEY, "
+            "snapshot_id INTEGER NOT NULL UNIQUE REFERENCES signal_snapshot(id), "
+            "ts TEXT NOT NULL, symbol TEXT NOT NULL, template TEXT, "
+            "regime_trend TEXT, regime_vol TEXT, horizon_days INTEGER NOT NULL, "
+            "entry_price REAL, forward_return REAL, direction_right INTEGER)"
+        )
+        po_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(proposal_outcomes)")}
+        for col in ("regime_trend", "regime_vol"):
+            if col not in po_cols:
+                self.conn.execute(f"ALTER TABLE proposal_outcomes ADD COLUMN {col} TEXT")
         lot_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(tax_lots)")}
         if "proposal_id" not in lot_cols:
             self.conn.execute("ALTER TABLE tax_lots ADD COLUMN proposal_id INTEGER")
@@ -723,13 +762,15 @@ class Journal:
         max_adverse_usd: float | None, hypothetical_pnl: float | None,
         stop_hit: bool = False, target_hit: bool = False,
         verdict_was_right: bool | None = None, notes: str | None = None,
+        regime_trend: str | None = None, regime_vol: str | None = None,
     ) -> int:
         cur = self.conn.execute(
             """INSERT INTO proposal_outcomes
                (proposal_id, ts, horizon_days, entry_price, stop_price, target_price,
                 max_favorable_usd, max_adverse_usd, hypothetical_pnl,
-                stop_hit, target_hit, verdict_was_right, notes)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+                stop_hit, target_hit, verdict_was_right, notes,
+                regime_trend, regime_vol)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(proposal_id) DO UPDATE SET
                  ts=excluded.ts, horizon_days=excluded.horizon_days,
                  entry_price=excluded.entry_price, stop_price=excluded.stop_price,
@@ -738,12 +779,13 @@ class Journal:
                  max_adverse_usd=excluded.max_adverse_usd,
                  hypothetical_pnl=excluded.hypothetical_pnl,
                  stop_hit=excluded.stop_hit, target_hit=excluded.target_hit,
-                 verdict_was_right=excluded.verdict_was_right, notes=excluded.notes""",
+                 verdict_was_right=excluded.verdict_was_right, notes=excluded.notes,
+                 regime_trend=excluded.regime_trend, regime_vol=excluded.regime_vol""",
             (proposal_id, utcnow(), horizon_days, entry_price, stop_price, target_price,
              max_favorable_usd, max_adverse_usd, hypothetical_pnl,
              int(stop_hit), int(target_hit),
              None if verdict_was_right is None else int(verdict_was_right),
-             notes),
+             notes, regime_trend, regime_vol),
         )
         self.conn.commit()
         return int(cur.lastrowid)
@@ -812,15 +854,58 @@ class Journal:
     def record_snapshot(self, *, cycle: str, symbol: str, bid, ask, last,
                         spread_bps, features: dict | None,
                         sentiment, mention_count,
-                        atm_iv=None, iv_rank=None, pc_skew=None) -> int:
+                        atm_iv=None, iv_rank=None, pc_skew=None,
+                        regime_trend=None, regime_vol=None,
+                        template=None, trigger_direction=None,
+                        trigger_level=None, cand_score=None) -> int:
         cur = self.conn.execute(
             "INSERT INTO signal_snapshot "
             "(ts, cycle, symbol, bid, ask, last, spread_bps, features_json, "
-            "sentiment, mention_count, atm_iv, iv_rank, pc_skew) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "sentiment, mention_count, atm_iv, iv_rank, pc_skew, "
+            "regime_trend, regime_vol, template, trigger_direction, "
+            "trigger_level, cand_score) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (utcnow(), cycle, symbol.upper(), bid, ask, last, spread_bps,
              json.dumps(features) if features else None, sentiment, mention_count,
-             atm_iv, iv_rank, pc_skew),
+             atm_iv, iv_rank, pc_skew, regime_trend, regime_vol,
+             template, trigger_direction, trigger_level, cand_score),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    # -- candidate outcomes (shadow-graded scanner templates) ----------------
+
+    def candidates_needing_grade(self, *, older_than_days: int,
+                                 ) -> list[dict]:
+        """Signal-snapshot rows for scanner candidates (template set) old enough to
+        grade for forward return and not yet graded."""
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=older_than_days)).isoformat()
+        rows = self.conn.execute(
+            "SELECT s.* FROM signal_snapshot s "
+            "LEFT JOIN candidate_outcomes o ON o.snapshot_id = s.id "
+            "WHERE s.template IS NOT NULL AND s.last IS NOT NULL "
+            "AND s.ts <= ? AND o.id IS NULL ORDER BY s.id",
+            (cutoff,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def record_candidate_outcome(self, *, snapshot_id: int, symbol: str,
+                                 template: str | None, regime_trend: str | None,
+                                 regime_vol: str | None, horizon_days: int,
+                                 entry_price: float | None,
+                                 forward_return: float | None,
+                                 direction_right: bool | None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO candidate_outcomes "
+            "(snapshot_id, ts, symbol, template, regime_trend, regime_vol, "
+            "horizon_days, entry_price, forward_return, direction_right) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(snapshot_id) DO UPDATE SET "
+            "forward_return=excluded.forward_return, "
+            "direction_right=excluded.direction_right",
+            (snapshot_id, utcnow(), symbol.upper(), template, regime_trend,
+             regime_vol, horizon_days, entry_price, forward_return,
+             None if direction_right is None else int(direction_right)),
         )
         self.conn.commit()
         return int(cur.lastrowid)

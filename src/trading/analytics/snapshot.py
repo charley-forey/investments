@@ -91,19 +91,43 @@ def snapshot_universe(config, journal, broker, *, cycle: str = "intraday") -> in
     intel_path = config.settings.paths.intel_db
     if os.path.exists(intel_path):
         store = IntelStore(intel_path)
+    # Regime tag for the whole cycle (one read, applied to every row) so outcomes
+    # can be sliced by the tape they occurred in.
+    regime_trend = regime_vol = None
+    try:
+        from ..tools.market_context import market_regime
+        reg = market_regime(broker)
+        regime_trend, regime_vol = reg.trend, reg.vol_state
+    except Exception:
+        pass
+
+    # Candidate metadata keyed by symbol, so scanner-candidate rows carry the
+    # template/direction that the candidate_grading job scores by forward return.
+    cand_meta = {}
+    try:
+        from ..scanner.movers import load_candidates
+        for c in load_candidates(config):
+            cand_meta[c["symbol"].upper()] = c
+    except Exception:
+        pass
+
     try:
         symbols = list(config.settings.universe.core)
-        try:
-            from ..scanner.movers import active_candidate_symbols
-            for s in active_candidate_symbols(config):
-                if s not in symbols:
-                    symbols.append(s)
-        except Exception:
-            pass
+        for s in cand_meta:
+            if s not in symbols:
+                symbols.append(s)
         n = 0
         for symbol in symbols:
             s = _snapshot_symbol(config, journal, broker, store, symbol)
-            journal.record_snapshot(cycle=cycle, symbol=symbol, **s)
+            c = cand_meta.get(symbol.upper())
+            journal.record_snapshot(
+                cycle=cycle, symbol=symbol, **s,
+                regime_trend=regime_trend, regime_vol=regime_vol,
+                template=(c or {}).get("template"),
+                trigger_direction=(c or {}).get("trigger_direction"),
+                trigger_level=(c or {}).get("trigger_level"),
+                cand_score=(c or {}).get("score"),
+            )
             n += 1
         return n
     finally:
