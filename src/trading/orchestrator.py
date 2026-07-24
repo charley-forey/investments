@@ -159,9 +159,26 @@ class Orchestrator:
             return
         report.notes.append(f"LLM gate: {gate.reason}")
 
+        # Current regime — used to condition strategy selection on where each
+        # template has actually shown edge, and passed to the agent as context.
+        regime_trend = regime_vol = None
+        try:
+            from .tools.market_context import market_regime
+            reg = market_regime(self.broker)
+            regime_trend, regime_vol = reg.trend, reg.vol_state
+        except Exception:
+            pass
+
         stages = lifecycle.stages_summary(self.journal)
         perf = portfolio_summary(self.journal, self.config.settings.tax)
         extra = f"Strategy stages: {stages}\n{perf}"
+        try:
+            from .analytics.candidate_grading import regime_context
+            rc = regime_context(self.journal, regime_trend, regime_vol)
+            if rc:
+                extra += f"\n\n{rc}"
+        except Exception:
+            pass
         digest = self._intel_digest()
         if digest:
             extra += f"\n\nMarket intelligence digest:\n{digest}"
@@ -220,6 +237,42 @@ class Orchestrator:
             # Volatility-targeted sizing: shrink an oversized stock entry to a
             # risk-appropriate size (never grow it), then apply a drawdown throttle.
             self._risk_size(draft, account, report)
+
+            # Deterministic same-day re-pitch suppression: an unchanged entry idea
+            # (same symbol+side+strategy_tag) already vetoed/rejected today is
+            # dropped before spending another risk-agent LLM call on it. Exits are
+            # never suppressed. The prompt rule alone gets ignored (GOOGL 7/23).
+            if not draft.reduces_position and self.journal.repitched_today(
+                    draft.symbol, draft.side, draft.strategy_tag):
+                report.vetoed += 1
+                pid = self._journal_veto(draft, "repitch_guard", risk_mod.RiskVerdict(
+                    verdict="veto",
+                    reason=f"same-day re-pitch: {draft.side} {draft.symbol} "
+                           f"({draft.strategy_tag}) was already vetoed/rejected today",
+                    concerns=[],
+                ))
+                self._record_reasoning(pid, session)
+                continue
+
+            # Regime conditioning: skip an entry whose template has a real adverse
+            # track record in the current tape (enough samples, sub-coinflip hit
+            # rate). No-op until the graded ledger has evidence — safe by default.
+            if not draft.reduces_position:
+                from .analytics.candidate_grading import REGIME_SKIP_HIT_RATE, regime_edge
+                edge = regime_edge(self.journal, draft.strategy_tag,
+                                   regime_trend, regime_vol)
+                if edge and edge["hit_rate"] < REGIME_SKIP_HIT_RATE:
+                    report.vetoed += 1
+                    pid = self._journal_veto(draft, "regime_guard", risk_mod.RiskVerdict(
+                        verdict="veto",
+                        reason=f"{draft.strategy_tag} hit rate {edge['hit_rate']:.0%} in "
+                               f"{regime_trend}/{regime_vol} over {edge['n']} graded "
+                               f"samples (< {REGIME_SKIP_HIT_RATE:.0%}) — wrong regime",
+                        concerns=[],
+                    ))
+                    self._record_reasoning(pid, session)
+                    continue
+
             would_be_dt = self._would_be_day_trade(draft)
             verdict = self._review(
                 self.client, self.config, self.journal, self.broker, account, draft
@@ -382,13 +435,18 @@ class Orchestrator:
         except Exception:
             pass
         circuit = (pl.drawdown_circuit_pct / 100.0) if pl.drawdown_circuit_pct > 0 else 0.15
-        sized = int(target * drawdown_throttle(dd, soft=circuit / 2, hard=circuit))
+        # Auto-calibrated per-strategy sizing multiplier (<=1.0): scale into what
+        # the graded ledger shows works, out of what doesn't. Bounded in kv_state.
+        from .analytics.autocalibrate import size_multiplier
+        cal_mult = size_multiplier(self.journal, draft.strategy_tag)
+        sized = int(target * drawdown_throttle(dd, soft=circuit / 2, hard=circuit) * cal_mult)
         if sized < draft.qty:
             old = draft.qty
             draft.qty = max(sized, 0)
             report.notes.append(
                 f"vol-sized {draft.symbol} {old:g}->{draft.qty:g} "
                 f"(vol {vol:.0%}"
+                + (f", cal x{cal_mult:g}" if cal_mult < 1.0 else "")
                 + (f", dd {dd:.0%}" if dd > 0 else "") + ")"
             )
 

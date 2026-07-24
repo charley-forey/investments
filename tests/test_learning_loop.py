@@ -126,3 +126,27 @@ def test_calibration_report_builds(tmp_path):
     assert report.veto_hit_rate == 1.0
     assert report.guardrail_reasons.get("max_position") == 1
     assert "Calibration" in report.text
+
+
+def test_repitched_today_suppresses_same_day_duplicate(tmp_path):
+    """Same symbol+side+tag vetoed today -> flagged; exits, other sides, and
+    prior days are not."""
+    journal = Journal(tmp_path / "j.db")
+    pid = journal.record_proposal(
+        agent="strategy", symbol="GOOGL", asset_class="stock", side="sell",
+        qty=15, order_type="limit", strategy_tag="news-impulse", thesis="x",
+    )
+    # Before it is vetoed, an identical idea is not yet a re-pitch.
+    assert journal.repitched_today("GOOGL", "sell", "news-impulse") is False
+    journal.set_proposal_status(pid, "vetoed")
+
+    assert journal.repitched_today("GOOGL", "sell", "news-impulse") is True   # dup
+    assert journal.repitched_today("GOOGL", "buy", "news-impulse") is False   # other side
+    assert journal.repitched_today("GOOGL", "sell", "orb-breakout") is False  # other tag
+    assert journal.repitched_today("MSFT", "sell", "news-impulse") is False   # other name
+
+    # A prior-day veto must not suppress today.
+    old = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+    journal.conn.execute("UPDATE proposals SET ts=? WHERE id=?", (old, pid))
+    journal.conn.commit()
+    assert journal.repitched_today("GOOGL", "sell", "news-impulse") is False

@@ -55,6 +55,22 @@ def _bars_after(df, proposal_ts: str, horizon_days: int):
     return rows
 
 
+def _regime_at(journal, symbol: str, ts: str) -> tuple[str | None, str | None]:
+    """Regime tags from the newest signal_snapshot at/before a proposal's time —
+    so a graded pass is attributed to the tape it was made in."""
+    try:
+        row = journal.conn.execute(
+            "SELECT regime_trend, regime_vol FROM signal_snapshot "
+            "WHERE symbol=? AND ts <= ? AND regime_trend IS NOT NULL "
+            "ORDER BY id DESC LIMIT 1", (symbol.upper(), ts),
+        ).fetchone()
+        if row:
+            return row["regime_trend"], row["regime_vol"]
+    except Exception:
+        pass
+    return None, None
+
+
 def _target_price(proposal: dict, entry: float, stop: float | None,
                   default_r: float = 2.0) -> float | None:
     """Infer a take-profit from expected edge or a default R-multiple."""
@@ -180,7 +196,9 @@ def evaluate_pending(journal: Journal, broker, *,
         if outcome is None:
             report.skipped += 1
             continue
-        journal.record_proposal_outcome(proposal_id=prop["id"], **outcome)
+        rt, rv = _regime_at(journal, prop["symbol"], prop["ts"])
+        journal.record_proposal_outcome(proposal_id=prop["id"], regime_trend=rt,
+                                        regime_vol=rv, **outcome)
         report.evaluated += 1
         if outcome["verdict_was_right"] is True:
             report.right += 1

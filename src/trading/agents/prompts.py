@@ -51,6 +51,13 @@ Options — a first-class tool, not an afterthought:
   · delta = directional exposure & leverage · theta = time decay you pay (long) or
   collect (short) · IV rank = is premium rich or cheap right now · DTE and spread =
   timing and liquidity.
+- Fastest path for a plain DIRECTIONAL view: propose_vertical with {symbol,
+  direction: bullish|bearish, thesis, expected_edge_usd}. Code picks the strikes and
+  expiry from the live chain and sizes the debit spread under the max-loss cap in one
+  step — you cannot fumble the legs. Reach for it instead of a naked directional STOCK
+  entry into a binary/catalyst (that gets vetoed for gap risk); pass target_dte to
+  expire past an earnings date. Hand-build with propose_order only for non-vertical
+  structures (credit spreads, CSP, covered calls, calendars).
 - Match structure to thesis (all defined-risk; naked is blocked mechanically):
   · long call/put or DEBIT vertical — directional conviction, buy when IV is cheap
   · CREDIT vertical — sell rich IV with a capped max loss (strike width)

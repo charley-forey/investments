@@ -138,6 +138,41 @@ def run_scanner_learning_safe() -> None:
         journal.close()
 
 
+def run_signal_grading_safe() -> None:
+    """Shadow-grade matured scanner candidates by forward return (no LLM, no
+    capital) — the sample-widening half of the learning loop."""
+    from .analytics.candidate_grading import grade_pending_candidates
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        report = grade_pending_candidates(journal, AlpacaBroker(config))
+        log.info("candidate grading: graded=%d right=%d wrong=%d skipped=%d",
+                 report.graded, report.right, report.wrong, report.skipped)
+    except Exception:
+        log.exception("candidate grading failed")
+        journal.heartbeat("candidate_grading", status="error", detail="grading failed")
+    finally:
+        journal.close()
+
+
+def run_autocalibrate_safe() -> None:
+    """Turn the graded ledger into bounded parameter changes (wake score, per-
+    strategy sizing). Gated, clamped, dry-run-able — see analytics/autocalibrate."""
+    from .analytics.autocalibrate import run_autocalibrate
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        changes = run_autocalibrate(config, journal)
+        log.info("autocalibrate: %d change(s)", len(changes))
+    except Exception:
+        log.exception("autocalibrate failed")
+        journal.heartbeat("autocalibrate", status="error", detail="run failed")
+    finally:
+        journal.close()
+
+
 def run_calendar_safe() -> None:
     from .data.calendar_feed import refresh_calendar
     from .data.journal import Journal
@@ -210,6 +245,14 @@ def build_scheduler():
                       id="daily_summary", max_instances=1)
     scheduler.add_job(run_backup_safe, CronTrigger(hour="23", minute="30"),
                       id="backup", max_instances=1)
+    # Shadow-grade matured scanner candidates nightly (after the close, before backup).
+    scheduler.add_job(run_signal_grading_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="17", minute="15"),
+                      id="signal_grading", max_instances=1)
+    # Auto-calibrate bounded params from the fresh ledger (right after grading).
+    scheduler.add_job(run_autocalibrate_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="17", minute="25"),
+                      id="autocalibrate", max_instances=1)
     # Continuous market-intelligence ingestion during extended market hours.
     scheduler.add_job(
         run_intel_safe,

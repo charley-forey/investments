@@ -144,3 +144,97 @@ class TestGuardrailRegression:
     def test_naked_short_call_blocked(self):
         legs = [self.leg("sell", "call", 105, 2.0)]  # no shares
         assert not analyze_option_legs(legs).is_defined_risk
+
+
+# -- defined-risk vertical constructor + one-call propose tool ----------------
+
+def _multi_chain(spot=100.0, expiry=None):
+    """A 5-strike chain (90..110) of calls and puts around spot, mids that fall
+    away from the money — enough to actually build a vertical."""
+    expiry = expiry or (date.today() + timedelta(days=30))
+    call_mid = {90: 11.0, 95: 7.0, 100: 3.5, 105: 1.5, 110: 0.6}
+    put_mid = {90: 0.6, 95: 1.5, 100: 3.0, 105: 6.0, 110: 10.5}
+    chain = {}
+    for strike, mid in call_mid.items():
+        chain[build_occ("AAPL", expiry, "call", strike)] = _snap(mid - 0.05, mid + 0.05, iv=0.30, delta=0.5)
+    for strike, mid in put_mid.items():
+        chain[build_occ("AAPL", expiry, "put", strike)] = _snap(mid - 0.05, mid + 0.05, iv=0.34, delta=-0.5)
+    return chain
+
+
+def _rows(spot=100.0):
+    from trading.analytics.options import chain_rows
+    return chain_rows(_multi_chain(spot), "AAPL", spot, max_dte=60, moneyness_band=0.15)
+
+
+class TestBuildVertical:
+    def test_bullish_debit_call_vertical_sized_to_cap(self):
+        from trading.analytics.options import build_vertical
+        plan, note = build_vertical(_rows(), direction="bullish", spot=100.0, max_loss_usd=500.0)
+        assert note == "ok" and plan is not None
+        assert plan.right == "call"
+        assert plan.long_strike == 100.0 and plan.short_strike == 105.0   # ATM / ~5% OTM
+        assert plan.net_debit == 2.0 and plan.width == 5.0                 # 3.5 - 1.5
+        assert plan.contracts == 2 and plan.max_loss_usd == 400.0          # 500 // 200
+        assert plan.max_profit_usd == 600.0 and plan.breakeven == 102.0
+        assert [l["side"] for l in plan.legs] == ["buy", "sell"]
+        assert all(l["qty"] == 2 and l["right"] == "call" for l in plan.legs)
+
+    def test_bearish_debit_put_vertical(self):
+        from trading.analytics.options import build_vertical
+        plan, note = build_vertical(_rows(), direction="bearish", spot=100.0, max_loss_usd=500.0)
+        assert note == "ok" and plan.right == "put"
+        assert plan.long_strike == 100.0 and plan.short_strike == 95.0
+        assert plan.net_debit == 1.5 and plan.contracts == 3                # 500 // 150
+        assert plan.breakeven == 98.5
+
+    def test_budget_too_small_returns_reason(self):
+        from trading.analytics.options import build_vertical
+        plan, note = build_vertical(_rows(), direction="bullish", spot=100.0, max_loss_usd=50.0)
+        assert plan is None and "too small" in note
+
+    def test_bad_direction_and_no_rows(self):
+        from trading.analytics.options import build_vertical
+        assert build_vertical(_rows(), direction="sideways", spot=100.0, max_loss_usd=500.0)[0] is None
+        assert build_vertical([], direction="bullish", spot=100.0, max_loss_usd=500.0)[0] is None
+
+
+class TestProposeVerticalTool:
+    def test_one_call_registers_defined_risk_draft(self, tmp_path):
+        config = make_config()
+        journal = Journal(tmp_path / "j.db")
+        ctx = ToolContext(config=config, journal=journal,
+                          broker=OptionBroker(_multi_chain()), account_state=make_account(),
+                          agent_name="strategy")
+        reg = ToolRegistry(ctx, STRATEGY_TOOLS)
+        out = reg.dispatch("propose_vertical", {
+            "symbol": "AAPL", "direction": "bullish",
+            "thesis": "post-earnings continuation", "expected_edge_usd": 300,
+        })
+        assert "registered for risk review" in out
+        assert len(ctx.drafts) == 1
+        d = ctx.drafts[0]
+        assert d.asset_class == "option" and len(d.legs) == 2
+        assert d.strategy_tag == "debit-call-vertical"
+        # Independently defined-risk and within the options cap.
+        analysis = analyze_option_legs(d.legs, underlying_shares_held=0, cash_available=1e6)
+        assert analysis.is_defined_risk
+        assert analysis.max_loss_usd <= config.limits.options.max_loss_per_trade_usd
+
+    def test_budget_too_small_is_actionable_error_not_a_draft(self, tmp_path):
+        config = make_config()
+        journal = Journal(tmp_path / "j.db")
+        ctx = ToolContext(config=config, journal=journal,
+                          broker=OptionBroker(_multi_chain()), account_state=make_account(),
+                          agent_name="strategy")
+        reg = ToolRegistry(ctx, STRATEGY_TOOLS)
+        out = reg.dispatch("propose_vertical", {
+            "symbol": "AAPL", "direction": "bullish", "thesis": "x",
+            "expected_edge_usd": 100, "max_loss_usd": 50,
+        })
+        assert out.startswith("error:") and not ctx.drafts
+
+    def test_non_strategy_role_never_gets_propose_vertical(self):
+        from trading.tools.registry import READ_ONLY_TOOLS
+        assert "propose_vertical" not in READ_ONLY_TOOLS
+        assert "propose_order" not in READ_ONLY_TOOLS
