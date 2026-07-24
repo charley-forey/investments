@@ -215,9 +215,36 @@ TOOL_SCHEMAS: dict[str, dict] = {
                          "expected_edge_usd", "strategy_tag"],
         },
     },
+    "propose_vertical": {
+        "description": "Express a DIRECTIONAL view as a defined-risk debit vertical spread in "
+                       "ONE call: code picks the two strikes and expiry from the live chain and "
+                       "sizes the position under the options max-loss cap, so you cannot fumble "
+                       "the legs. direction='bullish' builds a debit CALL spread; 'bearish' a "
+                       "debit PUT spread. Prefer this over a naked directional STOCK trade into a "
+                       "binary/catalyst — the stock version gets vetoed for overnight gap risk, "
+                       "this caps the loss at the net debit. For non-vertical structures (credit "
+                       "spreads, CSP, covered calls) hand-build legs with propose_order instead.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "direction": {"type": "string", "enum": ["bullish", "bearish"]},
+                "thesis": {"type": "string"},
+                "expected_edge_usd": {"type": "number"},
+                "max_loss_usd": {"type": "number",
+                                 "description": "risk budget; capped at the options max-loss limit"},
+                "target_dte": {"type": "integer",
+                               "description": "preferred days to expiry (e.g. past an earnings date)"},
+                "strategy_tag": {"type": "string"},
+                "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            },
+            "required": ["symbol", "direction", "thesis", "expected_edge_usd"],
+        },
+    },
 }
 
-READ_ONLY_TOOLS = [t for t in sorted(TOOL_SCHEMAS) if t != "propose_order"]
+_PROPOSE_TOOLS = ("propose_order", "propose_vertical")
+READ_ONLY_TOOLS = [t for t in sorted(TOOL_SCHEMAS) if t not in _PROPOSE_TOOLS]
 STRATEGY_TOOLS = sorted(TOOL_SCHEMAS)
 
 
@@ -632,6 +659,56 @@ class ToolRegistry:
         return (f"draft #{len(self.ctx.drafts)} registered for risk review: "
                 f"{proposal.side} {proposal.qty:g} {proposal.symbol} "
                 f"({proposal.strategy_tag}). It will NOT execute unless the risk agent "
+                f"and guardrails approve.")
+
+    def _t_propose_vertical(self, inp: dict) -> str:
+        from ..analytics.options import build_vertical, chain_rows
+
+        max_props = self.ctx.config.settings.agents.max_proposals_per_cycle
+        if len(self.ctx.drafts) >= max_props:
+            return f"error: proposal budget for this cycle ({max_props}) already used"
+
+        symbol = inp["symbol"].upper()
+        direction = str(inp.get("direction", "")).lower()
+        lim = self.ctx.config.limits
+        settings = self.ctx.config.settings.agents
+
+        chain = self.ctx.broker.get_options_chain(symbol)
+        if not chain:
+            return f"no options chain for {symbol}"
+        spot = self.ctx.broker.get_quote(symbol).mid
+        rows = chain_rows(chain, symbol, spot, max_dte=settings.options_chain_max_dte,
+                          min_dte=lim.options.min_days_to_expiry, moneyness_band=0.15)
+        if not rows:
+            return f"no near-the-money contracts within {settings.options_chain_max_dte} DTE for {symbol}"
+
+        # Never let the requested budget exceed the hard options cap; the guardrail
+        # would reject it anyway. max_contracts halved: the cap counts summed leg qty.
+        budget = min(float(inp.get("max_loss_usd") or lim.options.max_loss_per_trade_usd),
+                     lim.options.max_loss_per_trade_usd)
+        plan, note = build_vertical(
+            rows, direction=direction, spot=spot, max_loss_usd=budget,
+            target_dte=inp.get("target_dte"),
+            max_contracts=max(lim.options.max_contracts_per_order // 2, 1),
+        )
+        if plan is None:
+            return f"error: could not build a {direction or '?'} vertical for {symbol}: {note}"
+
+        tag = inp.get("strategy_tag") or f"debit-{plan.right}-vertical"
+        proposal = OrderProposal(
+            agent=self.ctx.agent_name, strategy_tag=tag, symbol=symbol,
+            asset_class="option", side="buy", qty=0, order_type="limit",
+            legs=[OptionLeg(**leg) for leg in plan.legs],
+            thesis=inp["thesis"], expected_edge_usd=inp["expected_edge_usd"],
+            confidence=inp.get("confidence"),
+        )
+        size_err = self._sizing_precheck(proposal)
+        if size_err:
+            return size_err
+
+        self.ctx.drafts.append(proposal)
+        return (f"draft #{len(self.ctx.drafts)} registered for risk review: "
+                f"{plan.describe()} [{tag}]. It will NOT execute unless the risk agent "
                 f"and guardrails approve.")
 
     def _sizing_precheck(self, proposal: OrderProposal) -> str | None:

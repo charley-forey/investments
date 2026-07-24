@@ -125,7 +125,7 @@ def resolve_tools_for(agents_settings, role: str) -> ResolvedTools:
 
     # Safety invariant: only strategy may propose orders, regardless of YAML.
     if role != "strategy":
-        registry = [n for n in registry if n != "propose_order"]
+        registry = [n for n in registry if n not in ("propose_order", "propose_vertical")]
 
     max_uses = int(max_uses_cfg.get(role, 5 if role == "intel" else 3 if role == "strategy" else 0))
     if max_uses <= 0:

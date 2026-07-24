@@ -154,6 +154,116 @@ def chain_signals(rows: list[ContractRow], realized_vol: float | None) -> ChainS
                         n_contracts=len(rows))
 
 
+@dataclass
+class VerticalPlan:
+    """A sized, defined-risk debit vertical ready to become option legs.
+
+    `legs` are dicts shaped for OptionLeg(**leg): the long (buy) leg first, the
+    short (sell) leg second, same expiry, same contract count."""
+
+    direction: str          # 'bullish' | 'bearish'
+    right: str              # 'call' | 'put'
+    expiry: date
+    long_strike: float
+    short_strike: float
+    width: float
+    net_debit: float        # per share
+    contracts: int
+    max_loss_usd: float
+    max_profit_usd: float
+    breakeven: float
+    legs: list[dict]
+
+    def describe(self) -> str:
+        return (f"debit {self.right} vertical {self.expiry} "
+                f"{self.long_strike:g}/{self.short_strike:g} x{self.contracts} "
+                f"@ net debit ${self.net_debit:.2f} — max loss ${self.max_loss_usd:,.0f}, "
+                f"max profit ${self.max_profit_usd:,.0f}, breakeven {self.breakeven:.2f}")
+
+
+def build_vertical(
+    rows: list[ContractRow], *, direction: str, spot: float, max_loss_usd: float,
+    target_dte: int | None = None, target_width_pct: float = 0.05,
+    max_contracts: int = 5,
+) -> tuple[VerticalPlan | None, str]:
+    """Construct a defined-risk debit vertical from chain rows for a directional
+    view, sized so the worst case stays within `max_loss_usd`. Bullish -> debit
+    CALL spread (buy near-the-money, sell OTM); bearish -> debit PUT spread.
+
+    Returns (plan, "ok") on success or (None, reason) if no sane structure exists
+    — bad quotes, no OTM strike, or a budget too small for one contract. Pure: no
+    I/O; the guardrail re-derives max loss from the legs independently.
+    """
+    direction = (direction or "").lower()
+    if direction not in ("bullish", "bearish"):
+        return None, f"direction must be 'bullish' or 'bearish', got '{direction}'"
+    if spot <= 0:
+        return None, "no spot price to anchor strikes"
+    right = "call" if direction == "bullish" else "put"
+    cand = [r for r in rows if r.right == right and r.mid and r.mid > 0]
+    if not cand:
+        return None, f"no {right} contracts with a two-sided quote near the money"
+
+    # One expiry for both legs: closest to target_dte, else the nearest available.
+    dtes = sorted({r.dte for r in cand})
+    pick_dte = min(dtes, key=lambda d: abs(d - target_dte)) if target_dte is not None else dtes[0]
+    leg_rows = [r for r in cand if r.dte == pick_dte]
+
+    # Long leg: closest strike to spot (near-the-money). Short leg: OTM by
+    # ~target_width_pct of spot, snapped to a real strike.
+    long_row = min(leg_rows, key=lambda r: abs(r.strike - spot))
+    otm = [r for r in leg_rows
+           if (r.strike > long_row.strike if right == "call" else r.strike < long_row.strike)]
+    if not otm:
+        return None, "no OTM strike available to form the short leg"
+
+    # Pick the short strike closest to a ~target_width_pct-wide spread AMONG the
+    # ones that actually fit one contract in the budget. A single fixed width fails
+    # on high-priced underlyings (an ATM spread there costs more than the cap), so
+    # this narrows automatically until one is affordable.
+    width_target = max(spot * target_width_pct, 0.01)
+    best = None                 # (|width - target|, short_row, width, net_debit)
+    cheapest = None             # cheapest defined-risk per-contract loss, for the error
+    for r in otm:
+        width = round(abs(r.strike - long_row.strike), 2)
+        net_debit = round(long_row.mid - r.mid, 2)
+        if net_debit <= 0 or net_debit >= width:   # not a valid debit spread / bad quotes
+            continue
+        per_contract_loss = net_debit * 100.0
+        cheapest = per_contract_loss if cheapest is None else min(cheapest, per_contract_loss)
+        if per_contract_loss > max_loss_usd:        # can't afford even one contract
+            continue
+        key = abs(width - width_target)
+        if best is None or key < best[0]:
+            best = (key, r, width, net_debit)
+
+    if best is None:
+        if cheapest is None:
+            return None, "no defined-risk short strike (stale/crossed quotes?)"
+        return None, (f"budget ${max_loss_usd:,.0f} too small for one contract "
+                      f"(cheapest defined-risk spread is ${cheapest:,.0f}/contract)")
+    _, short_row, width, net_debit = best
+    per_contract_loss = net_debit * 100.0
+    contracts = min(int(max_loss_usd // per_contract_loss), max(max_contracts, 0))
+
+    breakeven = round(long_row.strike + (net_debit if right == "call" else -net_debit), 2)
+    legs = [
+        {"side": "buy", "right": right, "strike": long_row.strike, "expiry": long_row.expiry,
+         "qty": contracts, "est_premium": round(long_row.mid, 2), "occ_symbol": long_row.occ},
+        {"side": "sell", "right": right, "strike": short_row.strike, "expiry": short_row.expiry,
+         "qty": contracts, "est_premium": round(short_row.mid, 2), "occ_symbol": short_row.occ},
+    ]
+    plan = VerticalPlan(
+        direction=direction, right=right, expiry=long_row.expiry,
+        long_strike=long_row.strike, short_strike=short_row.strike, width=width,
+        net_debit=net_debit, contracts=contracts,
+        max_loss_usd=round(per_contract_loss * contracts, 2),
+        max_profit_usd=round((width - net_debit) * 100.0 * contracts, 2),
+        breakeven=breakeven, legs=legs,
+    )
+    return plan, "ok"
+
+
 def iv_rank(current_iv: float | None, history: list[float]) -> float | None:
     """Percentile (0..100) of current ATM IV within its trailing history. Needs a few
     points to be meaningful; None if insufficient history or no current IV."""
