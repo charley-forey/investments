@@ -220,6 +220,23 @@ class Orchestrator:
             # Volatility-targeted sizing: shrink an oversized stock entry to a
             # risk-appropriate size (never grow it), then apply a drawdown throttle.
             self._risk_size(draft, account, report)
+
+            # Deterministic same-day re-pitch suppression: an unchanged entry idea
+            # (same symbol+side+strategy_tag) already vetoed/rejected today is
+            # dropped before spending another risk-agent LLM call on it. Exits are
+            # never suppressed. The prompt rule alone gets ignored (GOOGL 7/23).
+            if not draft.reduces_position and self.journal.repitched_today(
+                    draft.symbol, draft.side, draft.strategy_tag):
+                report.vetoed += 1
+                pid = self._journal_veto(draft, "repitch_guard", risk_mod.RiskVerdict(
+                    verdict="veto",
+                    reason=f"same-day re-pitch: {draft.side} {draft.symbol} "
+                           f"({draft.strategy_tag}) was already vetoed/rejected today",
+                    concerns=[],
+                ))
+                self._record_reasoning(pid, session)
+                continue
+
             would_be_dt = self._would_be_day_trade(draft)
             verdict = self._review(
                 self.client, self.config, self.journal, self.broker, account, draft

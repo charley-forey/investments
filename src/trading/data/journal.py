@@ -426,6 +426,18 @@ class Journal:
         self.conn.commit()
         return int(cur.lastrowid)
 
+    def repitched_today(self, symbol: str, side: str, strategy_tag: str) -> bool:
+        """True if an identical entry idea (same symbol+side+strategy_tag) was
+        already vetoed or rejected earlier today (UTC). Drives deterministic
+        same-day re-pitch suppression — the prompt rule alone gets ignored."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        row = self.conn.execute(
+            "SELECT 1 FROM proposals WHERE symbol=? AND side=? AND strategy_tag=? "
+            "AND status IN ('vetoed','rejected') AND substr(ts,1,10)=? LIMIT 1",
+            (symbol.upper(), side, strategy_tag, today),
+        ).fetchone()
+        return row is not None
+
     def recent_strategy_tag_for(self, symbol: str) -> str | None:
         """Best-effort attribution: the strategy_tag of the most recent submitted
         proposal for this symbol. Used to tag lots opened via broker sync."""
