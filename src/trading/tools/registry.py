@@ -229,6 +229,10 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "properties": {
                 "symbol": {"type": "string"},
                 "direction": {"type": "string", "enum": ["bullish", "bearish"]},
+                "structure": {"type": "string", "enum": ["debit", "credit"],
+                              "description": "debit = buy premium (directional, cheap IV); "
+                                             "credit = sell premium (rich IV, capped max loss). "
+                                             "Default debit."},
                 "thesis": {"type": "string"},
                 "expected_edge_usd": {"type": "number"},
                 "max_loss_usd": {"type": "number",
@@ -356,6 +360,19 @@ class ToolRegistry:
         head += ("\nStructure hints: buy premium (long/debit) when IV is cheap & you have a "
                  "dated catalyst; sell premium (credit vertical / CSP / covered call) when IV "
                  "is rich. Watch theta (decay), delta (leverage), and the spread (liquidity).")
+        # Deterministic vol-premium read from IV rank + regime + event window.
+        try:
+            from ..data.calendar_provider import get_calendar_provider
+            from ..scanner.vol_premium import describe_suggestion, suggest_vol_structure
+            from .market_context import market_regime
+            trend = market_regime(self.ctx.broker).trend
+            events = get_calendar_provider(self.ctx.config).upcoming_events(
+                symbol, days=settings.options_chain_max_dte)
+            hint = describe_suggestion(suggest_vol_structure(rank, trend, bool(events)), symbol)
+            if hint:
+                head += f"\n{hint}"
+        except Exception:
+            pass
         lines = [head, "exp right strike bid ask iv delta theta vega dte occ"]
         for r in rows[:80]:
             lines.append(r.line())
@@ -686,15 +703,16 @@ class ToolRegistry:
         # would reject it anyway. max_contracts halved: the cap counts summed leg qty.
         budget = min(float(inp.get("max_loss_usd") or lim.options.max_loss_per_trade_usd),
                      lim.options.max_loss_per_trade_usd)
+        mode = str(inp.get("structure", "debit")).lower()
         plan, note = build_vertical(
-            rows, direction=direction, spot=spot, max_loss_usd=budget,
+            rows, direction=direction, spot=spot, max_loss_usd=budget, mode=mode,
             target_dte=inp.get("target_dte"),
             max_contracts=max(lim.options.max_contracts_per_order // 2, 1),
         )
         if plan is None:
-            return f"error: could not build a {direction or '?'} vertical for {symbol}: {note}"
+            return f"error: could not build a {mode} {direction or '?'} vertical for {symbol}: {note}"
 
-        tag = inp.get("strategy_tag") or f"debit-{plan.right}-vertical"
+        tag = inp.get("strategy_tag") or f"{plan.mode}-{plan.right}-vertical"
         proposal = OrderProposal(
             agent=self.ctx.agent_name, strategy_tag=tag, symbol=symbol,
             asset_class="option", side="buy", qty=0, order_type="limit",

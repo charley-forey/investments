@@ -156,50 +156,70 @@ def chain_signals(rows: list[ContractRow], realized_vol: float | None) -> ChainS
 
 @dataclass
 class VerticalPlan:
-    """A sized, defined-risk debit vertical ready to become option legs.
+    """A sized, defined-risk vertical (debit or credit) ready to become option legs.
 
-    `legs` are dicts shaped for OptionLeg(**leg): the long (buy) leg first, the
-    short (sell) leg second, same expiry, same contract count."""
+    `legs` are dicts shaped for OptionLeg(**leg). long_strike/short_strike name the
+    BUY and SELL legs respectively. net_premium is the per-share debit paid (debit
+    mode) or credit received (credit mode)."""
 
     direction: str          # 'bullish' | 'bearish'
+    mode: str               # 'debit' | 'credit'
     right: str              # 'call' | 'put'
     expiry: date
-    long_strike: float
-    short_strike: float
+    long_strike: float      # the bought leg
+    short_strike: float     # the sold leg
     width: float
-    net_debit: float        # per share
+    net_premium: float      # per share; debit paid or credit received
     contracts: int
     max_loss_usd: float
     max_profit_usd: float
     breakeven: float
     legs: list[dict]
 
+    @property
+    def net_debit(self) -> float:
+        """Back-compat alias (net premium; a debit for debit spreads)."""
+        return self.net_premium
+
     def describe(self) -> str:
-        return (f"debit {self.right} vertical {self.expiry} "
+        return (f"{self.mode} {self.right} vertical {self.expiry} "
                 f"{self.long_strike:g}/{self.short_strike:g} x{self.contracts} "
-                f"@ net debit ${self.net_debit:.2f} — max loss ${self.max_loss_usd:,.0f}, "
-                f"max profit ${self.max_profit_usd:,.0f}, breakeven {self.breakeven:.2f}")
+                f"@ net {self.mode} ${self.net_premium:.2f} — max loss "
+                f"${self.max_loss_usd:,.0f}, max profit ${self.max_profit_usd:,.0f}, "
+                f"breakeven {self.breakeven:.2f}")
+
+
+# (mode, direction) -> option right. Debit expresses direction with the leg that
+# gains from the move; credit sells the side the move argues against.
+_RIGHT = {("debit", "bullish"): "call", ("debit", "bearish"): "put",
+          ("credit", "bullish"): "put", ("credit", "bearish"): "call"}
 
 
 def build_vertical(
     rows: list[ContractRow], *, direction: str, spot: float, max_loss_usd: float,
-    target_dte: int | None = None, target_width_pct: float = 0.05,
-    max_contracts: int = 5,
+    mode: str = "debit", target_dte: int | None = None,
+    target_width_pct: float = 0.05, max_contracts: int = 5,
 ) -> tuple[VerticalPlan | None, str]:
-    """Construct a defined-risk debit vertical from chain rows for a directional
-    view, sized so the worst case stays within `max_loss_usd`. Bullish -> debit
-    CALL spread (buy near-the-money, sell OTM); bearish -> debit PUT spread.
+    """Construct a defined-risk vertical from chain rows, sized so the worst case
+    stays within `max_loss_usd`.
 
-    Returns (plan, "ok") on success or (None, reason) if no sane structure exists
-    — bad quotes, no OTM strike, or a budget too small for one contract. Pure: no
-    I/O; the guardrail re-derives max loss from the legs independently.
+    mode='debit' (directional): buy the near-the-money leg, sell the OTM wing.
+    mode='credit' (sell premium): sell the near-the-money leg, buy the OTM wing;
+      max loss = strike width - credit. Bullish uses calls (debit) / puts (credit);
+      bearish uses puts (debit) / calls (credit).
+
+    Returns (plan, "ok") or (None, reason). Pure: no I/O; the guardrail re-derives
+    max loss from the legs independently.
     """
     direction = (direction or "").lower()
+    mode = (mode or "debit").lower()
     if direction not in ("bullish", "bearish"):
         return None, f"direction must be 'bullish' or 'bearish', got '{direction}'"
+    if mode not in ("debit", "credit"):
+        return None, f"mode must be 'debit' or 'credit', got '{mode}'"
     if spot <= 0:
         return None, "no spot price to anchor strikes"
-    right = "call" if direction == "bullish" else "put"
+    right = _RIGHT[(mode, direction)]
     cand = [r for r in rows if r.right == right and r.mid and r.mid > 0]
     if not cand:
         return None, f"no {right} contracts with a two-sided quote near the money"
@@ -209,57 +229,63 @@ def build_vertical(
     pick_dte = min(dtes, key=lambda d: abs(d - target_dte)) if target_dte is not None else dtes[0]
     leg_rows = [r for r in cand if r.dte == pick_dte]
 
-    # Long leg: closest strike to spot (near-the-money). Short leg: OTM by
-    # ~target_width_pct of spot, snapped to a real strike.
-    long_row = min(leg_rows, key=lambda r: abs(r.strike - spot))
+    # Near-the-money anchor leg; the wing is OTM (calls higher, puts lower) by
+    # ~target_width_pct of spot, snapped to a real strike that fits the budget.
+    near_row = min(leg_rows, key=lambda r: abs(r.strike - spot))
     otm = [r for r in leg_rows
-           if (r.strike > long_row.strike if right == "call" else r.strike < long_row.strike)]
+           if (r.strike > near_row.strike if right == "call" else r.strike < near_row.strike)]
     if not otm:
-        return None, "no OTM strike available to form the short leg"
+        return None, "no OTM strike available to form the wing leg"
 
-    # Pick the short strike closest to a ~target_width_pct-wide spread AMONG the
-    # ones that actually fit one contract in the budget. A single fixed width fails
-    # on high-priced underlyings (an ATM spread there costs more than the cap), so
-    # this narrows automatically until one is affordable.
+    def per_contract_loss(net: float, width: float) -> float:
+        # debit: you can lose the whole debit; credit: you can lose width minus credit.
+        return (net if mode == "debit" else (width - net)) * 100.0
+
     width_target = max(spot * target_width_pct, 0.01)
-    best = None                 # (|width - target|, short_row, width, net_debit)
-    cheapest = None             # cheapest defined-risk per-contract loss, for the error
+    best = None                 # (|width - target|, wing_row, width, net)
+    cheapest = None
     for r in otm:
-        width = round(abs(r.strike - long_row.strike), 2)
-        net_debit = round(long_row.mid - r.mid, 2)
-        if net_debit <= 0 or net_debit >= width:   # not a valid debit spread / bad quotes
+        width = round(abs(r.strike - near_row.strike), 2)
+        net = round(near_row.mid - r.mid, 2)         # premium: debit paid / credit taken
+        if net <= 0 or net >= width:                 # degenerate / crossed quotes
             continue
-        per_contract_loss = net_debit * 100.0
-        cheapest = per_contract_loss if cheapest is None else min(cheapest, per_contract_loss)
-        if per_contract_loss > max_loss_usd:        # can't afford even one contract
+        pcl = per_contract_loss(net, width)
+        cheapest = pcl if cheapest is None else min(cheapest, pcl)
+        if pcl > max_loss_usd:
             continue
         key = abs(width - width_target)
         if best is None or key < best[0]:
-            best = (key, r, width, net_debit)
+            best = (key, r, width, net)
 
     if best is None:
         if cheapest is None:
-            return None, "no defined-risk short strike (stale/crossed quotes?)"
+            return None, "no defined-risk wing strike (stale/crossed quotes?)"
         return None, (f"budget ${max_loss_usd:,.0f} too small for one contract "
                       f"(cheapest defined-risk spread is ${cheapest:,.0f}/contract)")
-    _, short_row, width, net_debit = best
-    per_contract_loss = net_debit * 100.0
-    contracts = min(int(max_loss_usd // per_contract_loss), max(max_contracts, 0))
+    _, wing_row, width, net = best
+    pcl = per_contract_loss(net, width)
+    contracts = min(int(max_loss_usd // pcl), max(max_contracts, 0))
 
-    breakeven = round(long_row.strike + (net_debit if right == "call" else -net_debit), 2)
+    # Debit: buy near, sell wing. Credit: sell near, buy wing.
+    if mode == "debit":
+        buy_row, sell_row = near_row, wing_row
+    else:
+        buy_row, sell_row = wing_row, near_row
+    # Breakeven sits net away from the near-money strike, toward OTM for the wing.
+    breakeven = round(near_row.strike + (net if right == "call" else -net), 2)
     legs = [
-        {"side": "buy", "right": right, "strike": long_row.strike, "expiry": long_row.expiry,
-         "qty": contracts, "est_premium": round(long_row.mid, 2), "occ_symbol": long_row.occ},
-        {"side": "sell", "right": right, "strike": short_row.strike, "expiry": short_row.expiry,
-         "qty": contracts, "est_premium": round(short_row.mid, 2), "occ_symbol": short_row.occ},
+        {"side": "buy", "right": right, "strike": buy_row.strike, "expiry": buy_row.expiry,
+         "qty": contracts, "est_premium": round(buy_row.mid, 2), "occ_symbol": buy_row.occ},
+        {"side": "sell", "right": right, "strike": sell_row.strike, "expiry": sell_row.expiry,
+         "qty": contracts, "est_premium": round(sell_row.mid, 2), "occ_symbol": sell_row.occ},
     ]
+    max_loss = round(pcl * contracts, 2)
+    max_profit = round((net if mode == "credit" else (width - net)) * 100.0 * contracts, 2)
     plan = VerticalPlan(
-        direction=direction, right=right, expiry=long_row.expiry,
-        long_strike=long_row.strike, short_strike=short_row.strike, width=width,
-        net_debit=net_debit, contracts=contracts,
-        max_loss_usd=round(per_contract_loss * contracts, 2),
-        max_profit_usd=round((width - net_debit) * 100.0 * contracts, 2),
-        breakeven=breakeven, legs=legs,
+        direction=direction, mode=mode, right=right, expiry=near_row.expiry,
+        long_strike=buy_row.strike, short_strike=sell_row.strike, width=width,
+        net_premium=net, contracts=contracts, max_loss_usd=max_loss,
+        max_profit_usd=max_profit, breakeven=breakeven, legs=legs,
     )
     return plan, "ok"
 
