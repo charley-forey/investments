@@ -49,6 +49,7 @@ def run_scoring_session(
         agent_name="scoring",
         web_search=resolved.web_search,
         web_search_max_uses=resolved.web_search_max_uses,
+        effort=config.settings.agents.effort_for("scoring"),
     )
     lessons = [
         line.strip()[2:].strip()

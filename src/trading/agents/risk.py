@@ -115,6 +115,9 @@ def review_proposal(
             system=system,
             messages=messages,
         )
+        effort = config.settings.agents.effort_for(agent_name)
+        if effort:
+            create_kwargs["output_config"] = {"effort": effort}
         if tools:
             create_kwargs["tools"] = tools
         response = client.messages.create(**create_kwargs)

@@ -64,6 +64,9 @@ def run_intel_session(client, config: Config, store: IntelStore) -> str:
             system=system,
             messages=messages,
         )
+        effort = config.settings.agents.effort_for("intel")
+        if effort:
+            kwargs["output_config"] = {"effort": effort}
         if tools:
             kwargs["tools"] = tools
         response = client.messages.create(**kwargs)

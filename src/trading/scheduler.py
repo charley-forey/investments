@@ -32,6 +32,15 @@ def run_cycle_safe(cycle: str) -> None:
     except Exception as e:  # noqa: BLE001 — daemon must survive any cycle failure
         log.exception("cycle %s failed", cycle)
         journal.heartbeat(f"cycle:{cycle}", status="error", detail=str(e))
+        # Surviving the failure quietly is how a dead system looks healthy. On
+        # 2026-07-24 the Anthropic credit balance ran out at 12:32 EDT and every
+        # cycle failed for the last 3.5 hours of the session with no alert — the
+        # postclose review and lesson extraction silently never ran.
+        try:
+            from .notify import notify_event
+            notify_event(config, journal, f"cycle {cycle} FAILED", str(e)[:400])
+        except Exception:
+            log.exception("could not send failure notification")
     finally:
         journal.close()
 
