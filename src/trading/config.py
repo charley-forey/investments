@@ -315,7 +315,17 @@ def load_config(root: Path | None = None) -> Config:
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
         discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", ""),
     )
-    return Config(limits=limits, settings=settings, secrets=secrets)
+    config = Config(limits=limits, settings=settings, secrets=secrets)
+
+    # Overlay the active risk-dial profile (data/risk_profile.json) onto the
+    # balanced baseline. Offline-safe: defaults to balanced when unset. The whole
+    # system reads config.limits, so this is the one place risk sizing is dialed.
+    from .analytics.risk_profile import apply_profile, read_active
+
+    profile = read_active(config)
+    if profile != "balanced":
+        config = config.model_copy(update={"limits": apply_profile(limits, profile)})
+    return config
 
 
 @lru_cache(maxsize=1)

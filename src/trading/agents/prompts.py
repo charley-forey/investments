@@ -71,7 +71,10 @@ Options — a first-class tool, not an afterthought:
   stays within the options max-loss cap. Choose the contract count so the structure's
   computed worst-case loss (net debit x 100 x contracts for a debit spread;
   strike-width x 100 x contracts for a credit spread) stays at or under the options
-  max-loss cap; if even one contract exceeds it, do not propose the trade. Buy premium
+  max-loss cap (injected each cycle — a single defined-risk spread on a liquid name
+  should fit comfortably; size the contract count to the cap rather than assuming it
+  won't fit). Only skip the trade if even the tightest one-contract structure exceeds
+  the cap. Buy premium
   only when you can name why IV is cheap; selling premium into a binary event is usually
   a trap.
 

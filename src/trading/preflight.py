@@ -92,6 +92,21 @@ def run_preflight(config: Config, broker_factory=None) -> PreflightResult:
             r.add("market-data", q.mid > 0, f"SPY mid {q.mid:.2f}")
         except Exception as e:
             r.add("market-data", False, str(e))
+        # Quote sanity: sample a few universe names and flag a broken feed (ask<=0
+        # or artifact-wide spreads) before it silently mis-sizes trades. Sizing
+        # already refuses per-quote (Quote.book_is_usable); this catches a bad feed
+        # subscription up front. Not critical to run, but a loud warning.
+        try:
+            sample = (config.settings.universe.core or ["AAPL", "MSFT", "NVDA"])[:5]
+            bad = [s for s in sample if not broker.get_quote(s).book_is_usable]
+            ok = len(bad) <= len(sample) // 2  # majority must have real books
+            detail = (f"{len(sample) - len(bad)}/{len(sample)} usable books "
+                      f"on {config.settings.data_feed}")
+            if bad:
+                detail += f"; unusable: {', '.join(bad)}"
+            r.add("quote-sanity", ok, detail)
+        except Exception as e:
+            r.add("quote-sanity", False, str(e))
         try:
             r.add("market-clock", True, "open" if broker.market_open() else "closed")
         except Exception as e:

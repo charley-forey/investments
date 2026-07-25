@@ -456,6 +456,40 @@ def cmd_scale(args) -> int:
     return 1
 
 
+def cmd_risk(args) -> int:
+    from .analytics import risk_profile as rp
+    from .config import load_config
+
+    config = get_config()
+    journal = _journal()
+
+    if not args.profile:
+        active = rp.read_active(config)
+        # load_config (uncached) reflects the on-disk active profile's effective caps.
+        print(f"active risk profile: {active}")
+        print(f"  effective: {rp.effective_summary(load_config().limits)}")
+        for name in ("conservative", "balanced", "aggressive"):
+            d = rp.check_eligibility(journal, config.settings.tax, name)
+            mark = "current" if name == active else (
+                "available" if d.eligible else f"locked — {d.reason}")
+            print(f"  {name:<12} {mark}")
+        print("\nSet with:  trading risk <profile> [--force]")
+        return 0
+
+    d = rp.set_profile(config, journal, config.settings.tax, args.profile, force=args.force)
+    if not d.eligible:
+        print(f"refused: '{args.profile}' not available — {d.reason}")
+        print("  override with --force (records an unproven-edge warning in the journal).")
+        return 1
+    if args.force and "forced" in d.reason:
+        print(f"⚠️  WARNING: '{args.profile}' set by FORCE with an unproven edge "
+              f"({rp.check_eligibility(journal, config.settings.tax, args.profile).reason}). "
+              f"Override journaled.")
+    print(f"risk profile set to '{args.profile}'.")
+    print(f"  effective: {rp.effective_summary(load_config().limits)}")
+    return 0
+
+
 def cmd_execution(_args) -> int:
     from .execution import fill_quality_report
 
@@ -640,6 +674,14 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("allocate", help="capital allocation + P&L attribution").set_defaults(
         fn=cmd_allocate
     )
+
+    rk = sub.add_parser("risk", help="risk dial: conservative | balanced | aggressive")
+    rk.add_argument("profile", nargs="?",
+                    choices=["conservative", "balanced", "aggressive"],
+                    help="omit to show the active profile and what's unlocked")
+    rk.add_argument("--force", action="store_true",
+                    help="apply a gated profile despite track record (journaled)")
+    rk.set_defaults(fn=cmd_risk)
 
     sc = sub.add_parser("scale", help="live-scaling ladder (human-gated)")
     sc.add_argument("action", choices=["status", "approve"])
