@@ -3,9 +3,12 @@
 # Market data feed. 'iex' is free but covers ~2% of volume: it returns ask=0 and
 # multi-percent spreads on liquid names, which poisons veto quality, cost-hurdle
 # math and exit pricing. 'sip' is the consolidated tape and is the single highest
-# -value upgrade available to this system — switch this one line once the Alpaca
-# Algo Trader Plus subscription is active (it returned 403 as of 2026-07-22).
-data_feed: sip
+# -value upgrade available to this system.
+# FLIP THIS TO 'sip' the moment the Alpaca Algo Trader Plus subscription is active,
+# then `trading preflight` (quote-sanity check) must pass before restarting the
+# daemon. Verified still 403 as of 2026-07-25 ("subscription does not permit
+# querying recent SIP data"), so it stays on iex to keep the daemon fed.
+data_feed: iex
 
 universe:
   # Mega-caps + liquid mid-caps for a $50k account (ADV/spread still enforced by limits).
