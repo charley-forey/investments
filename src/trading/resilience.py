@@ -19,6 +19,20 @@ class RetryConfig:
     factor: float = 2.0
 
 
+def is_retryable(e: BaseException) -> bool:
+    """A client error will fail identically every time — retrying it just delays
+    the report. Matches the SDKs' own policy (408/409/429/5xx). Reads `status_code`
+    duck-typed so this stays generic across the broker and Anthropic clients.
+
+    This is not hypothetical: on 2026-07-24 an exhausted Anthropic credit balance
+    returned 400 and every failing cycle burned three attempts plus backoff.
+    """
+    code = getattr(e, "status_code", None)
+    if code is None:
+        return True  # network/transport error with no HTTP status — worth a retry
+    return code in (408, 409, 429) or code >= 500
+
+
 def with_retry(
     fn: Callable[[], T],
     *,
@@ -36,7 +50,7 @@ def with_retry(
             return fn()
         except retry_on as e:
             last = e
-            if attempt >= cfg.retries:
+            if attempt >= cfg.retries or not is_retryable(e):
                 break
             delay = min(cfg.base_delay * (cfg.factor ** attempt), cfg.max_delay)
             if on_retry:

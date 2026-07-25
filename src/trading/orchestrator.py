@@ -277,6 +277,10 @@ class Orchestrator:
             verdict = self._review(
                 self.client, self.config, self.journal, self.broker, account, draft
             )
+            # The risk review is a billed LLM call per proposal — meter it, or the
+            # daily cost cap is enforced against a fraction of real spend.
+            self._record_usage("intraday", "risk", verdict.usage, report,
+                               model=self.config.settings.agents.model_for("risk"))
             if verdict.verdict != "approve":
                 report.vetoed += 1
                 pid = self._journal_veto(draft, "risk_agent", verdict)
@@ -289,6 +293,8 @@ class Orchestrator:
                 rt = self._red_team(
                     self.client, self.config, self.journal, self.broker, account, draft
                 )
+                self._record_usage("intraday", "redteam", rt.usage, report,
+                                   model=self.config.settings.agents.model_for("redteam"))
                 if rt.verdict != "approve":
                     report.vetoed += 1
                     pid = self._journal_veto(draft, "redteam", rt)
@@ -397,7 +403,7 @@ class Orchestrator:
                 agent="exit_manager", strategy_tag="deterministic_exit",
                 symbol=act.symbol, asset_class="stock", side=side, qty=abs(pos.qty),
                 order_type="limit",
-                limit_price=marketable_limit(side, q.bid, q.ask, aggressiveness=0.7),
+                limit_price=marketable_limit(side, *q.effective_book, aggressiveness=0.7),
                 reduces_position=True, thesis=f"{act.action}: {act.reason}",
                 expected_edge_usd=0.0,
             )
@@ -508,14 +514,19 @@ class Orchestrator:
         except Exception:
             pass
 
-    def _record_usage(self, cycle: str, agent: str, usage, report: CycleReport) -> None:
-        model = self.config.settings.agents.model_for(agent, cycle=cycle)
+    def _record_usage(self, cycle: str, agent: str, usage, report: CycleReport,
+                      model: str | None = None) -> None:
+        # `model` must be whatever actually served the call. The risk/redteam agents
+        # resolve their model without a cycle, so re-resolving here with one would
+        # price an Opus review at Sonnet rates and under-meter it again.
+        model = model or self.config.settings.agents.model_for(agent, cycle=cycle)
         cost_usd = cost.estimate_cost(usage, model)
         report.cost_usd += cost_usd
         self.journal.record_usage(
             cycle=cycle, agent=agent, model=model,
             input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens, cost_usd=cost_usd,
+            cache_write_tokens=getattr(usage, "cache_write_tokens", 0),
         )
 
     def _journal_veto(self, draft: OrderProposal, source: str, verdict) -> int:

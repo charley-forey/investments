@@ -73,6 +73,7 @@ def run_agent(
     agent_name: str = "agent",
     web_search: bool = False,
     web_search_max_uses: int = 0,
+    effort: str | None = None,
 ) -> AgentResult:
     system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
     tools = list(registry.schemas())
@@ -100,6 +101,8 @@ def run_agent(
                 system=system,
                 messages=messages,
             )
+            if effort:
+                kwargs["output_config"] = {"effort": effort}
             if tools:
                 kwargs["tools"] = tools
             return client.messages.create(**kwargs)

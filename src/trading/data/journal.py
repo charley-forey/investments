@@ -230,6 +230,10 @@ class Journal:
         fill_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(fills)")}
         if "slippage_bps" not in fill_cols:
             self.conn.execute("ALTER TABLE fills ADD COLUMN slippage_bps REAL")
+        usage_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(usage)")}
+        if "cache_write_tokens" not in usage_cols:
+            self.conn.execute(
+                "ALTER TABLE usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0")
         snap_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(signal_snapshot)")}
         for col in ("atm_iv", "iv_rank", "pc_skew", "trigger_level", "cand_score"):
             if col not in snap_cols:
@@ -671,14 +675,15 @@ class Journal:
     def record_usage(
         self, *, cycle: str | None, agent: str, model: str,
         input_tokens: int, output_tokens: int, cache_read_tokens: int, cost_usd: float,
+        cache_write_tokens: int = 0,
     ) -> None:
         self.conn.execute(
             """INSERT INTO usage
                (ts, cycle, agent, model, input_tokens, output_tokens,
-                cache_read_tokens, cost_usd)
-               VALUES (?,?,?,?,?,?,?,?)""",
+                cache_read_tokens, cache_write_tokens, cost_usd)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
             (utcnow(), cycle, agent, model, input_tokens, output_tokens,
-             cache_read_tokens, cost_usd),
+             cache_read_tokens, cache_write_tokens, cost_usd),
         )
         self.conn.commit()
 

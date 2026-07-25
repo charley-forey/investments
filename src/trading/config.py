@@ -199,6 +199,12 @@ class AgentSettings(BaseModel):
     # Per-cycle model overrides (e.g. sonnet for intraday, opus for research).
     # Checked before per-role overrides when cycle is provided to model_for.
     model_by_cycle: dict[str, str] = Field(default_factory=dict)
+    # Thinking/output depth. Unset means the API default ("high"), which is what
+    # every call silently used before this knob existed — and output tokens are the
+    # majority of spend. Same resolution order as model: cycle wins, then role.
+    effort: str | None = None
+    effort_by_cycle: dict[str, str] = Field(default_factory=dict)
+    effort_by_role: dict[str, str] = Field(default_factory=dict)
     # Deterministic pre-gate: skip the intraday LLM unless a trigger fires.
     # False in code default (tests); settings.yaml enables it in prod.
     trigger_gate_enabled: bool = False
@@ -225,6 +231,16 @@ class AgentSettings(BaseModel):
         if cycle and self.model_by_cycle.get(cycle):
             return self.model_by_cycle[cycle]
         return getattr(self, f"{role}_model", None) or self.model
+
+    def effort_for(self, role: str, cycle: str | None = None) -> str | None:
+        """None means 'send no effort field' — the API decides. Role beats cycle
+        here (unlike model_for): a cheap cycle should not quietly downgrade the
+        risk review, which is the one judgment we have evidence is worth paying for."""
+        if self.effort_by_role.get(role):
+            return self.effort_by_role[role]
+        if cycle and self.effort_by_cycle.get(cycle):
+            return self.effort_by_cycle[cycle]
+        return self.effort
 
     def proposals_cap(self, cycle: str = "intraday") -> int:
         if cycle == "intraday" and self.max_proposals_intraday is not None:

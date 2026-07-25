@@ -74,17 +74,25 @@ class AlpacaBroker:
     # -- market data ----------------------------------------------------------
 
     def get_quote(self, symbol: str) -> Quote:
-        from alpaca.data.requests import StockLatestQuoteRequest
+        from alpaca.data.requests import StockLatestQuoteRequest, StockLatestTradeRequest
 
         symbol = symbol.upper()
         req = StockLatestQuoteRequest(symbol_or_symbols=symbol, feed=self._feed)
         q = self.stock_data.get_stock_latest_quote(req)[symbol]
+        # The trade print is the only trustworthy price on a thin venue like IEX, whose
+        # quote goes stale or one-sided intraday. Never let a data hiccup break quoting.
+        try:
+            treq = StockLatestTradeRequest(symbol_or_symbols=symbol, feed=self._feed)
+            last = float(self.stock_data.get_stock_latest_trade(treq)[symbol].price or 0)
+        except Exception:
+            last = 0.0
         return Quote(
             symbol=symbol,
             bid=float(q.bid_price or 0),
             ask=float(q.ask_price or 0),
             bid_size=float(q.bid_size or 0),
             ask_size=float(q.ask_size or 0),
+            last=last,
         )
 
     def get_option_quote(self, option_symbol: str) -> Quote:

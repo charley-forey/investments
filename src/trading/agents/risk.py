@@ -11,6 +11,7 @@ from dataclasses import dataclass
 
 from ..broker.models import AccountState
 from ..config import Config
+from ..cost import Usage, usage_from_response
 from ..data.journal import Journal
 from ..guardrails.models import OrderProposal
 from ..tools.assignment import web_search_tool_schema
@@ -34,6 +35,11 @@ class RiskVerdict:
     verdict: str            # approve | veto
     reason: str
     concerns: list[str]
+    usage: Usage = None     # tokens spent reaching this verdict (billed, so metered)
+
+    def __post_init__(self):
+        if self.usage is None:
+            self.usage = Usage()
 
 
 def _limits_summary(config: Config) -> str:
@@ -96,6 +102,7 @@ def review_proposal(
                "cache_control": {"type": "ephemeral"}}]
     review_model = model or config.settings.agents.model_for("risk")
     messages: list[dict] = [{"role": "user", "content": user_message}]
+    spent = Usage()
     tools = list(registry.schemas())
     if resolved.web_search:
         tools.append(web_search_tool_schema(resolved.web_search_max_uses))
@@ -108,9 +115,13 @@ def review_proposal(
             system=system,
             messages=messages,
         )
+        effort = config.settings.agents.effort_for(agent_name)
+        if effort:
+            create_kwargs["output_config"] = {"effort": effort}
         if tools:
             create_kwargs["tools"] = tools
         response = client.messages.create(**create_kwargs)
+        spent.add(usage_from_response(response))
         if response.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": response.content})
             continue
@@ -149,10 +160,12 @@ def review_proposal(
         messages=messages,
         output_config={"format": {"type": "json_schema", "schema": VERDICT_SCHEMA}},
     )
+    spent.add(usage_from_response(final))
     text = next((b.text for b in final.content if b.type == "text"), "{}")
     data = json.loads(text)
     return RiskVerdict(
         verdict=data.get("verdict", "veto"),
         reason=data.get("reason", "no reason returned"),
         concerns=data.get("concerns", []),
+        usage=spent,
     )
