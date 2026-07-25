@@ -120,6 +120,47 @@ class OptionsAnalysis:
     notes: list[str] = field(default_factory=list)
 
 
+def split_option_legs(
+    legs: list[OptionLeg], positions, underlying: str
+) -> tuple[list[OptionLeg], list[OptionLeg]]:
+    """Partition legs into (closing, opening) against the current option book.
+
+    A leg is *closing* to the extent it offsets an existing option holding: same
+    OCC symbol, opposite direction (a sell closes a long, a buy closes a short),
+    up to the held contract count. Quantity beyond the held offset is *opening*.
+
+    This is what lets a legitimate close — a lone sell-to-close of a long call, or
+    buying back a short put near expiry — through the defined-risk gate, while a
+    disguised naked short (no offsetting holding) still lands in `opening` and is
+    checked as the new risk it is."""
+    from ..broker.occ import build_occ
+
+    held: dict[str, float] = {}
+    for p in positions or []:
+        if getattr(p, "asset_class", "stock") != "option":
+            continue
+        held[p.symbol.upper()] = held.get(p.symbol.upper(), 0.0) + p.qty
+
+    closing: list[OptionLeg] = []
+    opening: list[OptionLeg] = []
+    for leg in legs:
+        occ = (leg.occ_symbol
+               or build_occ(underlying, leg.expiry, leg.right, leg.strike)).upper()
+        h = held.get(occ, 0.0)
+        if leg.side == "sell" and h > 0:
+            close_qty = min(leg.qty, int(h))
+        elif leg.side == "buy" and h < 0:
+            close_qty = min(leg.qty, int(-h))
+        else:
+            close_qty = 0
+        if close_qty > 0:
+            closing.append(leg.model_copy(update={"qty": close_qty}))
+            held[occ] = h - close_qty if leg.side == "sell" else h + close_qty
+        if leg.qty - close_qty > 0:
+            opening.append(leg.model_copy(update={"qty": leg.qty - close_qty}))
+    return closing, opening
+
+
 def analyze_option_legs(
     legs: list[OptionLeg],
     *,
