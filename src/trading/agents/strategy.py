@@ -31,6 +31,8 @@ def _limits_context(config: Config, account: AccountState, journal: Journal) -> 
         f"{lim.position.max_position_pct:g}% of ${equity:,.0f} equity); "
         f"risk per trade ${risk_usd:,.0f} ({lim.position.risk_per_trade_pct:g}% equity); "
         f"order notional cap ${lim.orders.max_order_notional_usd:,.0f}; "
+        f"options max loss ${lim.options.max_loss_per_trade_usd:,.0f}/trade "
+        f"(defined-risk only); "
         f"cost hurdle {lim.cost_hurdle.min_edge_multiple:g}x estimated friction; "
         f"trades remaining today {remaining}/{lim.orders.max_new_trades_per_day}. "
         f"Size qty so notional and stop-risk clear these caps before proposing."

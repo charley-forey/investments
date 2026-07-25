@@ -37,6 +37,9 @@ stock. If the thesis has no clock, prefer shares — theta bleeds a timeless opt
 - Take profit on credit structures at a set fraction of max credit; don't hold for the
   last few dollars against tail risk.
 - Manage assignment: an assigned short put becomes shares — decide covered-call vs exit.
+- Automatic safety net: the deterministic exit manager now CLOSES any option position
+  inside `exits.option_roll_dte` of expiry (defends against assignment/expiry without you
+  babysitting). It only closes — re-opening a fresh dated structure is your decision.
 
 ## Known failure modes
 - Buying rich IV before earnings and getting crushed even when directionally right.

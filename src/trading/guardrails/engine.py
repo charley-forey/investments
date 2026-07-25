@@ -183,7 +183,9 @@ class GuardrailEngine:
         notional = account_math.proposal_notional_usd(proposal, quote)
         if notional <= 0:
             fail("notional", "order notional computes to zero — missing price/qty")
-        if notional > limits.orders.max_order_notional_usd:
+        # A position-reducing order never adds risk, so the order-notional cap must
+        # not trap you out of an exit (e.g. closing a position larger than the cap).
+        if not proposal.reduces_position and notional > limits.orders.max_order_notional_usd:
             fail("max_order_notional",
                  f"notional ${notional:,.2f} > cap ${limits.orders.max_order_notional_usd:,.2f}")
 
@@ -255,36 +257,44 @@ class GuardrailEngine:
                          f"net delta ${net_delta:,.0f} would exceed cap ${delta_cap:,.0f} "
                          f"({net_cap_pct:.0f}% of equity)")
 
-        # 8. Options rules — recompute risk independently from the legs.
+        # 8. Options rules — recompute risk independently from the legs. Only the
+        # *opening* legs add risk: a closing leg (one that offsets a held option)
+        # is exempt from the naked / max-loss / min-DTE / contract checks, since
+        # those govern the risk you take on, not the risk you shed. Closing near
+        # expiry is precisely how we defend against assignment, so a near-DTE close
+        # must never be blocked.
         computed_max_loss: float | None = None
         if proposal.is_option:
             if not proposal.legs:
                 fail("options_legs", "option proposal has no legs")
             else:
+                _closing, opening = account_math.split_option_legs(
+                    proposal.legs, account.positions, proposal.symbol)
                 shares_held = existing.qty if existing and existing.asset_class == "stock" else 0.0
                 analysis = account_math.analyze_option_legs(
-                    proposal.legs,
+                    opening,
                     underlying_shares_held=shares_held,
                     cash_available=account.cash,
                 )
                 computed_max_loss = analysis.max_loss_usd
-                if limits.options.defined_risk_only and not analysis.is_defined_risk:
-                    fail("naked_option", "; ".join(analysis.notes) or "undefined-risk structure")
-                if analysis.max_loss_usd > limits.options.max_loss_per_trade_usd:
-                    fail(
-                        "options_max_loss",
-                        f"computed max loss ${analysis.max_loss_usd:,.2f} > cap "
-                        f"${limits.options.max_loss_per_trade_usd:,.2f}",
-                    )
-                total_contracts = sum(l.qty for l in proposal.legs)
-                if total_contracts > limits.options.max_contracts_per_order:
-                    fail("options_contracts",
-                         f"{total_contracts} contracts > cap {limits.options.max_contracts_per_order}")
-                min_expiry = min(l.expiry for l in proposal.legs)
-                dte = (min_expiry - date.today()).days
-                if dte < limits.options.min_days_to_expiry:
-                    fail("options_dte",
-                         f"{dte} days to expiry < min {limits.options.min_days_to_expiry}")
+                if opening:
+                    if limits.options.defined_risk_only and not analysis.is_defined_risk:
+                        fail("naked_option", "; ".join(analysis.notes) or "undefined-risk structure")
+                    if analysis.max_loss_usd > limits.options.max_loss_per_trade_usd:
+                        fail(
+                            "options_max_loss",
+                            f"computed max loss ${analysis.max_loss_usd:,.2f} > cap "
+                            f"${limits.options.max_loss_per_trade_usd:,.2f}",
+                        )
+                    total_contracts = sum(l.qty for l in opening)
+                    if total_contracts > limits.options.max_contracts_per_order:
+                        fail("options_contracts",
+                             f"{total_contracts} contracts > cap {limits.options.max_contracts_per_order}")
+                    min_expiry = min(l.expiry for l in opening)
+                    dte = (min_expiry - date.today()).days
+                    if dte < limits.options.min_days_to_expiry:
+                        fail("options_dte",
+                             f"{dte} days to expiry < min {limits.options.min_days_to_expiry}")
 
         # 9. Cost hurdle — expected edge must clear estimated friction.
         est_cost = account_math.estimate_cost_usd(

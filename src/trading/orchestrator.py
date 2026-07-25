@@ -392,8 +392,8 @@ class Orchestrator:
             pos = account.position_for(act.symbol)
             if pos is None or pos.qty == 0:
                 continue
-            if pos.asset_class != "stock":
-                report.notes.append(f"exit flagged (option) {act.symbol}: {act.reason}")
+            if pos.asset_class == "option":
+                self._close_option(pos, act, account, report, market_open)
                 continue
             q = quotes.get(act.symbol)
             if q is None:
@@ -412,6 +412,58 @@ class Orchestrator:
                 report.notes.append(f"exit {act.symbol} ({act.reason}): {res.status}")
             except Exception as e:
                 report.notes.append(f"exit {act.symbol} failed: {e}")
+
+    def _close_option(self, pos, act, account, report: CycleReport, market_open: bool) -> None:
+        """Execute a defined-risk close of one option position through the guardrail
+        pipeline: submit the opposite side of the held leg (sell to close a long, buy
+        to close a short), reduces_position so the guardrail treats it as risk shed,
+        not a naked open. Closing near expiry is the assignment defense — 'roll' and
+        'close' both resolve to a close here; re-opening is a fresh agent decision."""
+        from .broker.models import Quote
+        from .broker.occ import parse_occ
+        from .execution_pricing import marketable_limit
+        from .guardrails.models import OptionLeg
+
+        try:
+            parts = parse_occ(pos.symbol)
+        except ValueError:
+            report.notes.append(f"exit skipped (unparseable OCC) {pos.symbol}: {act.reason}")
+            return
+        qty = abs(int(pos.qty))
+        if qty <= 0:
+            return
+        side = "sell" if pos.qty > 0 else "buy"
+
+        limit = None
+        premium = abs(pos.market_value) / (qty * 100) if qty else 0.0  # mark fallback
+        try:
+            oq = self.broker.get_option_quote(pos.symbol)
+            bid, ask = oq.effective_book
+            if bid > 0 and ask > 0:
+                limit = round(marketable_limit(side, bid, ask, aggressiveness=0.7), 2)
+                premium = oq.mid
+        except Exception:
+            pass
+
+        leg = OptionLeg(side=side, right=parts.right, strike=parts.strike,
+                        expiry=parts.expiry, qty=qty, est_premium=max(premium, 0.0),
+                        occ_symbol=pos.symbol)
+        proposal = OrderProposal(
+            agent="exit_manager", strategy_tag="deterministic_exit",
+            symbol=parts.underlying, asset_class="option", side=side, legs=[leg],
+            order_type="limit", limit_price=limit if limit and limit > 0 else None,
+            reduces_position=True, thesis=f"{act.action}: {act.reason}",
+            expected_edge_usd=0.0,
+        )
+        try:
+            uq = self.broker.get_quote(parts.underlying)
+        except Exception:
+            uq = Quote(symbol=parts.underlying, bid=0.0, ask=0.0)
+        try:
+            res = self.pipeline.process(proposal, account, uq, market_is_open=market_open)
+            report.notes.append(f"option exit {pos.symbol} ({act.reason}): {res.status}")
+        except Exception as e:
+            report.notes.append(f"option exit {pos.symbol} failed: {e}")
 
     def _risk_size(self, draft: OrderProposal, account, report: CycleReport) -> None:
         """Clamp an opening stock buy to a volatility-targeted size (never larger than
