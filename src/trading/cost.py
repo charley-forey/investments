@@ -19,6 +19,7 @@ PRICING: dict[str, tuple[float, float]] = {
 }
 _DEFAULT = (5.0, 25.0)
 _CACHE_READ_MULT = 0.1
+_CACHE_WRITE_MULT = 1.25  # 5-minute TTL; 1h TTL would be 2.0
 
 
 @dataclass
@@ -26,11 +27,13 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
     def add(self, other: "Usage") -> None:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.cache_read_tokens += other.cache_read_tokens
+        self.cache_write_tokens += other.cache_write_tokens
 
 
 def usage_from_response(response) -> Usage:
@@ -42,15 +45,19 @@ def usage_from_response(response) -> Usage:
         input_tokens=int(getattr(u, "input_tokens", 0) or 0),
         output_tokens=int(getattr(u, "output_tokens", 0) or 0),
         cache_read_tokens=int(getattr(u, "cache_read_input_tokens", 0) or 0),
+        cache_write_tokens=int(getattr(u, "cache_creation_input_tokens", 0) or 0),
     )
 
 
 def estimate_cost(usage: Usage, model: str) -> float:
+    """The three input counts are disjoint: the API reports `input_tokens` as the
+    uncached remainder, so total prompt = input + cache_write + cache_read. Cache
+    writes bill at 1.25x input and are the easiest cost to miss entirely — every
+    cycle writes the cached system prompt."""
     in_rate, out_rate = PRICING.get(model, _DEFAULT)
-    # Non-cached input is billed at full rate; cache reads at the reduced multiple.
-    billable_input = max(0, usage.input_tokens - usage.cache_read_tokens)
     cost = (
-        billable_input * in_rate / 1_000_000
+        usage.input_tokens * in_rate / 1_000_000
+        + usage.cache_write_tokens * in_rate * _CACHE_WRITE_MULT / 1_000_000
         + usage.cache_read_tokens * in_rate * _CACHE_READ_MULT / 1_000_000
         + usage.output_tokens * out_rate / 1_000_000
     )

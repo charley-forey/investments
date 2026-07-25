@@ -68,8 +68,10 @@ class TestCost:
         assert estimate_cost(usage, "claude-opus-4-8") == pytest.approx(30.0)
 
     def test_cache_reads_discounted(self):
-        # 1M input all cache-read -> billed at 0.1x input rate = $0.50
-        usage = Usage(input_tokens=1_000_000, cache_read_tokens=1_000_000)
+        # The API reports the three input counts as disjoint: `input_tokens` is the
+        # uncached remainder, so a fully-cached 1M-token prompt is input_tokens=0.
+        # -> billed at 0.1x input rate = $0.50
+        usage = Usage(input_tokens=0, cache_read_tokens=1_000_000)
         assert estimate_cost(usage, "claude-opus-4-8") == pytest.approx(0.5)
 
     def test_unknown_model_falls_back(self):
