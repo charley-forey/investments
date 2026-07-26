@@ -154,6 +154,86 @@ def cmd_metrics(_args) -> int:
     return 0
 
 
+def cmd_tokens(args) -> int:
+    """Where the Anthropic bill actually goes, per day / agent / model.
+
+    `status` gives a 24h total, which is enough to enforce the cap and useless for
+    deciding what to change. Every cost decision so far turned on two things this
+    prints and that one does not: the input-vs-output split (it inverted when we
+    moved off Sonnet, and inverting it again changes which lever is worth pulling)
+    and whether an agent is billing without being metered at all.
+    """
+    from . import cost as cost_mod
+
+    days = int(getattr(args, "days", 7) or 7)
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    journal = _journal()
+    rows = journal.conn.execute(
+        """SELECT substr(ts,1,10) AS d, agent, model, COUNT(*) AS n,
+                  SUM(input_tokens) AS ti, SUM(cache_read_tokens) AS tr,
+                  SUM(cache_write_tokens) AS tw, SUM(output_tokens) AS to_,
+                  SUM(cost_usd) AS c
+             FROM usage WHERE ts >= ?
+            GROUP BY d, agent, model ORDER BY d, c DESC""",
+        (since,),
+    ).fetchall()
+    if not rows:
+        print(f"no metered LLM usage in the last {days}d.")
+        return 0
+
+    print(f"{'date':<11} {'agent':<9} {'model':<19} {'n':>3} "
+          f"{'in':>7} {'cached':>8} {'write':>7} {'out':>7} {'$':>7} {'$/sess':>7}")
+    in_cost = out_cost = 0.0
+    for r in rows:
+        print(f"{r['d']:<11} {r['agent']:<9} {r['model']:<19} {r['n']:>3} "
+              f"{r['ti'] // r['n']:>7} {r['tr'] // r['n']:>8} {(r['tw'] or 0) // r['n']:>7} "
+              f"{r['to_'] // r['n']:>7} {r['c']:>7.2f} {r['c'] / r['n']:>7.3f}")
+        # Split spend into input vs output so the next optimisation targets the
+        # bigger half. Same formula the cap is enforced with, not a copy of it.
+        i, o = cost_mod.split_cost(
+            cost_mod.Usage(r["ti"], r["to_"], r["tr"], r["tw"] or 0), r["model"])
+        in_cost += i
+        out_cost += o
+
+    total = in_cost + out_cost
+    stored = sum(r["c"] for r in rows)
+    sessions = sum(r["n"] for r in rows)
+    print(f"\ntotal ${total:.2f} over {days}d  (${total / days:.2f}/day, "
+          f"{sessions} sessions, ${total / sessions:.3f}/session)")
+    if total > 0:
+        print(f"input  ${in_cost:.2f}  ({100 * in_cost / total:.0f}%)   "
+              f"output ${out_cost:.2f}  ({100 * out_cost / total:.0f}%)"
+              f"   <- optimise the bigger half")
+    # The $ column is what was stored at record time; the total is recomputed from
+    # tokens at today's rates. They diverge when rows predate a pricing fix, and
+    # the cap is enforced on the stored number -- so a gap here means the cap is
+    # loose by exactly that much.
+    if stored > 0 and abs(total - stored) / stored > 0.05:
+        print(f"NOTE: rows store ${stored:.2f} but today's rates on the same tokens "
+              f"give ${total:.2f} ({100 * (total - stored) / stored:+.0f}%). Older rows "
+              f"were costed before input/cache-read were treated as disjoint; the "
+              f"daily cap is enforced on the understated figure.")
+
+    # Full history is re-sent every tool iteration, so cached reads are a multiple
+    # of the unique context. That multiple is what makes trimming a tool result
+    # worth more than its face size -- and it is invisible in the raw totals.
+    reads = sum(r["tr"] for r in rows)
+    if reads and sessions:
+        iters = get_config().settings.agents.max_tool_iterations_intraday or 12
+        unique = (reads / sessions) / (iters * (iters + 1) / 2) * iters
+        if unique > 0:
+            print(f"cache re-read amplification: {(reads / sessions) / unique:.1f}x "
+                  f"(~{unique:,.0f} unique tokens/session re-sent across {iters} iterations)")
+
+    missing = {"strategy", "risk", "redteam", "scoring", "intel"} - {r["agent"] for r in rows}
+    if missing:
+        print(f"\nWARNING: no usage rows for {', '.join(sorted(missing))}. "
+              f"If those agents ran, they were billed but not metered -- the daily "
+              f"cap is policing a fraction of real spend. Usually the daemon is on "
+              f"an older checkout than the merged orchestrator.")
+    return 0
+
+
 def cmd_preflight(_args) -> int:
     from .preflight import run_preflight
 
@@ -699,6 +779,10 @@ def main(argv: list[str] | None = None) -> int:
     it.add_argument("action", choices=["ingest", "digest", "show"])
     it.add_argument("--symbol", default=None)
     it.set_defaults(fn=cmd_intel)
+
+    tk = sub.add_parser("tokens", help="LLM spend breakdown: input vs output, per agent/model")
+    tk.add_argument("--days", type=int, default=7, help="lookback window (default 7)")
+    tk.set_defaults(fn=cmd_tokens)
 
     sub.add_parser("execution", help="fill-quality / slippage report").set_defaults(
         fn=cmd_execution

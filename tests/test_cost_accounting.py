@@ -1,7 +1,7 @@
 """Cost meter accuracy. The daily-spend cap (agents.max_daily_cost_usd) is enforced
 against this number, so an undercounting meter silently raises the real ceiling."""
 
-from trading.cost import Usage, estimate_cost, usage_from_response
+from trading.cost import Usage, estimate_cost, split_cost, usage_from_response
 
 
 class _FakeUsage:
@@ -41,6 +41,27 @@ def test_all_four_components_sum():
         + 10_000 * 25 / 1e6         # output
     )
     assert abs(estimate_cost(u, "claude-opus-4-8") - expected) < 1e-6
+
+
+def test_split_reconciles_with_the_enforced_total():
+    """`trading tokens` decides which half to optimise from split_cost, while the
+    daily cap is enforced on estimate_cost. If those two ever disagree we would be
+    tuning against one number and being throttled by another."""
+    u = Usage(input_tokens=100_000, output_tokens=10_000,
+              cache_read_tokens=500_000, cache_write_tokens=200_000)
+    for model in ("claude-opus-4-8", "claude-haiku-4-5", "unknown-model"):
+        in_cost, out_cost = split_cost(u, model)
+        assert abs((in_cost + out_cost) - estimate_cost(u, model)) < 1e-6, model
+
+
+def test_split_puts_all_three_input_kinds_on_the_input_side():
+    """Cache reads and writes are input cost. Attributing them to output would
+    point the next optimisation at thinking depth when the fat is in the prompt."""
+    u = Usage(input_tokens=1000, output_tokens=0,
+              cache_read_tokens=9000, cache_write_tokens=5000)
+    in_cost, out_cost = split_cost(u, "claude-opus-4-8")
+    assert out_cost == 0.0
+    assert in_cost > 0.0
 
 
 def test_usage_extraction_captures_cache_creation():

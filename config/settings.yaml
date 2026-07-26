@@ -1,12 +1,12 @@
-# Non-safety settings. Safety limits live in limits.yaml.
+﻿# Non-safety settings. Safety limits live in limits.yaml.
 
 # Market data feed. 'iex' is free but covers ~2% of volume: it returns ask=0 and
 # multi-percent spreads on liquid names, which poisons veto quality, cost-hurdle
 # math and exit pricing. 'sip' is the consolidated tape and is the single highest
-# -value upgrade available to this system — switch this one line once the Alpaca
-# Algo Trader Plus subscription is active (it returned 403 as of 2026-07-22).
-data_feed: sip
-
+# -value upgrade available to this system â€” switch this one line once the Alpaca
+# Algo Trader Plus subscription is active. Verified still 403 as of 2026-07-25, so
+# it stays on iex to keep the daemon fed; 	rading preflight must PASS before flipping.
+data_feed: iex
 universe:
   # Mega-caps + liquid mid-caps for a $50k account (ADV/spread still enforced by limits).
   core: [SPY, QQQ, IWM, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AMD, AVGO, MU,
@@ -36,15 +36,29 @@ paths:
 
 agents:
   model: claude-opus-4-8
+  # Summarisation/extraction roles, not judgment. Haiku is 5x cheaper on output
+  # than Sonnet and 5x cheaper than Opus, and predates the tokenizer change so
+  # there is no token-inflation offset. intel.py deliberately borrows the scoring
+  # model as its cheap tier, so this one line covers both roles.
+  # Strategy/risk/redteam stay on Opus - see model_by_cycle for why.
+  scoring_model: claude-haiku-4-5
   max_tokens: 16000
   max_daily_cost_usd: 8.0       # pause agent cycles if 24h Anthropic spend hits this (0=off)
   max_proposals_per_cycle: 2
-  max_proposals_intraday: 1     # one idea per gated scan — quality over quantity
+  max_proposals_intraday: 1     # one idea per gated scan â€” quality over quantity
   max_tool_iterations: 25
   max_tool_iterations_intraday: 12  # cut second-guessing loops on cheap scans
-  bars_lookback_days: 30
-  news_limit: 10
-  options_chain_strikes: 5          # strikes each side of the money
+  # Data width. These only cost input tokens, which are 13% of the bill and land
+  # at 0.1x once cached (Jul 24: 122.6k cache reads = $0.037/session). Widening
+  # the evidence base is the cheap direction - raised 2026-07-26 alongside the
+  # effort cut. Watch avg_out per session in the usage ledger: more input is
+  # cheap, more input that provokes more deliberation is not.
+  # NB: web_search_max_uses below is deliberately NOT raised - server-side search
+  # carries a per-use charge that cost.py does not model, so it would grow the
+  # bill invisibly.
+  bars_lookback_days: 60            # was 30
+  news_limit: 15                    # was 10
+  options_chain_strikes: 8          # strikes each side of the money (was 5)
   options_chain_max_dte: 60
   redteam_confidence_threshold: 0.7  # adversarial pass on high-conviction drafts (1.0=off)
   trigger_gate_enabled: true         # skip LLM on calm no-signal intraday cycles
@@ -55,9 +69,15 @@ agents:
   auto_calibrate_enabled: true
   auto_calibrate_dry_run: true
   auto_calibrate_min_outcomes: 30
-  # Sonnet for intraday (tool-driven, guardrail-backed); Opus for research depth.
+  # Opus everywhere. The Sonnet-for-intraday experiment (2026-07-22..24) did not
+  # save money: Opus@high averaged 6,399 output tokens/session at ~$0.32, Sonnet@
+  # medium averaged 16,154 at $0.29-0.36 and was still climbing (21.5k by 07-24).
+  # The weaker model spent 2.5x the tokens reaching the same call - and ~3x the
+  # actual text, since Opus is already on the newer tokenizer and Sonnet 4.6 is
+  # not. Output is 87% of the bill, so token efficiency beats price per token.
+  # Cheaper models are NOT the lever here; effort (below) is.
   model_by_cycle:
-    intraday: claude-sonnet-4-6
+    intraday: claude-opus-4-8
     premarket: claude-opus-4-8
     postclose: claude-opus-4-8
     weekend: claude-opus-4-8
@@ -65,8 +85,15 @@ agents:
   # agent session (p75 18.6k) while every call ran at the API default, 'high'.
   # Intraday runs many times a day over a pre-vetted watchlist and is the bulk of
   # the bill, so it steps down; the once-a-day research cycles keep their depth.
+  # 2026-07-26: intraday medium -> low. Output tokens are 87% of spend (tool
+  # results are only 13%, and mostly cached at 0.1x), so thinking depth is the
+  # only lever left that moves the number. This removes no tool, no datasource
+  # and no context - it just stops the agent re-deliberating. Paired with the
+  # move back to Opus above, expected ~$0.166/session vs $0.370.
+  # If proposals get thin, put this back to medium first - the model is not the
+  # weak link. effort_by_role keeps risk/redteam at high regardless.
   effort_by_cycle:
-    intraday: medium
+    intraday: low
     premarket: high
     postclose: medium
     weekend: high

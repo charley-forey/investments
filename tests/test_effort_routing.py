@@ -31,13 +31,21 @@ def test_global_default_is_the_fallback():
     assert s.effort_for("strategy", cycle="unknown-cycle") == "low"
 
 
+_TIERS = ["low", "medium", "high", "xhigh", "max"]
+
+
 def test_shipped_config_does_not_downgrade_risk():
     """Guards the actual settings.yaml wiring, not just the model."""
     from trading.config import load_config
     s = load_config().settings.agents
     assert s.effort_for("risk", cycle="intraday") == "high"
     assert s.effort_for("redteam", cycle="intraday") == "high"
-    assert s.effort_for("strategy", cycle="intraday") == "medium"
+    # Strategy steps down on the cheap cycle. The exact tier is a cost dial that
+    # moves (medium -> low on 2026-07-26); the invariant worth guarding is that
+    # it sits strictly below risk, so a cheaper scan can never quietly buy itself
+    # the same deliberation budget as the review that vetoes it.
+    assert (_TIERS.index(s.effort_for("strategy", cycle="intraday"))
+            < _TIERS.index(s.effort_for("risk", cycle="intraday")))
 
 
 if __name__ == "__main__":
