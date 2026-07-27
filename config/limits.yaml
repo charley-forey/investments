@@ -1,79 +1,64 @@
-# Hard limits enforced by the guardrail engine (pure Python — the LLM cannot bypass these).
-# All percentage limits are percent of current account equity, so they scale with the account.
-# This file is the BALANCED baseline, tuned for a ~$100k paper/live target:
-# 10% position = $10k, 1% risk/trade = $1k, 3% daily kill = $3k, options max loss ~1% = $1k.
-# The risk dial (analytics/risk_profile.py, `trading risk`) overlays conservative/aggressive
-# variants on top of these; the kill switch, PDT, DTE and defined-risk floor never move.
-
-mode: paper            # paper | live. Live also requires ALPACA_LIVE_* keys in .env.
-
+mode: paper
 position:
-  max_position_pct: 10.0        # max % of equity in any single position
-  max_position_usd: 10000.0     # absolute cap per position, whichever is smaller ($100k * 10%)
+  max_position_pct: 10
+  max_position_usd: 10000
   max_open_positions: 8
-  risk_per_trade_pct: 1.0       # sizing: max % of equity risked per trade (stop distance / max loss)
-
+  risk_per_trade_pct: 1
 orders:
-  max_order_notional_usd: 10000.0  # matches max_position_usd for $100k account
-  max_new_trades_per_day: 5
-  max_new_trades_per_week: 15
-  allow_market_orders: false    # limit orders only unless explicitly allowed
-  stale_order_ttl_minutes: 30   # cancel unfilled *entry* orders older than this (not bracket legs)
-  bracket_default_target_r: 2.0 # take-profit at N x risk when no target given
-
-portfolio:
-  # Tier 1: keep gross <= 100% while proving edge; Tier 2 may use up to 150% margin.
-  max_gross_exposure_pct: 100.0     # sum of |position value| as % of equity
-  max_positions_per_underlying: 2   # cap concentration in one name
-  drawdown_circuit_pct: 15.0        # peak-to-trough equity drawdown halt (0 = off)
-  elevated_vol_gross_scale: 0.5     # scale the gross-exposure cap in high-vol regimes
-  max_position_correlation: 0.9     # reject a new name too correlated with holdings (>=1 off)
-  vol_target_annual: 0.15           # target 15% annualized vol per stock entry; shrinks oversized/high-vol positions (0 = off)
-  kelly_cap: 0.25                   # fractional-Kelly ceiling
-  max_net_delta_pct: 100.0          # cap net directional delta at 100% of equity (no net leverage); 0 = off
-
-reconciliation:
-  halt_on_mismatch: true            # block new entries when broker/journal drift
-  tolerance_shares: 1.0             # ignore drift at or below this many shares
-
+  max_order_notional_usd: 10000
+  max_new_trades_per_day: 10
+  max_new_trades_per_week: 25
+  allow_market_orders: false
+  stale_order_ttl_minutes: 30
+  bracket_default_target_r: 2
 loss_kill_switch:
-  max_daily_loss_pct: 3.0       # realized + unrealized; breach cancels open orders and blocks new proposals
+  max_daily_loss_pct: 3
   requires_manual_reset: true
-
 symbols:
-  min_price: 5.0
+  min_price: 5
   min_avg_daily_volume: 500000
-  blocklist: []                 # e.g. ["TQQQ", "SQQQ"]
+  blocklist: []
   allow_leveraged_etfs: false
-
 options:
-  defined_risk_only: true       # naked short options are rejected by leg inspection
-  max_loss_per_trade_usd: 1000.0  # ~1% of $100k (balanced); the risk dial scales this
+  defined_risk_only: true
+  max_loss_per_trade_usd: 1000
   min_days_to_expiry: 7
-  max_contracts_per_order: 10
-
+  max_contracts_per_order: 100
 pdt:
-  enforce: true                 # if equity < threshold, block the 4th day trade in 5 rolling days
-  equity_threshold_usd: 25000.0
+  enforce: true
+  equity_threshold_usd: 25000
   max_day_trades_per_5_days: 3
-
 wash_sale:
   enforce: true
-  window_days: 30               # window around a realized loss in the same security
-  mode: block                   # block | defer (defer = allow re-buy, adjust basis per IRS)
-
+  window_days: 30
+  mode: block
 cost_hurdle:
   enforce: true
-  min_edge_multiple: 2.0        # expected edge must be >= N x estimated total cost
+  min_edge_multiple: 2
   option_fee_per_contract_usd: 0.05
-  slippage_bps: 5               # assumed slippage in basis points of notional
-
+  slippage_bps: 5
 live:
   approval_required: true
-  auto_submit_below_usd: 0.0    # live orders under this notional skip approval (0 = never)
-
+  auto_submit_below_usd: 0
 lifecycle:
-  # strategy promotion/demotion gates (milestone 3+)
   paper_to_live_min_trades: 30
-  paper_to_live_min_expectancy: 0.0
+  paper_to_live_min_expectancy: 0
   demote_after_losing_weeks: 2
+portfolio:
+  max_gross_exposure_pct: 100
+  max_positions_per_underlying: 2
+  drawdown_circuit_pct: 15
+  elevated_vol_gross_scale: 0.5
+  max_position_correlation: 0.9
+  vol_target_annual: 0.15
+  kelly_cap: 0.25
+  max_net_delta_pct: 100
+reconciliation:
+  halt_on_mismatch: true
+  tolerance_shares: 1
+exits:
+  stop_loss_pct: 8
+  take_profit_pct: 25
+  trailing_pct: null
+  max_holding_days: null
+  option_roll_dte: 7
