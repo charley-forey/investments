@@ -1,60 +1,88 @@
-# premarket note — 2026-07-20T15:56+00:00
+# premarket note — 2026-07-23T12:33+00:00
 
-All data gathered. Here's the updated pre-market note.
-
----
-
-# 📋 Pre-Market Watchlist — 2026-07-20
-
-**Regime:** SPY 746, trend sideways (20d≈50d), index vol calm (11%). **The key shift vs. Friday: the chip-led "Fear" panic is stabilizing, not accelerating.** Futures green pre-open (Iran de-escalation headline; Polymarket ~65% higher open), semis catching record $46B YTD ETF inflows, NVDA +1% / AMD up pre-market. Treat this as *one-day-panic-resolving* until proven otherwise — but respect that QQQ (−5.2% 20d mom) is still the laggard and the tell.
-
-**Account:** Flat. $100k equity, $400k BP, 0 positions, 0 day-trades. **Nothing needs stop/exit/expiry management.**
-
-**Data quality:** Spreads have normalized to live/liquid (NVDA $0.02, QQQ $0.05, AAPL $0.11, GOOGL $0.55, META $2.22 ≈ 0.34%). Yesterday's blown-out pre-market spread caveat is **resolved** — these levels are actionable.
-
-**⚠️ Calendar feed offline** (`data/calendar.json` not configured) — earnings dates below are inferred from the intel digest, not confirmed. Re-verify before any event-sensitive entry.
+I have what I need. Here's the pre-market note.
 
 ---
 
-## Watchlist
+# 📋 Pre-Market Watchlist — 2026-07-23
 
-### 1. META — *long continuation / pullback-buy* ⭐ top focus
-- **Structure:** Cleanest tape in the universe. +12.2% 20d mom, +8.1% above SMA, only −4.9% off high. Friday's pullback (664→646) held a **higher low at ~636 today** and is reclaiming ~648. Sentiment +0.60; Anthropic ~$10B compute-lease catalyst intact.
-- **Trigger I want:** reclaim of **656–664 on real volume** = continuation long; or a clean hold/bounce off ~636–640 = higher-low entry.
-- **Invalidation:** loss of ~620 / break of the higher-low structure.
-- **New minor overhang:** Tennessee "Instagram addictive" trial headline — noise, not thesis-changing.
+**Regime:** SPY 747.5, trend sideways (20d 745.6 ≈ 50d 745.0), realized vol 10% (calm), VIX 18.2, term slope flat. QQQ −0.5% and lagging (705). Tape is risk-neutral, digesting earnings.
 
-### 2. NVDA — *failed-breakdown / stabilization long (thesis playing out)*
-- **Structure:** Yesterday's "want a reclaim of 200–203" condition **is triggering** — 205.56, back above the shelf, tight spread, −3.3% off high, today's bar holding 204.58–207.74. Epicenter of the selloff is bouncing with the complex.
-- **Trigger I want:** confirmed hold **above ~203** with SMH/SOXX green; entry on a pullback that holds, not a chase into 208+.
-- **Invalidation:** loss of ~197 = trend re-breaks, stand down.
-- **Watch:** semi-ETF inflow narrative + any TSM/Micron read-through.
+**Dominant theme — the AI trade has bifurcated hard:**
+- **Bear side (hyperscaler capex punish):** 
+Alphabet beat with $119.8B revenue and 82% Cloud growth, then dropped ~5% after-hours after raising 2026 capex to a record $205 billion.
+ That "sell-the-beat-on-spend" reaction is the read-across risk for MSFT, META, AMZN and NVDA prints.
+- **Bull side (tangible hardware demand is real):** SMCI's preliminary print — 
+a record $60B+ backlog driven by surging AI server demand
+ — lifted the whole server/hardware complex. 
+HPE jumped over 3% premarket on surging AI server demand following SMCI earnings.
+ The skeptic's flag: 
+Super Micro's gross margin nearly doubled even as revenue landed at the low end of guidance, raising questions on AI infra valuations.
 
-### 3. AAPL — *relative-strength / rotation beneficiary* (new add)
-- **Why it's on:** The China-shock rotation *out of* chip-capex names is flowing *into* consumer-monetization — AAPL briefly overtook NVDA as most valuable. +9.5% mom, +5.7% above SMA, **only −2.2% off high**, low 38% vol / 2.7% ATR, penny spread. The lowest-drama long in the group.
-- **Trigger I want:** breakout / continuation to new highs, or a shallow pullback that holds the SMA.
-- **Invalidation:** rejection back below the SMA gap / momentum roll.
+- **Memory supercycle intact:** 
+Samsung, SK Hynix and Micron are prioritizing AI memory over consumer DRAM, sending PC memory prices soaring.
 
-### 4. GOOGL — *oversold bounce, earnings-capped* (short-horizon only)
-- **Structure:** The 343–346 support held — sharp bounce 346→357 today (+~3%). Sentiment improved to +0.50 (Intel/Google Cloud expansion, "frozen chip" efficiency story). Gemini 3.5 delay is the offsetting negative.
-- **Trigger I want:** two-sided — continuation of the bounce toward ~366 resistance, or failure back below ~350.
-- **⚠️ Event risk:** Alphabet earnings this/next week (unconfirmed w/ feed down). **Intraday / short-horizon only — do NOT carry a directional swing through the print.**
 
-### 5. AMD — *volatility monitor only (no trade)*
-- Still the most damaged: **vol 72%, ATR 7.4%, −11.5% off high** at 514. UBS-positive on MI450x/Advancing AI event and possible Anthropic customer chatter, but too violent to size sanely. On watch **only** for a big-volume capitulation-reversal bar; no entry until vol compresses.
+**Calendar (no event risk today):** FOMC **7/29** · AAPL earnings **7/30** · NVDA earnings **8/20** (clean runway). TSLA & GOOGL already reported (both faded). No mega-cap prints today.
 
-### 6. TSLA — *event-risk avoid*
-- 373, −12.3% off high, 60% vol, sentiment weak. **Earnings next week = binary event.** Stay flat unless the thesis IS the event (it isn't). Flag, don't trade.
+**Account:** Equity $99,848, cash $90,160, 0 day-trades. **2 open positions, both with resting protective stops.** Data-quality caveat: pre-market books are stale again (SMCI/AAPL both show inf% spreads) — **re-pull a tight book (<0.4%) before acting on any level.**
+
+---
+
+## ⚠️ Positions to manage
+
+### SMCI — 159 @ $31.25 (≈ $30.55, unrealized ≈ −$138) · news-impulse, day-0
+- The catalyst (backlog + margin doubling) is intact, but revenue at the low end = fade risk, and the name is high-vol (99% realized, 6.6% ATR, still 3.2x RVOL). A resting stop is in place — let it work, but this is a momentum trade, not a hold: **trim into any strong reclaim, don't marry it.**
+- **Note:** journal #14 shows a sell-159 SMCI was proposed & guardrail-approved 7/22 18:37 but the position is still open — confirm whether that exit is intended/working before adding management.
+- `Trigger: SMCI below 29.50`  *(thesis-break — exit ahead of/at the stop)*
+
+### AAPL — 15 @ $324.74 (≈ $325.9, ~flat) · trend-pullback-long, held 1d
+- Cleanest R/R leader (+10.7% mom, near highs, low 2.7% ATR). Resting stop in place. **Hard constraint: earnings 7/30** — must decide hold-through vs. flat before that print given the capex-punish tape. Lot turns long-term in 365d, so no tax urgency.
+- `Trigger: AAPL below 318`  *(loss of SMA/entry zone — exit review)*
+
+---
+
+## 👀 Watchlist
+
+### 1. DELL — *AI-hardware sympathy breakout* ⭐ (off-watchlist: cleanest live beneficiary of the SMCI catalyst)
+- +9.4% on the day, 2.9% gap, riding the server read-across. 
+Jim Cramer flagged Dell as the next winner after Super Micro's preliminary results.
+ No imminent earnings (reports late Aug). High 7.2% ATR — size small, needs an intraday held breakout, not a chase of the open pop.
+- **Invalidation:** fails to hold the gap / closes back below ~430.
+- `Trigger: DELL above 450`
+
+### 2. NVDA — *leader holding highs, clean runway*
+- 212, −0.2% off high, +6% mom, low 3.3% ATR, +2.3% today with semis firm. **Earnings 8/20 — clear of the 7/29–30 cluster**, so it's insulated from the immediate print risk (only indirect read-across from hyperscaler capex). Long on a held breakout or a pullback that holds ~205.
+- **Invalidation:** loss of ~205 shelf.
+- `Trigger: NVDA above 214`
+
+### 3. META — *leader pullback-buy, but capex-print risk building*
+- 627, −2.5% today, still +11.5% mom / +8.3% above SMA but −7.9% off high. It's a top-tier leader BUT reports into the capex-punish tape (**7/29, same day as FOMC**) — so any long is a pre-earnings swing only, exit-by 7/28. Watching a reclaim of the 640 shelf on volume.
+- **Invalidation:** loss of ~615 / higher-low break.
+- `Trigger: META above 640`
+
+### 4. MU — *memory supercycle, monitor for re-entry (no chasing)*
+- 959, the best-supported fundamental long in the universe but the tape has cooled (−8.8% mom, −21% off high) and it's a falling knife right now (9.0% ATR, 102% vol). 
+PC memory prices are soaring as the big 3 prioritize AI memory.
+ **Monitor only** until it stops going down — want a reclaim, not a knife-catch.
+- `Trigger: MU above 985`
 
 ---
 
 ## Game plan
-- **Highest-conviction watch:** META reclaim of 656–664 (leader, real catalyst, insulated from chips).
-- **Best risk/reward tape:** AAPL as the low-vol rotation long.
-- **Stabilization play:** NVDA long *only* on a held-above-203 pullback, confirmed by SMH/SOXX — no chasing.
-- **Gate everything on:** QQQ not rolling back over (it's the laggard/tell), and semis holding their bounce.
-- **Avoid:** TSLA (event), AMD (untradeable vol), and any GOOGL swing into earnings.
+- **Do not fight the capex-punish tape** into the 7/29–30 mega-cap cluster: MSFT/META/AMZN/AAPL prints all carry "justify the spend" binary risk. NVDA (8/20) and hardware names (DELL/SMCI) are the cleaner runways.
+- **Highest-conviction fresh setup:** DELL continuation as the tangible-hardware beneficiary — but only on a *held* intraday breakout with a fresh tight quote, given 7%+ ATR.
+- **Positions:** let the SMCI stop work / trim into strength (and reconcile the pending exit order); keep AAPL's stop, flat-or-decide before 7/30.
+- **Gate everything on:** QQQ (705, lagging) not rolling over, and semis holding. A tight book (<0.4%) is required before any entry — the pre-market feed is stale.
+- **Avoid:** TSLA/GOOGL (post-print fades), MU as a fresh long until it bases, APP (−11.7% mom, worst in book).
 
 ---
 
-**Summary:** Reviewed memory, an empty journal, and a flat account. The dominant change from yesterday is that the chip-led fear is stabilizing (green futures, record semi-ETF inflows, NVDA/AMD bouncing) and spreads have normalized to tradable levels. META remains the structural leader (top watch), AAPL added as the cleanest rotation long, NVDA's stabilization trigger is now firing (watch for a held pullback), GOOGL is an earnings-capped bounce, and AMD/TSLA stay on the do-not-trade list. **No orders proposed (research cycle).** Next cycle I'd watch: whether QQQ confirms the bounce, META's 656–664 reclaim, NVDA holding 203, AAPL's new-high attempt, and I'd try to get the calendar feed restored to pin down GOOGL/TSLA earnings dates.
+**Summary:** Reviewed memory, journal, a 2-position account (AAPL + SMCI, both stop-protected), market context, and the intel digest. The material development vs. yesterday: GOOGL and TSLA reported and faded, hardening the "punish AI capex" theme, while SMCI's blowout backlog validated the *tangible-hardware* side — lifting DELL/HPE. Produced a watchlist of 4 fresh names (DELL, NVDA, META, MU) plus 2 position-management items (SMCI, AAPL). **No orders proposed — research cycle.** Next cycle I'd re-pull tight quotes, watch DELL's breakout hold, NVDA above 214, whether META reclaims 640, and reconcile the open SMCI sell order against the live position.
+
+---
+Active scanner candidates (deterministic OpportunityScore):
+- SPY score=19 day=-0.1% rvol=0.8x template=relative-strength-short Trigger: SPY below 743.14
+- JOBY score=16 day=-0.3% rvol=0.7x template=relative-strength-short Trigger: JOBY below 7.48
+- AMZN score=11 day=-1.1% rvol=0.5x template=relative-strength-short Trigger: AMZN below 239.93
+- IWM score=6 day=-0.9% rvol=0.5x template=relative-strength-short Trigger: IWM below 292.62

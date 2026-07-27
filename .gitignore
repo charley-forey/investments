@@ -12,3 +12,13 @@ data/risk_profile.json
 data/backups/
 data/bars/
 .pytest_cache/
+
+# Regenerable per-cycle caches. calendar.json rebuilds from the feed
+# (`trading calendar`); candidates/triggers are rewritten every scan. Tracking
+# them means a diff every 15 minutes for state no one reads from git.
+data/calendar.json
+data/candidates.json
+data/triggers.json
+
+# Claude Code local state -- contains git worktrees, must never be committed.
+.claude/
