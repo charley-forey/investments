@@ -1,146 +1,132 @@
-﻿# Non-safety settings. Safety limits live in limits.yaml.
-
-# Market data feed. 'iex' is free but covers ~2% of volume: it returns ask=0 and
-# multi-percent spreads on liquid names, which poisons veto quality, cost-hurdle
-# math and exit pricing. 'sip' is the consolidated tape and is the single highest
-# -value upgrade available to this system â€” switch this one line once the Alpaca
-# Algo Trader Plus subscription is active. Verified still 403 as of 2026-07-25, so
-# it stays on iex to keep the daemon fed; 	rading preflight must PASS before flipping.
-data_feed: iex
 universe:
-  # Mega-caps + liquid mid-caps for a $50k account (ADV/spread still enforced by limits).
-  core: [SPY, QQQ, IWM, AAPL, MSFT, NVDA, AMZN, GOOGL, META, TSLA, AMD, AVGO, MU,
-         CRM, NFLX, JPM, LLY, UNH, XOM, COST, PLTR, COIN, GLD,
-         SMCI, DELL, APP, HIMS, SOFI, HOOD, RBLX, NET]
-
+  core:
+  - SPY
+  - QQQ
+  - IWM
+  - AAPL
+  - MSFT
+  - NVDA
+  - AMZN
+  - GOOGL
+  - META
+  - TSLA
+  - AMD
+  - AVGO
+  - MU
+  - CRM
+  - NFLX
+  - JPM
+  - LLY
+  - UNH
+  - XOM
+  - COST
+  - PLTR
+  - COIN
+  - GLD
+  - SMCI
+  - DELL
+  - APP
+  - HIMS
+  - SOFI
+  - HOOD
+  - RBLX
+  - NET
 schedule:
   timezone: America/New_York
-  premarket_research: "08:30"
+  premarket_research: 08:30
   intraday_scan_every_minutes: 15
-  movers_every_minutes: 15
-  postclose_review: "16:30"
+  postclose_review: '16:30'
   weekend_research_day: sat
-  weekend_research_time: "10:00"
-
+  weekend_research_time: '10:00'
+  intel_every_minutes: 10
+  movers_every_minutes: 15
 tax:
-  # used for after-tax expectancy scoring (milestone 3); estimates, not tax advice
   federal_short_term_rate: 0.24
   federal_long_term_rate: 0.15
   state_rate: 0.05
-
 paths:
-  journal_db: data/journal.db
-  bars_dir: data/bars
-  memory_dir: memory
-  playbooks_dir: playbooks
-
+  journal_db: C:\Users\charl\Desktop\trading\data\journal.db
+  bars_dir: C:\Users\charl\Desktop\trading\data\bars
+  bars_db: C:\Users\charl\Desktop\trading\data\bars.db
+  intel_db: C:\Users\charl\Desktop\trading\data\intel.db
+  vectors_db: C:\Users\charl\Desktop\trading\data\vectors.db
+  fundamentals_db: C:\Users\charl\Desktop\trading\data\fundamentals.db
+  memory_dir: C:\Users\charl\Desktop\trading\memory
+  playbooks_dir: C:\Users\charl\Desktop\trading\playbooks
+  calendar_file: C:\Users\charl\Desktop\trading\data\calendar.json
 agents:
   model: claude-opus-4-8
-  # Summarisation/extraction roles, not judgment. Haiku is 5x cheaper on output
-  # than Sonnet and 5x cheaper than Opus, and predates the tokenizer change so
-  # there is no token-inflation offset. intel.py deliberately borrows the scoring
-  # model as its cheap tier, so this one line covers both roles.
-  # Strategy/risk/redteam stay on Opus - see model_by_cycle for why.
-  scoring_model: claude-haiku-4-5
   max_tokens: 16000
-  max_daily_cost_usd: 8.0       # pause agent cycles if 24h Anthropic spend hits this (0=off)
   max_proposals_per_cycle: 2
-  max_proposals_intraday: 1     # one idea per gated scan â€” quality over quantity
+  max_proposals_intraday: 1
   max_tool_iterations: 25
-  max_tool_iterations_intraday: 12  # cut second-guessing loops on cheap scans
-  # Data width. These only cost input tokens, which are 13% of the bill and land
-  # at 0.1x once cached (Jul 24: 122.6k cache reads = $0.037/session). Widening
-  # the evidence base is the cheap direction - raised 2026-07-26 alongside the
-  # effort cut. Watch avg_out per session in the usage ledger: more input is
-  # cheap, more input that provokes more deliberation is not.
-  # NB: web_search_max_uses below is deliberately NOT raised - server-side search
-  # carries a per-use charge that cost.py does not model, so it would grow the
-  # bill invisibly.
-  bars_lookback_days: 60            # was 30
-  news_limit: 15                    # was 10
-  options_chain_strikes: 8          # strikes each side of the money (was 5)
+  max_tool_iterations_intraday: 12
+  bars_lookback_days: 60
+  news_limit: 15
+  options_chain_strikes: 8
   options_chain_max_dte: 60
-  redteam_confidence_threshold: 0.7  # adversarial pass on high-conviction drafts (1.0=off)
-  trigger_gate_enabled: true         # skip LLM on calm no-signal intraday cycles
-  # Auto-calibration of bounded params (wake score, per-strategy sizing) from the
-  # graded ledger. Starts in dry-run: it logs proposed changes but applies nothing
-  # until you flip auto_calibrate_dry_run to false. Applies nothing until the
-  # ledger has >= min_outcomes graded samples regardless.
-  auto_calibrate_enabled: true
-  auto_calibrate_dry_run: true
-  auto_calibrate_min_outcomes: 30
-  # Opus everywhere. The Sonnet-for-intraday experiment (2026-07-22..24) did not
-  # save money: Opus@high averaged 6,399 output tokens/session at ~$0.32, Sonnet@
-  # medium averaged 16,154 at $0.29-0.36 and was still climbing (21.5k by 07-24).
-  # The weaker model spent 2.5x the tokens reaching the same call - and ~3x the
-  # actual text, since Opus is already on the newer tokenizer and Sonnet 4.6 is
-  # not. Output is 87% of the bill, so token efficiency beats price per token.
-  # Cheaper models are NOT the lever here; effort (below) is.
+  intraday_timeframe: 5Min
+  opening_range_bars: 6
+  calendar_horizon_days: 14
+  strategy_model: null
+  risk_model: null
+  scoring_model: claude-haiku-4-5
+  redteam_model: null
   model_by_cycle:
     intraday: claude-opus-4-8
     premarket: claude-opus-4-8
     postclose: claude-opus-4-8
     weekend: claude-opus-4-8
-  # Thinking/output depth. Output tokens were 56% of spend at a median 9.8k per
-  # agent session (p75 18.6k) while every call ran at the API default, 'high'.
-  # Intraday runs many times a day over a pre-vetted watchlist and is the bulk of
-  # the bill, so it steps down; the once-a-day research cycles keep their depth.
-  # 2026-07-26: intraday medium -> low. Output tokens are 87% of spend (tool
-  # results are only 13%, and mostly cached at 0.1x), so thinking depth is the
-  # only lever left that moves the number. This removes no tool, no datasource
-  # and no context - it just stops the agent re-deliberating. Paired with the
-  # move back to Opus above, expected ~$0.166/session vs $0.370.
-  # If proposals get thin, put this back to medium first - the model is not the
-  # weak link. effort_by_role keeps risk/redteam at high regardless.
+  effort: null
   effort_by_cycle:
     intraday: low
     premarket: high
     postclose: medium
     weekend: high
-  # Role beats cycle. The risk review is the one judgment with evidence it pays
-  # for itself (its vetoes graded +$288 net), so it is NOT downgraded with the
-  # intraday cycle. Raise a role here before raising a cycle.
   effort_by_role:
     risk: high
     redteam: high
-  # Per-role tool assignment. Registry tools are listed by name; `web_search` is a
-  # server-side Anthropic pseudo-tool (not in TOOL_SCHEMAS). `all` expands to every
-  # registry tool; `{same_as: role}` copies another role's list. propose_order is
-  # only ever granted to strategy regardless of config.
+  trigger_gate_enabled: true
+  redteam_confidence_threshold: 0.7
+  max_daily_cost_usd: 15
+  auto_calibrate_enabled: true
+  auto_calibrate_dry_run: true
+  auto_calibrate_min_outcomes: 30
   tools:
     strategy:
-      - all
-      - web_search
+    - all
+    - web_search
     risk:
-      - get_account_state
-      - get_quote
-      - get_bars
-      - get_options_chain
-      - search_news
-      - get_calendar
-      - get_market_context
-      - get_features
-      - get_intraday_features
-      - read_journal
-      - get_market_intel
-      - recall_similar
-      - scan_universe
-      - get_fundamentals
-      - get_open_orders
+    - get_account_state
+    - get_quote
+    - get_bars
+    - get_options_chain
+    - search_news
+    - get_calendar
+    - get_market_context
+    - get_features
+    - get_intraday_features
+    - read_journal
+    - get_market_intel
+    - recall_similar
+    - scan_universe
+    - get_fundamentals
+    - get_open_orders
     redteam:
-      - same_as: risk
+    - same_as: risk
     scoring:
-      - read_journal
-      - read_memory
-      - read_playbook
-      - get_bars
-      - get_market_context
-      - recall_similar
+    - read_journal
+    - read_memory
+    - read_playbook
+    - get_bars
+    - get_market_context
+    - recall_similar
     intel:
-      - web_search
+    - web_search
   web_search_max_uses:
     strategy: 3
     intel: 5
     risk: 0
     redteam: 0
     scoring: 0
+data_feed: iex
