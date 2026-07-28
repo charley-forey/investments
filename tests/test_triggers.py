@@ -70,7 +70,15 @@ def test_gate_forced_open_slot(tmp_path):
         config, journal, broker, make_account(), now_et=now,
     )
     assert decision.run_llm
-    assert "forced" in decision.reason
+    assert "situational-awareness" in decision.reason
+
+    # One look per window, not one per cycle inside it: 15 minutes later the
+    # same window must no longer justify a billed LLM call.
+    again = should_run_intraday_llm(
+        config, journal, broker, make_account(),
+        now_et=now.replace(minute=59),
+    )
+    assert not again.run_llm
 
 
 def test_gate_trigger_hit(tmp_path):
