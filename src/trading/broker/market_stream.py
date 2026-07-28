@@ -27,6 +27,7 @@ log = logging.getLogger("trading.market_stream")
 
 ET = ZoneInfo("America/New_York")
 MARKET_OPEN = time(9, 30)
+MARKET_CLOSE = time(16, 0)
 OPENING_RANGE_MINUTES = 5
 # One wake per symbol per kind per this many minutes. A stock chopping across its
 # trigger would otherwise bill an LLM call on every tick.
@@ -92,6 +93,10 @@ class SessionState:
         open_dt = datetime.combine(ts_et.date(), MARKET_OPEN, tzinfo=ET)
         return open_dt <= ts_et < open_dt + timedelta(minutes=self.or_minutes)
 
+    @staticmethod
+    def _in_regular_hours(ts_et: datetime) -> bool:
+        return MARKET_OPEN <= ts_et.timetz().replace(tzinfo=None) < MARKET_CLOSE
+
     def _debounced(self, kind: str, tag: str, ts_et: datetime) -> bool:
         prev = self._fired.get((kind, tag))
         if prev and (ts_et - prev) < timedelta(minutes=DEBOUNCE_MINUTES):
@@ -124,6 +129,15 @@ class SessionState:
         events: list[WakeEvent] = []
         if prev is None:
             return events                              # no edge to detect yet
+        # Session state above still tracks premarket and after-hours prints — VWAP
+        # and the session extremes want them. Events do not fire outside regular
+        # hours, for three reasons: the daemon's intraday cycle is closed then, so
+        # an event would queue for hours and drain stale; extended-hours prints are
+        # thin enough that a crossing is not the signal it looks like; and an armed
+        # plan crossing premarket would CLAIM the plan, be rejected by the pipeline
+        # for "market closed", and be burned before the real open.
+        if not self._in_regular_hours(ts_et):
+            return events
 
         if self.or_high is not None and prev <= self.or_high < price:
             if not self._debounced("orb", "high", ts_et):
