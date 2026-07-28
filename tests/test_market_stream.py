@@ -255,6 +255,47 @@ def test_status_flags_a_stale_tick_stream(tmp_path):
     assert "15 jobs" in j.last_heartbeat("daemon")["detail"]
 
 
+
+# -- regular hours only ------------------------------------------------------
+
+def test_no_events_fire_premarket():
+    """A premarket crossing queues for hours and drains stale, because the daemon's
+    intraday cycle is closed. Observed live: GOOGL crossed at 07:18 and would have
+    sat until 09:30."""
+    st = SessionState(symbol="AAPL", triggers=[trig("above", 110.0)])
+    st.on_trade(109.0, 100, at(7, 15))
+    assert st.on_trade(110.5, 100, at(7, 18)) == []
+
+
+def test_no_events_fire_after_the_close():
+    st = SessionState(symbol="AAPL", triggers=[trig("above", 110.0)])
+    st.on_trade(109.0, 100, at(16, 30))
+    assert st.on_trade(110.5, 100, at(16, 31)) == []
+
+
+def test_an_armed_plan_is_not_burned_premarket():
+    """fire_armed_plan claims the plan BEFORE the pipeline runs, so a premarket
+    crossing would consume it, get rejected for 'market closed', and leave nothing
+    to fire at the real open."""
+    st = SessionState(symbol="AAPL", armed=[{"id": 7, "level": 110.0, "direction": "above"}])
+    st.on_trade(109.0, 100, at(8, 0))
+    assert st.on_trade(110.5, 100, at(8, 1)) == []
+
+
+def test_events_still_fire_during_regular_hours():
+    st = SessionState(symbol="AAPL", triggers=[trig("above", 110.0)])
+    _open_the_range(st)
+    st.on_trade(109.0, 100, at(10, 0))
+    assert [e.kind for e in st.on_trade(110.5, 100, at(10, 1))] == ["trigger"]
+
+
+def test_premarket_prints_still_update_session_state():
+    """VWAP and the extremes want the whole session; only EVENTS are gated."""
+    st = SessionState(symbol="AAPL")
+    st.on_trade(90.0, 100, at(7, 0))
+    assert st.session_low == 90.0 and st.vwap == 90.0
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
