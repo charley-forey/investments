@@ -421,7 +421,7 @@ def cmd_backtest(args) -> int:
     if args.walkforward:
         from backtest.walkforward import gate_strategy, walk_forward
 
-        wf = walk_forward(bars, signal)
+        wf = walk_forward(bars, signal, **bt_kw)
         print(f"{args.symbol} {args.strategy} walk-forward: {wf.summary()} "
               f"-> {'PASS' if wf.passed() else 'FAIL'}")
         if args.tag:

@@ -44,6 +44,31 @@ falls. **Cutting winners short is what costs us**, and the instinct to raise the
 win rate by taking profit early is exactly backwards — 1.0R wins 47% of the time
 and earns a quarter of what 3.0R earns.
 
+## Walk-forward — the out-of-sample check
+
+In-sample over 9 years is a lot of data but it is still one fit. Each symbol split
+into **4 sequential out-of-sample folds** (~663 bars, ~2.0y each), 10 symbols =
+**40 fold-observations**. `passed()` requires positive mean expectancy *and* ≥60%
+of traded folds positive.
+
+| target_r | positive folds | mean OOS R/trade | symbols passing gate |
+|---|---|---|---|
+| 1.5 | 24/40 (60.0%) | +0.119 | 5/10 |
+| 2.0 | 30/40 (75.0%) | +0.163 | 8/10 |
+| **2.5** | 30/40 (75.0%) | **+0.195** | 8/10 |
+| 3.0 | 34/40 (85.0%) | +0.230 | 9/10 |
+
+Per-symbol at 2.0 (`+`/`-` per fold): AAPL `+ + - +` PASS · MSFT `+ - + -` fail ·
+NVDA `+ - + +` PASS · XOM `- - + +` fail · JPM `+ + + +` PASS · SPY `+ + + -` PASS
+· UNH `+ - + +` PASS · AMD `+ + + -` PASS · COST `+ - + +` PASS · WMT `+ + + +` PASS
+
+**The relationship survives out of sample, and gets stronger.** Robustness rises
+with the target as well as expectancy — which the in-sample table could not show.
+
+Note what this says about the originally shipped 1.5: only **5 of 10** symbols
+passed, and folds were 60.0% positive — sitting exactly on the pass threshold.
+That was marginal, not safe.
+
 ## Honest limits
 
 - At high `target_r` the target stops being the exit mechanism: at 5.0R only 180
@@ -53,12 +78,18 @@ and earns a quarter of what 3.0R earns.
 - Daily bars, long only, one template, fixed 2% stop. The live system takes
   intraday entries with agent-chosen 1-2% stops. Suggestive for the live config,
   not conclusive.
-- No walk-forward split here. `trading backtest --walkforward` does that and
-  should be run before treating any of this as settled.
+- One template. `momentum_continuation` and the credit structures are untested.
+- Walk-forward folds are sequential, not re-fit — the signal is parameter-free, so
+  each fold is a clean OOS test, but this does not simulate parameter drift.
 
 ## Decision
 
-Raised `min_reward_risk` **1.5 -> 2.0**: a 42% improvement in per-trade
-expectancy, comfortably inside the sampled range, and it does not demand geometry
-so rare the system stops trading — which matters when it has not traded since
-7/23. The data supports going higher; revisit once live samples exist.
+Raised `min_reward_risk` **1.5 -> 2.5**. Out of sample that nearly doubles mean R
+per trade (+0.119 -> +0.195) and takes positive folds from 60% to 75%.
+
+**Not 3.0, which tested better on both axes.** The backtest applies this ratio to
+a mechanical 2% stop on daily bars. Live stops are agent-chosen and typically
+1-2% on intraday entries, where R=3 means demanding a 3.6% move from a name whose
+ATR is 2.5% — a multi-day move asked of an intraday trade. The backtest validates
+the *direction* strongly and the *level* only loosely, because the stop basis
+differs. Revisit once live fills exist and the two can be compared on like terms.

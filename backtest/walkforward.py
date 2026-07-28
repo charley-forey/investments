@@ -14,6 +14,7 @@ class FoldResult:
     trades: int
     expectancy: float
     net_pnl: float
+    expectancy_r: float | None = None   # per-trade R, when the run used stops
 
 
 @dataclass
@@ -47,10 +48,22 @@ class WalkForwardResult:
         return (self.mean_expectancy > min_mean_expectancy
                 and frac >= min_positive_fraction)
 
+    @property
+    def mean_expectancy_r(self) -> float | None:
+        """Mean out-of-sample R per trade — the unit min_reward_risk is set in, so
+        the validation speaks the same language as the decision it informs."""
+        vals = [f.expectancy_r for f in self.folds
+                if f.trades > 0 and f.expectancy_r is not None]
+        return sum(vals) / len(vals) if vals else None
+
     def summary(self) -> str:
-        return (f"{self.n_folds} folds ({self.evaluated_folds} traded), "
-                f"mean OOS expectancy ${self.mean_expectancy:+.2f}, "
-                f"{self.positive_folds}/{self.evaluated_folds} positive")
+        out = (f"{self.n_folds} folds ({self.evaluated_folds} traded), "
+               f"mean OOS expectancy ${self.mean_expectancy:+.2f}, "
+               f"{self.positive_folds}/{self.evaluated_folds} positive")
+        r = self.mean_expectancy_r
+        if r is not None:
+            out += f", {r:+.3f}R/trade"
+        return out
 
 
 def walk_forward(bars: list[Bar], signal: Signal, *, n_folds: int = 4,
@@ -69,7 +82,8 @@ def walk_forward(bars: list[Bar], signal: Signal, *, n_folds: int = 4,
         fold_bars = bars[start:end]
         bt = run_backtest(fold_bars, signal, **backtest_kwargs)
         result.folds.append(FoldResult(trades=bt.n, expectancy=bt.expectancy,
-                                       net_pnl=bt.net_pnl))
+                                       net_pnl=bt.net_pnl,
+                                       expectancy_r=bt.expectancy_r))
     return result
 
 

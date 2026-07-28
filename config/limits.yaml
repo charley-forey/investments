@@ -15,11 +15,14 @@ orders:
   bracket_default_target_r: 2
   # Risk two dollars to make one and no win rate saves you: at the observed 45%,
   # break-even is R=1.22. Baseline median was 0.48.
-  # Raised 1.5 -> 2.0 on 1,279 backtested trades (9y, 10 symbols, every one
-  # positive): expectancy per trade goes +0.100R -> +0.142R, and keeps rising to
-  # 3.0R. Cutting winners short is what costs us. See
-  # docs/backtest_reward_risk_2026-07-27.md.
-  min_reward_risk: 2.0
+  # 1.5 -> 2.5, confirmed OUT OF SAMPLE by walk-forward (10 symbols x 4 sequential
+  # folds): mean OOS R goes +0.119 -> +0.195 and positive folds 60% -> 75%. At 1.5
+  # only 5/10 symbols passed the gate and folds sat exactly on the 60% threshold.
+  # 3.0 tested better still (+0.230R, 85%) but is not adopted: the backtest applies
+  # this ratio to a mechanical 2% daily stop, while live stops are agent-chosen and
+  # 1-2% intraday, where R=3 means demanding a 3.6% move from a name whose ATR is
+  # 2.5%. See docs/backtest_reward_risk_2026-07-27.md.
+  min_reward_risk: 2.5
 loss_kill_switch:
   max_daily_loss_pct: 3
   requires_manual_reset: true

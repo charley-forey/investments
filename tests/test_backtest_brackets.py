@@ -1,7 +1,8 @@
 """Brackets, shorts and R-multiples in the backtester.
 
 The point of these is that the live system now enforces a reward:risk floor
-(limits.orders.min_reward_risk = 1.5) chosen from 20 hand-graded counterfactuals.
+(limits.orders.min_reward_risk, now 2.5) that began as a guess from 20
+hand-graded counterfactuals.
 A backtester that cannot simulate a stop and a target cannot tell you whether that
 number is right, so this is the machinery that turns the floor from a guess into
 something falsifiable against 9 years of bars.
@@ -131,6 +132,32 @@ def test_exit_breakdown_counts_reasons():
     b = bars((100, 101, 99, 100), (100, 101, 97, 98))
     r = run_backtest(b, enter_then_hold(), stop_pct=0.02)
     assert r.exit_breakdown() == {"stop": 1}
+
+
+
+# -- walk-forward carries the bracket through --------------------------------
+
+def test_walk_forward_forwards_bracket_kwargs_and_reports_r():
+    """The whole point of walk-forward here is validating GEOMETRY out of sample.
+    If the kwargs were dropped it would silently validate an unbracketed strategy
+    and report a confident number about something we do not trade."""
+    from backtest.walkforward import walk_forward
+
+    b = bars(*[(100 + i, 102 + i, 98 + i, 101 + i) for i in range(40)])
+    wf = walk_forward(b, enter_then_hold(), n_folds=4,
+                      stop_pct=0.02, target_r=2.0, spread_frac=0.0, slippage_bps=0.0)
+    assert wf.n_folds == 4
+    assert wf.mean_expectancy_r is not None
+    assert any(f.expectancy_r is not None for f in wf.folds)
+
+
+def test_walk_forward_reports_no_r_without_a_stop():
+    from backtest.walkforward import walk_forward
+
+    b = bars(*[(100 + i, 102 + i, 98 + i, 101 + i) for i in range(40)])
+    wf = walk_forward(b, enter_then_hold(), n_folds=4)
+    assert wf.mean_expectancy_r is None
+    assert "R/trade" not in wf.summary()
 
 
 if __name__ == "__main__":
