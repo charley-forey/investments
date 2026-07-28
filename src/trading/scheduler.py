@@ -147,6 +147,26 @@ def run_scanner_learning_safe() -> None:
         journal.close()
 
 
+def run_snapshot_safe() -> None:
+    """Per-interval signal snapshot of the whole universe (no LLM) — the learning
+    ledger candidate_grading scores by forward return.
+
+    Its own job because the intraday cycle now runs every minute to drain the tick
+    stream's wake queue, and 88 quotes + 88 rows a minute is not a snapshot, it's a
+    firehose. Regime tags move on the scale of hours, so this cadence is plenty."""
+    from .analytics.snapshot import snapshot_universe
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        n = snapshot_universe(config, journal, AlpacaBroker(config), cycle="intraday")
+        log.info("universe snapshot: %d rows", n)
+    except Exception:
+        log.exception("universe snapshot failed")
+    finally:
+        journal.close()
+
+
 def run_signal_grading_safe() -> None:
     """Shadow-grade matured scanner candidates by forward return (no LLM, no
     capital) — the sample-widening half of the learning loop."""
@@ -269,7 +289,11 @@ def build_scheduler():
                     minute=f"*/{sched.intel_every_minutes}"),
         id="intel", max_instances=1)
     # Deterministic movers / OpportunityScore scan (no LLM).
-    movers_every = getattr(sched, "movers_every_minutes", None) or sched.intraday_scan_every_minutes
+    movers_every = getattr(sched, "movers_every_minutes", None) or 15
+    scheduler.add_job(
+        run_snapshot_safe,
+        CronTrigger(day_of_week="mon-fri", hour="9-15", minute=f"*/{movers_every}"),
+        id="snapshot", max_instances=1)
     scheduler.add_job(
         run_movers_safe,
         CronTrigger(day_of_week="mon-fri", hour="9-15",

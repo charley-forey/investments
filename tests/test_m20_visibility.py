@@ -46,16 +46,14 @@ def test_zero_proposal_cycle_records_narrative(tmp_path):
     assert "proposing nothing" in log[0]["reasoning"]
 
 
-def test_cycle_records_snapshot_for_whole_universe(tmp_path):
+def test_cycle_does_not_snapshot_so_a_drain_tick_stays_cheap(tmp_path):
+    """The intraday cycle runs every minute to drain the tick stream's wake queue.
+    Snapshotting the universe from inside it would mean 88 quotes and 88 rows a
+    minute — it is a separate scheduled job (run_snapshot_safe) for exactly that
+    reason. This guards the cadence: putting it back makes the daemon a firehose."""
     orch, journal, config = _orch_zero_proposals(tmp_path)
     orch.run_cycle("intraday")
-    snaps = journal.recent_snapshots()
-    # One row per universe symbol; quote gives last, but StubBroker.get_bars is None
-    # so features degrade to NULL — proving best-effort per symbol.
-    assert {s["symbol"] for s in snaps} == {s.upper() for s in config.settings.universe.core}
-    for s in snaps:
-        assert s["last"] is not None      # from the quote mid
-        assert s["features_json"] is None  # no bars -> no features, row still written
+    assert journal.recent_snapshots() == []
 
 
 def test_snapshot_universe_standalone(tmp_path):

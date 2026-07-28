@@ -151,11 +151,10 @@ class Orchestrator:
         if not gate.run_llm:
             report.skipped = gate.reason
             report.notes.append(f"LLM skipped: {gate.reason}")
-            try:
-                from .analytics.snapshot import snapshot_universe
-                snapshot_universe(self.config, self.journal, self.broker, cycle="intraday")
-            except Exception as e:
-                report.notes.append(f"snapshot failed: {e}")
+            # The universe snapshot is its own scheduled job. It used to run here,
+            # which made a skipped cycle cost 88 quotes and 88 rows — affordable at
+            # a 15-minute cadence, ruinous now that this runs every minute to drain
+            # the tick stream's wake queue.
             return
         report.notes.append(f"LLM gate: {gate.reason}")
 
@@ -223,13 +222,6 @@ class Orchestrator:
             )
         except Exception as e:
             report.notes.append(f"cycle narrative not recorded: {e}")
-
-        # Deterministic per-interval signal snapshot of the whole universe (no LLM).
-        try:
-            from .analytics.snapshot import snapshot_universe
-            snapshot_universe(self.config, self.journal, self.broker, cycle="intraday")
-        except Exception as e:
-            report.notes.append(f"snapshot failed: {e}")
 
         for draft in session.drafts:
             # Tag discovery source from active scanner candidates / core universe.
