@@ -31,6 +31,12 @@ OPENING_RANGE_MINUTES = 5
 # One wake per symbol per kind per this many minutes. A stock chopping across its
 # trigger would otherwise bill an LLM call on every tick.
 DEBOUNCE_MINUTES = 30
+# How often the stream reports liveness. It previously only wrote a heartbeat when
+# an event fired, so on a quiet tape it was silent for hours — indistinguishable
+# from dead, and nothing else can tell: the watchdog judges only the daemon, and
+# start-trading.ps1 sees the process exists, which this codebase already learned
+# is not liveness.
+HEARTBEAT_SECONDS = 60
 # A level crossed is the trade that was approved; a level gapped through is not.
 MAX_FIRE_SLIPPAGE_PCT = 0.005
 ARMED_REFRESH_SECONDS = 30
@@ -236,6 +242,8 @@ def run_market_stream(config: Config) -> None:
     )
 
     last_refresh = [datetime.now(ET)]
+    last_beat = [datetime.min.replace(tzinfo=ET)]
+    ticks = [0]
 
     def _refresh_armed() -> None:
         """Pick up plans the daemon armed since we started, and drop fired ones."""
@@ -255,6 +263,13 @@ def run_market_stream(config: Config) -> None:
             if state is None:
                 return
             ts = t.timestamp.astimezone(ET)
+            ticks[0] += 1
+            # Liveness, throttled. Ticks are the only thing this process reliably
+            # does, so they are what proves it is alive and still receiving.
+            if (ts - last_beat[0]).total_seconds() > HEARTBEAT_SECONDS:
+                last_beat[0] = ts
+                journal.heartbeat("market_stream",
+                                  detail=f"{ticks[0]} ticks, {len(states)} symbols")
             if (ts - last_refresh[0]).total_seconds() > ARMED_REFRESH_SECONDS:
                 last_refresh[0] = ts
                 _refresh_armed()
@@ -280,4 +295,6 @@ def run_market_stream(config: Config) -> None:
 
     stream.subscribe_trades(on_trade, *states.keys())
     log.info("market stream connecting (%d symbols)", len(states))
+    journal.heartbeat("market_stream",
+                      detail=f"connecting: {len(states)} symbols, feed={feed.value}")
     stream.run()

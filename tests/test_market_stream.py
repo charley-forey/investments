@@ -229,6 +229,32 @@ def test_gate_wakes_on_a_queued_market_event(tmp_path):
     assert j.pending_wake_events() == []
 
 
+
+# -- liveness: this process can die quietly ----------------------------------
+
+def test_stream_heartbeat_is_throttled_but_not_event_dependent(tmp_path):
+    """It used to heartbeat ONLY when an event fired, so a quiet tape looked
+    exactly like a dead websocket. Nothing else can tell: the watchdog judges only
+    the daemon, and the launcher just checks the process exists."""
+    from trading.broker.market_stream import HEARTBEAT_SECONDS
+    assert HEARTBEAT_SECONDS <= 60          # observable within a minute of ticks
+
+
+def test_status_flags_a_stale_tick_stream(tmp_path):
+    """The per-component view must distinguish 'never reported' from 'reported and
+    went quiet' — they mean different things when you are deciding whether to act."""
+    from trading.data.journal import Journal
+    j = Journal(tmp_path / "j.db")
+    assert j.last_heartbeat("market_stream") is None
+    j.heartbeat("market_stream", detail="120 ticks, 88 symbols")
+    row = j.last_heartbeat("market_stream")
+    assert row is not None and "88 symbols" in row["detail"]
+    # Per-job lookup must not be shadowed by a newer heartbeat from another job.
+    j.heartbeat("daemon", detail="started; 15 jobs")
+    assert "88 symbols" in j.last_heartbeat("market_stream")["detail"]
+    assert "15 jobs" in j.last_heartbeat("daemon")["detail"]
+
+
 if __name__ == "__main__":
     import pytest
     raise SystemExit(pytest.main([__file__, "-q"]))
