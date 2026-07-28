@@ -296,6 +296,20 @@ class Orchestrator:
                     self._record_reasoning(pid, session)
                     continue
 
+            # Pre-authorised: risk approved the plan, but it waits for its level.
+            # The tick stream fires it in milliseconds when price crosses, running
+            # this same pipeline at that moment against a live account and quote.
+            if draft.is_armed_plan:
+                try:
+                    pid = self._arm_plan(draft, verdict)
+                    report.notes.append(
+                        f"armed {draft.symbol} {draft.arm_direction} {draft.arm_level:g} "
+                        f"(plan {pid})")
+                    self._record_reasoning(pid, session)
+                except Exception as e:
+                    report.notes.append(f"arm {draft.symbol} failed: {e}")
+                continue
+
             # Approved by risk -> run the deterministic guardrail pipeline.
             quote = self._quote_for(draft)
             try:
@@ -576,6 +590,37 @@ class Orchestrator:
             cache_read_tokens=usage.cache_read_tokens, cost_usd=cost_usd,
             cache_write_tokens=getattr(usage, "cache_write_tokens", 0),
         )
+
+    def _arm_plan(self, draft: OrderProposal, verdict) -> int:
+        """Journal the approved-but-waiting order and store it for the tick stream.
+
+        The proposal row is written with status 'armed' so the plan is auditable
+        before it fires; the real submission gets its own proposal row at fire time,
+        which is what keeps counterfactual grading honest about when we committed."""
+        pid = self.journal.record_proposal(
+            agent=draft.agent, strategy_tag=draft.strategy_tag, symbol=draft.symbol,
+            asset_class=draft.asset_class, side=draft.side, qty=draft.qty,
+            order_type=draft.order_type, limit_price=draft.limit_price,
+            stop_price=draft.stop_price, target_price=draft.target_price,
+            legs=[l.model_dump(mode="json") for l in draft.legs] or None,
+            thesis=draft.thesis, expected_edge_usd=draft.expected_edge_usd,
+            max_loss_usd=draft.max_loss_usd, confidence=draft.confidence,
+            discovery_source=getattr(draft, "discovery_source", None),
+            score_at_entry=getattr(draft, "score_at_entry", None),
+        )
+        self.journal.set_proposal_status(pid, "armed")
+        self.journal.record_verdict(
+            pid, source="risk_agent", verdict=verdict.verdict,
+            reason=f"{verdict.reason} | armed at {draft.arm_direction} {draft.arm_level:g}",
+        )
+        expires = (datetime.now(timezone.utc)
+                   + timedelta(hours=draft.arm_valid_hours)).isoformat()
+        self.journal.arm_plan(
+            symbol=draft.symbol, direction=draft.arm_direction, level=draft.arm_level,
+            expires_at=expires, proposal_json=draft.model_dump_json(),
+            note=f"proposal {pid}",
+        )
+        return pid
 
     def _journal_veto(self, draft: OrderProposal, source: str, verdict) -> int:
         pid = self.journal.record_proposal(

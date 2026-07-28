@@ -38,6 +38,18 @@ class OrderProposal(BaseModel):
     reduces_position: bool = False          # closing/trimming an existing position
     discovery_source: str | None = None     # 'core' | 'scanner'
     score_at_entry: float | None = None     # OpportunityScore when proposed
+    # Pre-authorisation: when set, the approved order is ARMED rather than sent, and
+    # the tick stream fires it the moment price crosses this level. An LLM decision
+    # takes ~63s (measured), which is the latency floor for anything decided at the
+    # event; deciding beforehand moves execution to milliseconds. The order still
+    # runs the full guardrail pipeline at fire time, never around it.
+    arm_level: float | None = Field(default=None, gt=0)
+    arm_direction: Literal["above", "below"] | None = None
+    arm_valid_hours: float = Field(default=8.0, gt=0, le=120)
+
+    @property
+    def is_armed_plan(self) -> bool:
+        return self.arm_level is not None and self.arm_direction is not None
 
     def model_post_init(self, __context) -> None:
         self.symbol = self.symbol.upper()

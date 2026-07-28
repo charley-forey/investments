@@ -31,6 +31,9 @@ OPENING_RANGE_MINUTES = 5
 # One wake per symbol per kind per this many minutes. A stock chopping across its
 # trigger would otherwise bill an LLM call on every tick.
 DEBOUNCE_MINUTES = 30
+# A level crossed is the trade that was approved; a level gapped through is not.
+MAX_FIRE_SLIPPAGE_PCT = 0.005
+ARMED_REFRESH_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,7 @@ class SessionState:
     symbol: str
     or_minutes: int = OPENING_RANGE_MINUTES
     triggers: list = field(default_factory=list)   # Trigger objects for this symbol
+    armed: list = field(default_factory=list)      # armed_plans rows for this symbol
 
     or_high: float | None = None
     or_low: float | None = None
@@ -133,7 +137,63 @@ class SessionState:
             if crossed and not self._debounced("trigger", f"{direction}:{level}", ts_et):
                 events.append(WakeEvent(self.symbol, "trigger",
                                         f"crossed {direction} {level:g}", price))
+
+        # Pre-authorised orders. Not debounced: the plan is single-use and the
+        # journal claims it atomically, so a second crossing finds nothing to fire.
+        for plan in self.armed:
+            level = float(plan.get("level") or 0)
+            direction = (plan.get("direction") or "above").lower()
+            if level <= 0:
+                continue
+            crossed = (prev <= level < price) if direction != "below" else (prev >= level > price)
+            if crossed:
+                events.append(WakeEvent(self.symbol, "armed",
+                                        f"plan {plan['id']} {direction} {level:g}", price))
         return events
+
+
+def fire_armed_plan(config: Config, journal: Journal, broker, plan: dict,
+                    price: float) -> str:
+    """Execute a pre-authorised plan. Returns a short outcome string.
+
+    Runs the SAME guardrail pipeline the daemon uses. The LLM's approval is a
+    decision made earlier, not a licence to skip the mechanical checks — the
+    account, the quote and every limit are re-evaluated at this moment."""
+    from ..guardrails.engine import OrderPipeline
+    from ..guardrails.models import OrderProposal
+
+    # Claim before acting, so two ticks racing the same plan cannot both submit.
+    if not journal.claim_armed_plan(plan["id"], price=price):
+        return "already claimed"
+
+    level = float(plan["level"])
+    # A level crossed is the trade; a level blown through is a different one. If
+    # price gapped well past the trigger, the thesis that was approved no longer
+    # describes this entry.
+    if level > 0 and abs(price - level) / level > MAX_FIRE_SLIPPAGE_PCT:
+        note = f"gapped to {price:.2f}, {abs(price - level) / level:.1%} past {level:g}"
+        journal.finalize_armed_plan(plan["id"], "cancelled", note=note)
+        return f"skipped: {note}"
+
+    try:
+        proposal = OrderProposal.model_validate_json(plan["proposal_json"])
+        account = broker.get_account_state(journal)
+        quote = broker.get_quote(proposal.symbol)
+        market_open = True
+        try:
+            market_open = broker.market_open()
+        except Exception:
+            pass
+        result = OrderPipeline(config, journal, broker).process(
+            proposal, account, quote, market_is_open=market_open,
+        )
+    except Exception as e:
+        # A claimed plan must never be left dangling in 'firing'.
+        journal.finalize_armed_plan(plan["id"], "cancelled", note=f"error: {e}")
+        raise
+    journal.finalize_armed_plan(plan["id"], "fired", proposal_id=result.proposal_id,
+                                note=result.status)
+    return result.status
 
 
 def _states_for(config: Config) -> dict[str, SessionState]:
@@ -156,7 +216,11 @@ def run_market_stream(config: Config) -> None:
     from alpaca.data.enums import DataFeed
     from alpaca.data.live import StockDataStream
 
+    from .alpaca import AlpacaBroker
+
     journal = Journal(config.settings.paths.journal_db)
+    broker = AlpacaBroker(config)
+    journal.expire_armed_plans()
     states = _states_for(config)
     # DataFeed is a str enum, so a bare "sip" passes StockDataStream's membership
     # check and then dies on feed.value inside the constructor. Coerce it.
@@ -171,13 +235,42 @@ def run_market_stream(config: Config) -> None:
         feed=feed,
     )
 
+    last_refresh = [datetime.now(ET)]
+
+    def _refresh_armed() -> None:
+        """Pick up plans the daemon armed since we started, and drop fired ones."""
+        by_symbol: dict[str, list] = {}
+        for p in journal.active_armed_plans():
+            by_symbol.setdefault(p["symbol"], []).append(p)
+        for sym, st in states.items():
+            st.armed = by_symbol.get(sym, [])
+        return sum(len(v) for v in by_symbol.values())
+
+    n_armed = _refresh_armed()
+    log.info("armed plans loaded: %d", n_armed)
+
     async def on_trade(t):
         try:
             state = states.get(str(t.symbol).upper())
             if state is None:
                 return
             ts = t.timestamp.astimezone(ET)
+            if (ts - last_refresh[0]).total_seconds() > ARMED_REFRESH_SECONDS:
+                last_refresh[0] = ts
+                _refresh_armed()
             for ev in state.on_trade(float(t.price), float(getattr(t, "size", 0) or 0), ts):
+                if ev.kind == "armed":
+                    plan_id = int(ev.detail.split()[1])
+                    plan = next((p for p in state.armed if p["id"] == plan_id), None)
+                    if plan is None:
+                        continue
+                    outcome = fire_armed_plan(config, journal, broker, plan, ev.price)
+                    log.info("FIRED %s plan %d @ %.2f -> %s",
+                             ev.symbol, plan_id, ev.price, outcome)
+                    journal.heartbeat("market_stream",
+                                      detail=f"fired {ev.symbol} plan {plan_id}: {outcome}")
+                    _refresh_armed()
+                    continue
                 journal.record_wake_event(symbol=ev.symbol, kind=ev.kind,
                                           detail=ev.detail, price=ev.price)
                 log.info("wake: %s %s @ %.2f (%s)", ev.symbol, ev.kind, ev.price, ev.detail)

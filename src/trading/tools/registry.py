@@ -225,6 +225,20 @@ TOOL_SCHEMAS: dict[str, dict] = {
                 "strategy_tag": {"type": "string"},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "reduces_position": {"type": "boolean"},
+                "arm_level": {
+                    "type": "number",
+                    "description": "Pre-authorise instead of sending now: hold this "
+                                   "order until price crosses this level, then the tick "
+                                   "stream executes it in milliseconds. Deciding in "
+                                   "advance beats deciding at the event, which costs "
+                                   "~60s. Use for 'buy the breakout of X' setups.",
+                },
+                "arm_direction": {"type": "string", "enum": ["above", "below"]},
+                "arm_valid_hours": {
+                    "type": "number",
+                    "description": "How long the armed plan stays live (default 8, "
+                                   "i.e. the rest of the session).",
+                },
             },
             "required": ["symbol", "asset_class", "side", "thesis",
                          "expected_edge_usd", "strategy_tag"],

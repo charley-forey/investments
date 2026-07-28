@@ -115,6 +115,25 @@ CREATE TABLE IF NOT EXISTS wake_events (
 );
 CREATE INDEX IF NOT EXISTS ix_wake_unconsumed ON wake_events (consumed_at, id);
 
+-- Orders the LLM and risk agent approved in advance, held until price crosses a
+-- level. The tick stream fires them through the normal guardrail pipeline, which
+-- is what makes sub-second execution safe rather than a bypass.
+CREATE TABLE IF NOT EXISTS armed_plans (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,            -- 'above' | 'below'
+    level REAL NOT NULL,
+    expires_at TEXT NOT NULL,
+    proposal_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'armed',  -- armed | fired | expired | cancelled
+    fired_at TEXT,
+    fired_price REAL,
+    proposal_id INTEGER,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_armed_active ON armed_plans (status, symbol);
+
 CREATE TABLE IF NOT EXISTS heartbeats (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -658,6 +677,63 @@ class Journal:
             (key, value),
         )
         self.conn.commit()
+
+    # -- armed plans (pre-authorised orders fired by the tick stream) ----------
+
+    def arm_plan(self, *, symbol: str, direction: str, level: float,
+                 expires_at: str, proposal_json: str, note: str | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO armed_plans (ts, symbol, direction, level, expires_at, "
+            "proposal_json, note) VALUES (?,?,?,?,?,?,?)",
+            (utcnow(), symbol.upper(), direction, float(level), expires_at,
+             proposal_json, note),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def active_armed_plans(self, symbol: str | None = None) -> list[dict]:
+        """Armed and unexpired. Expiry is enforced on read so a stale plan can
+        never fire, even if the sweeper has not run."""
+        now = utcnow()
+        sql = "SELECT * FROM armed_plans WHERE status='armed' AND expires_at > ?"
+        args: list = [now]
+        if symbol:
+            sql += " AND symbol=?"
+            args.append(symbol.upper())
+        return [dict(r) for r in self.conn.execute(sql + " ORDER BY id", args)]
+
+    def claim_armed_plan(self, plan_id: int, *, price: float | None = None) -> bool:
+        """Take exclusive ownership of a plan before acting on it.
+
+        Single-use by construction: only an 'armed' row moves to 'firing', so two
+        ticks racing the same plan cannot both submit it. Returns True for the one
+        caller that won."""
+        cur = self.conn.execute(
+            "UPDATE armed_plans SET status='firing', fired_at=?, fired_price=? "
+            "WHERE id=? AND status='armed'",
+            (utcnow(), price, int(plan_id)),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def finalize_armed_plan(self, plan_id: int, status: str, *,
+                            proposal_id: int | None = None,
+                            note: str | None = None) -> None:
+        """Record the outcome of a plan this caller already claimed."""
+        self.conn.execute(
+            "UPDATE armed_plans SET status=?, proposal_id=COALESCE(?, proposal_id), "
+            "note=COALESCE(?, note) WHERE id=?",
+            (status, proposal_id, note, int(plan_id)),
+        )
+        self.conn.commit()
+
+    def expire_armed_plans(self) -> int:
+        cur = self.conn.execute(
+            "UPDATE armed_plans SET status='expired' WHERE status='armed' AND expires_at <= ?",
+            (utcnow(),),
+        )
+        self.conn.commit()
+        return cur.rowcount
 
     # -- wake events (tick stream -> daemon cost gate) -------------------------
 
