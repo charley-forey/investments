@@ -281,11 +281,14 @@ class Orchestrator:
             # daily cost cap is enforced against a fraction of real spend.
             self._record_usage("intraday", "risk", verdict.usage, report,
                                model=self.config.settings.agents.model_for("risk"))
-            if verdict.verdict != "approve":
+            if not verdict.allows_trade:
                 report.vetoed += 1
                 pid = self._journal_veto(draft, "risk_agent", verdict)
                 self._record_reasoning(pid, session)
                 continue
+            # 'amend' = the concern is size, not the setup. Take the trade smaller
+            # rather than not at all; mechanical guardrails still run below.
+            draft = verdict.scaled(draft)
 
             # High-conviction trades get an adversarial red-team pass; a veto here
             # skips the trade even though risk approved it.
@@ -315,8 +318,9 @@ class Orchestrator:
                 continue
             # Attach the risk approval + captured strategy reasoning to the proposal.
             self.journal.record_verdict(
-                result.proposal_id, source="risk_agent", verdict="approve",
-                reason=verdict.reason,
+                result.proposal_id, source="risk_agent", verdict=verdict.verdict,
+                reason=verdict.reason + (f" | amended to {verdict.qty_mult:.2f}x size"
+                                         if verdict.verdict == "amend" else ""),
             )
             self._record_reasoning(result.proposal_id, session)
             try:

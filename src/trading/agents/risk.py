@@ -21,25 +21,49 @@ from . import prompts
 VERDICT_SCHEMA = {
     "type": "object",
     "properties": {
-        "verdict": {"type": "string", "enum": ["approve", "veto"]},
+        "verdict": {"type": "string", "enum": ["approve", "amend", "veto"]},
         "reason": {"type": "string"},
         "concerns": {"type": "array", "items": {"type": "string"}},
+        "qty_mult": {
+            "type": ["number", "null"],
+            "description": "Only for 'amend': scale position size by this "
+                           "(0.25-1.0). Null for approve/veto.",
+        },
     },
-    "required": ["verdict", "reason", "concerns"],
+    "required": ["verdict", "reason", "concerns", "qty_mult"],
     "additionalProperties": False,
 }
 
 
 @dataclass
 class RiskVerdict:
-    verdict: str            # approve | veto
+    verdict: str            # approve | amend | veto
     reason: str
     concerns: list[str]
     usage: Usage = None     # tokens spent reaching this verdict (billed, so metered)
+    qty_mult: float | None = None   # 'amend' only: size scale factor
 
     def __post_init__(self):
         if self.usage is None:
             self.usage = Usage()
+
+    @property
+    def allows_trade(self) -> bool:
+        return self.verdict in ("approve", "amend")
+
+    def scaled(self, proposal):
+        """The proposal this verdict permits: unchanged for approve, size-scaled
+        for amend. Clamped to 0.25-1.0 so an amend can only shrink, never grow."""
+        if self.verdict != "amend":
+            return proposal
+        mult = min(1.0, max(0.25, float(self.qty_mult or 0.5)))
+        out = proposal.model_copy(deep=True)
+        if out.legs:
+            for leg in out.legs:
+                leg.qty = max(1, int(leg.qty * mult))
+        else:
+            out.qty = max(1.0, float(int(proposal.qty * mult)))
+        return out
 
 
 def _limits_summary(config: Config) -> str:
@@ -168,4 +192,5 @@ def review_proposal(
         reason=data.get("reason", "no reason returned"),
         concerns=data.get("concerns", []),
         usage=spent,
+        qty_mult=data.get("qty_mult"),
     )
