@@ -121,6 +121,19 @@ def cmd_status(_args) -> int:
 
     health = check_health(journal)
     print(f"health: {health.summary()}")
+    # Per-component liveness. One aggregate number cannot tell you WHICH part is
+    # down, and the tick stream is the part most likely to die quietly — its
+    # process can be alive with a dead websocket behind it.
+    for job, label, stale_after in (("daemon", "daemon", 90),
+                                    ("market_stream", "tick stream", 5),
+                                    ("cycle:intraday", "intraday cycle", 90)):
+        row = journal.last_heartbeat(job)
+        if row is None:
+            print(f"  {label:<15} never reported")
+            continue
+        age = (now - datetime.fromisoformat(row["ts"])).total_seconds() / 60
+        flag = "  STALE" if age > stale_after else ""
+        print(f"  {label:<15} {age:>6.0f}m ago  {(row['detail'] or '')[:40]}{flag}")
     last = journal.last_successful_cycle()
     if last:
         print(f"last successful cycle: {last['ts']} ({last['detail']})")

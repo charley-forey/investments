@@ -313,6 +313,16 @@ def run_daemon() -> int:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     scheduler = build_scheduler()
     run_protect_safe()  # never start the daemon with an unprotected position
+    # Announce liveness immediately. The watchdog only ticks every 30 minutes, so
+    # without this a freshly restarted daemon reports UNHEALTHY off a heartbeat
+    # that predates the restart — which is exactly what a machine waking from
+    # sleep looks like, and it cried wolf for half an hour every time.
+    try:
+        j = Journal(get_config().settings.paths.journal_db)
+        j.heartbeat("daemon", detail=f"started; {len(scheduler.get_jobs())} jobs")
+        j.close()
+    except Exception:
+        log.exception("startup heartbeat failed")
     log.info("scheduler starting; jobs: %s", [j.id for j in scheduler.get_jobs()])
     try:
         scheduler.start()
