@@ -35,13 +35,29 @@ def _limits_context(config: Config, account: AccountState, journal: Journal) -> 
         f"(defined-risk only); "
         f"cost hurdle {lim.cost_hurdle.min_edge_multiple:g}x estimated friction; "
         f"trades remaining today {remaining}/{lim.orders.max_new_trades_per_day}. "
-        f"Size qty so notional and stop-risk clear these caps before proposing."
+        f"\nSIZING: call size_position(symbol, entry_price, stop_price) and propose the "
+        f"qty it returns. These caps are a TARGET, not just a ceiling — a position at "
+        f"half the cap earns half the edge for the same research. Proposing smaller than "
+        f"size_position says needs a reason named in the thesis."
+        f"\nREWARD:RISK: the target must be at least "
+        f"{lim.orders.min_reward_risk:g}x the stop distance or the proposal is rejected "
+        f"(min_reward_risk). Risking more than you stand to make loses money at any win "
+        f"rate short of certainty. If the honest target the thesis supports is closer "
+        f"than that, the trade is not worth taking — skip it rather than stretching the "
+        f"target to a level you do not actually expect to print."
     )
 
 
 def _recent_failures_context(journal: Journal, *, limit: int = 8) -> str:
-    """Surface recent veto/reject reasons so the agent does not repeat the same
-    illegal size or thesis that just failed."""
+    """Surface TODAY's veto/reject reasons so the agent does not repeat the same
+    illegal size or thesis that just failed.
+
+    Bounded to the current day on purpose: unbounded, this replayed the last 8
+    failures ever, forever, as a standing wall of rejection with no counterweight —
+    which is part of why proposals anchored at ~half the legal size."""
+    day_start = datetime.combine(
+        datetime.now(timezone.utc).date(), time.min, tzinfo=timezone.utc
+    ).isoformat()
     rows = journal.conn.execute(
         """SELECT p.id, p.symbol, p.status, p.qty, p.limit_price, p.strategy_tag,
                   v.source, v.rule, v.reason
@@ -49,16 +65,17 @@ def _recent_failures_context(journal: Journal, *, limit: int = 8) -> str:
            JOIN verdicts v ON v.proposal_id = p.id
            WHERE p.status IN ('vetoed', 'rejected')
              AND v.verdict IN ('veto', 'reject')
+             AND p.ts >= ?
            ORDER BY p.id DESC, v.id DESC
            LIMIT ?""",
-        (limit * 3,),  # extra rows then dedupe by proposal
+        (day_start, limit * 3),  # extra rows then dedupe by proposal
     ).fetchall()
     if not rows:
         return ""
     seen: set[int] = set()
     lines = [
-        "Recent proposal failures — do NOT repeat these mistakes this cycle "
-        "(re-size or skip; do not re-propose the same illegal structure):"
+        "Today's rejections and the parameter to resolve (re-size or skip; do not "
+        "re-propose the same illegal structure):"
     ]
     for r in rows:
         pid = int(r["id"])

@@ -129,4 +129,7 @@ agents:
     risk: 0
     redteam: 0
     scoring: 0
-data_feed: iex
+# sip = consolidated tape (all US exchanges). Requires Algo Trader Plus, which is
+# active. IEX was ~2% of volume and quoted one-sided books that the risk agent
+# correctly read as "do not enter" — see broker/alpaca.py.
+data_feed: sip

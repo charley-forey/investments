@@ -39,8 +39,11 @@ class TestCreditVertical:
         buy = next(l for l in plan.legs if l["side"] == "buy")
         assert sell["strike"] == 100.0 and buy["strike"] == 95.0    # short near, long wing
         assert plan.net_premium == 1.5                               # credit received
-        # Defined risk: max loss = (width - credit) * 100 * contracts.
-        assert plan.max_loss_usd == (5.0 - 1.5) * 100 * plan.contracts
+        # Max loss = width * 100 * contracts. The credit received is deliberately NOT
+        # netted off: the guardrail (account_math.analyze_option_legs) refuses to trust
+        # a credit that is not guaranteed at fill, and the builder must agree with it or
+        # every credit spread it sizes gets rejected downstream as options_max_loss.
+        assert plan.max_loss_usd == 5.0 * 100 * plan.contracts
         assert plan.max_profit_usd == 1.5 * 100 * plan.contracts
 
     def test_bearish_credit_is_a_bear_call_spread(self):

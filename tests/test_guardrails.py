@@ -219,3 +219,40 @@ def test_live_mode_queues_for_approval(journal):
     approved = pipeline.approve(res.proposal_id)
     assert approved.status == "submitted"
     assert journal.get_proposal(res.proposal_id)["status"] == "submitted"
+
+
+def test_reward_risk_floor_rejects_the_geometry_that_lost_money(pipeline):
+    """Proposal #28's real shape: entry 333.50, stop 329.50, target 336.50 = R 0.75.
+    Twenty of these at a 45% win rate is -$69.66/trade, which no position size fixes."""
+    res = pipeline.process(
+        base_proposal(qty=10, limit_price=333.50, stop_price=329.50, target_price=336.50),
+        make_account(), make_quote(bid=333.4, ask=333.6), market_is_open=True,
+    )
+    assert_rejected_and_journaled(pipeline, res, "min_reward_risk")
+
+
+def test_reward_risk_floor_passes_an_honest_two_to_one(pipeline):
+    res = pipeline.process(
+        base_proposal(qty=10, limit_price=100.0, stop_price=99.0, target_price=102.0),
+        make_account(), make_quote(), market_is_open=True,
+    )
+    assert "min_reward_risk" not in rules_fired(res)
+
+
+def test_reward_risk_floor_ignores_exits(pipeline):
+    """An exit has no reward:risk to speak of and must never be trapped by the floor."""
+    res = pipeline.process(
+        base_proposal(qty=10, side="sell", limit_price=100.0, stop_price=99.0,
+                      target_price=100.2, reduces_position=True),
+        make_account(), make_quote(), market_is_open=True,
+    )
+    assert "min_reward_risk" not in rules_fired(res)
+
+
+def test_reward_risk_floor_is_silent_without_a_target(pipeline):
+    """No target means the bracket applies bracket_default_target_r — nothing to judge."""
+    res = pipeline.process(
+        base_proposal(qty=10, limit_price=100.0, stop_price=99.0),
+        make_account(), make_quote(), market_is_open=True,
+    )
+    assert "min_reward_risk" not in rules_fired(res)

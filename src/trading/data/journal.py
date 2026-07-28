@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     order_type TEXT NOT NULL,           -- 'limit' | 'market'
     limit_price REAL,
     stop_price REAL,                    -- planned stop for sizing (stocks)
+    target_price REAL,                  -- planned take-profit; with stop_price gives R
     legs_json TEXT,                     -- options legs, JSON
     thesis TEXT,
     expected_edge_usd REAL,
@@ -234,6 +235,11 @@ class Journal:
         if "cache_write_tokens" not in usage_cols:
             self.conn.execute(
                 "ALTER TABLE usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0")
+        # target_price on proposals: without it, reward:risk — the thing that made
+        # expectancy negative — cannot be measured on the proposals table at all.
+        prop_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(proposals)")}
+        if "target_price" not in prop_cols:
+            self.conn.execute("ALTER TABLE proposals ADD COLUMN target_price REAL")
         snap_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(signal_snapshot)")}
         for col in ("atm_iv", "iv_rank", "pc_skew", "trigger_level", "cand_score"):
             if col not in snap_cols:
@@ -326,6 +332,7 @@ class Journal:
         strategy_tag: str = "manual",
         limit_price: float | None = None,
         stop_price: float | None = None,
+        target_price: float | None = None,
         legs: list[dict] | None = None,
         thesis: str | None = None,
         expected_edge_usd: float | None = None,
@@ -337,12 +344,13 @@ class Journal:
         cur = self.conn.execute(
             """INSERT INTO proposals
                (ts, agent, strategy_tag, symbol, asset_class, side, qty, order_type,
-                limit_price, stop_price, legs_json, thesis, expected_edge_usd,
-                max_loss_usd, confidence, discovery_source, score_at_entry)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                limit_price, stop_price, target_price, legs_json, thesis,
+                expected_edge_usd, max_loss_usd, confidence, discovery_source,
+                score_at_entry)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 utcnow(), agent, strategy_tag, symbol.upper(), asset_class, side, qty,
-                order_type, limit_price, stop_price,
+                order_type, limit_price, stop_price, target_price,
                 json.dumps(legs) if legs else None, thesis, expected_edge_usd,
                 max_loss_usd, confidence, discovery_source, score_at_entry,
             ),

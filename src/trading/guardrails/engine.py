@@ -7,6 +7,8 @@ human approval (live), or submits (paper / approved live).
 
 from __future__ import annotations
 
+import logging
+import math
 from datetime import date, datetime, time, timedelta, timezone
 
 from ..analytics import lifecycle
@@ -15,6 +17,8 @@ from ..config import Config
 from ..data.journal import Journal
 from . import account_math
 from .models import GuardrailResult, OrderProposal, PipelineResult, Violation
+
+log = logging.getLogger(__name__)
 
 # Common leveraged/inverse ETFs blocked unless allow_leveraged_etfs is set.
 LEVERAGED_ETFS = {
@@ -296,6 +300,29 @@ class GuardrailEngine:
                         fail("options_dte",
                              f"{dte} days to expiry < min {limits.options.min_days_to_expiry}")
 
+        # 8b. Reward:risk floor. Winning 45% of the time while risking $2 to make $1
+        # is a -$69.66/trade expectancy, which is what the graded ledger showed through
+        # 2026-07-27 (median R 0.48, only 2 of 20 proposals at R >= 1). Note this is a
+        # FILTER, not a transform: stretching the target to hit the ratio just means the
+        # target never fills and the trade rides to its stop. A setup whose honest
+        # target sits closer than its stop should not be taken.
+        min_rr = limits.orders.min_reward_risk
+        entry_px = proposal.limit_price or (quote.mid if quote else None)
+        if (min_rr > 0 and not proposal.reduces_position
+                and entry_px and proposal.stop_price and proposal.target_price):
+            risk_per_share = abs(entry_px - proposal.stop_price)
+            reward_per_share = abs(proposal.target_price - entry_px)
+            if risk_per_share > 0:
+                rr = reward_per_share / risk_per_share
+                if rr < min_rr:
+                    fail(
+                        "min_reward_risk",
+                        f"reward:risk {rr:.2f} < min {min_rr:.2f} "
+                        f"(target {proposal.target_price:g} is {reward_per_share:.2f} away, "
+                        f"stop {proposal.stop_price:g} is {risk_per_share:.2f}) — widen the "
+                        f"target to a level the thesis actually supports, or skip the trade",
+                    )
+
         # 9. Cost hurdle — expected edge must clear estimated friction.
         est_cost = account_math.estimate_cost_usd(
             proposal, quote, limits.cost_hurdle, option_leg_spreads=option_leg_spreads
@@ -347,6 +374,7 @@ class OrderPipeline:
             order_type=proposal.order_type,
             limit_price=proposal.limit_price,
             stop_price=proposal.stop_price,
+            target_price=proposal.target_price,
             legs=[l.model_dump(mode="json") for l in proposal.legs] or None,
             thesis=proposal.thesis,
             expected_edge_usd=proposal.expected_edge_usd,
@@ -563,10 +591,22 @@ class OrderPipeline:
 
         # Net limit price: explicit proposal limit, else net debit from est premiums
         # (buys pay, sells receive).
+        # Sign carries the direction for multi-leg: positive = net debit (we pay),
+        # negative = net credit (we receive). abs() here submitted every credit spread
+        # as a debit — an offer to PAY the credit. It also broke closing a debit
+        # vertical, which is itself a net credit. Single-leg keeps abs(): the sign is
+        # meaningless there and alpaca.py already normalises it.
+        net = sum((1 if l.side == "buy" else -1) * l.est_premium for l in proposal.legs)
         net_limit = proposal.limit_price
         if net_limit is None:
-            net = sum((1 if l.side == "buy" else -1) * l.est_premium for l in proposal.legs)
-            net_limit = abs(net)
+            net_limit = net
+        elif len(proposal.legs) > 1:
+            # Trust the agent's magnitude, but the legs decide debit vs credit.
+            net_limit = math.copysign(abs(net_limit), net or 1.0)
+        net_limit = round(net_limit if len(proposal.legs) > 1 else abs(net_limit), 2)
+        log.info("option submit %s: %d legs, net_limit %+.2f (%s)", proposal.symbol,
+                 len(proposal.legs), net_limit,
+                 "credit — we receive" if net_limit < 0 else "debit — we pay")
 
         broker_order_id = None
         if self.broker is not None:

@@ -1,16 +1,21 @@
 mode: paper
 position:
-  max_position_pct: 10
-  max_position_usd: 10000
+  max_position_pct: 15
+  max_position_usd: 15000
   max_open_positions: 8
   risk_per_trade_pct: 1
 orders:
-  max_order_notional_usd: 10000
+  # Must move in lockstep with position.max_position_* — this is an independent
+  # cap (engine.py "max_order_notional") and binds first if left behind.
+  max_order_notional_usd: 15000
   max_new_trades_per_day: 10
   max_new_trades_per_week: 25
   allow_market_orders: false
   stale_order_ttl_minutes: 30
   bracket_default_target_r: 2
+  # Risk two dollars to make one and no win rate saves you: at the observed 45%,
+  # break-even is R=1.22. 1.5 leaves margin. Baseline median was 0.48.
+  min_reward_risk: 1.5
 loss_kill_switch:
   max_daily_loss_pct: 3
   requires_manual_reset: true
@@ -21,7 +26,9 @@ symbols:
   allow_leveraged_etfs: false
 options:
   defined_risk_only: true
-  max_loss_per_trade_usd: 1000
+  # Sole lever on contract count: contracts = floor(this / per_contract_loss).
+  # NB one max-loss trade is 2.5% of equity vs the 3% daily kill switch.
+  max_loss_per_trade_usd: 2500
   min_days_to_expiry: 7
   max_contracts_per_order: 100
 pdt:

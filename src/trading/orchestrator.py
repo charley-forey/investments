@@ -590,7 +590,7 @@ class Orchestrator:
             agent=draft.agent, strategy_tag=draft.strategy_tag, symbol=draft.symbol,
             asset_class=draft.asset_class, side=draft.side, qty=draft.qty,
             order_type=draft.order_type, limit_price=draft.limit_price,
-            stop_price=draft.stop_price,
+            stop_price=draft.stop_price, target_price=draft.target_price,
             legs=[l.model_dump(mode="json") for l in draft.legs] or None,
             thesis=draft.thesis, expected_edge_usd=draft.expected_edge_usd,
             max_loss_usd=draft.max_loss_usd, confidence=draft.confidence,

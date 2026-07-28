@@ -28,6 +28,9 @@ class OrderLimits(BaseModel):
     allow_market_orders: bool = False
     stale_order_ttl_minutes: int = Field(default=30, ge=0)
     bracket_default_target_r: float = Field(default=2.0, ge=0)
+    # Minimum reward:risk a proposal must offer. Graded ledger to 2026-07-27: median
+    # R was 0.48 at a 45% win rate, i.e. -$69.66/trade. Break-even needs R >= 1.22.
+    min_reward_risk: float = Field(default=0.0, ge=0)
 
 
 class PortfolioLimits(BaseModel):

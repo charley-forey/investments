@@ -23,7 +23,14 @@ def test_apply_profile_scales_sizing_not_the_floor():
     assert agg.position.risk_per_trade_pct == 2.0
     assert agg.portfolio.max_gross_exposure_pct == 150.0
     assert agg.orders.max_new_trades_per_day == 8
-    assert agg.options.max_loss_per_trade_usd == 2000.0
+    assert agg.options.max_loss_per_trade_usd == 4000.0
+    # The dial must move POSITION size, not just risk_per_trade_pct. Risk taken is
+    # notional x stop distance, so with the notional caps left at baseline the old
+    # profile changed nothing real — "aggressive" was decorative.
+    assert agg.position.max_position_pct == 20.0
+    assert agg.position.max_position_usd == 20000.0
+    # The order-notional cap is independent; left behind it silently binds first.
+    assert agg.orders.max_order_notional_usd == 20000.0
     # safety floor is untouched
     assert agg.loss_kill_switch.max_daily_loss_pct == base.loss_kill_switch.max_daily_loss_pct
     assert agg.options.min_days_to_expiry == base.options.min_days_to_expiry
@@ -33,6 +40,8 @@ def test_apply_profile_scales_sizing_not_the_floor():
     con = rp.apply_profile(base, "conservative")
     assert con.position.risk_per_trade_pct == 0.5
     assert con.portfolio.max_gross_exposure_pct == 60.0
+    assert con.position.max_position_pct == 7.0
+    assert con.orders.max_order_notional_usd == 7000.0
     assert rp.apply_profile(base, "balanced") is base
 
 
