@@ -80,8 +80,12 @@ def _limits_summary(config: Config) -> str:
 
 
 def _proposal_summary(p: OrderProposal) -> str:
+    # Options carry their size on the legs, so the top-level qty is 0 by design.
+    # Rendering that bare "qty=0" read as a non-order and got every option vetoed.
+    size = (f"contracts={max((leg.qty for leg in p.legs), default=0)} (size is per-leg; "
+            f"top-level qty is unused for options)" if p.is_option else f"qty={p.qty:g}")
     lines = [
-        f"symbol={p.symbol} class={p.asset_class} side={p.side} qty={p.qty:g} "
+        f"symbol={p.symbol} class={p.asset_class} side={p.side} {size} "
         f"strategy={p.strategy_tag}",
         f"limit={p.limit_price} stop={p.stop_price} "
         f"expected_edge_usd={p.expected_edge_usd} confidence={p.confidence}",

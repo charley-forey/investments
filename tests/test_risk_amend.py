@@ -70,6 +70,16 @@ def test_amend_never_rounds_a_live_trade_to_zero():
     assert [leg.qty for leg in _v("amend", 0.25).scaled(_option()).legs] == [2, 2]
 
 
+def test_option_summary_never_shows_a_bare_qty_zero():
+    """Both options proposals we ever made were vetoed showing 'qty=0'; one
+    explicitly for being 'a non-order'. qty=0 is correct — size is on the legs."""
+    from trading.agents.risk import _proposal_summary
+    s = _proposal_summary(_option())
+    assert "qty=0" not in s
+    assert "contracts=8" in s
+    assert "qty=100" in _proposal_summary(_stock(100))
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_"):
