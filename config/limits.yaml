@@ -14,8 +14,12 @@ orders:
   stale_order_ttl_minutes: 30
   bracket_default_target_r: 2
   # Risk two dollars to make one and no win rate saves you: at the observed 45%,
-  # break-even is R=1.22. 1.5 leaves margin. Baseline median was 0.48.
-  min_reward_risk: 1.5
+  # break-even is R=1.22. Baseline median was 0.48.
+  # Raised 1.5 -> 2.0 on 1,279 backtested trades (9y, 10 symbols, every one
+  # positive): expectancy per trade goes +0.100R -> +0.142R, and keeps rising to
+  # 3.0R. Cutting winners short is what costs us. See
+  # docs/backtest_reward_risk_2026-07-27.md.
+  min_reward_risk: 2.0
 loss_kill_switch:
   max_daily_loss_pct: 3
   requires_manual_reset: true

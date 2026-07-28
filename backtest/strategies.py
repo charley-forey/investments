@@ -19,6 +19,48 @@ def sma_crossover(fast: int = 10, slow: int = 30):
     return signal
 
 
+def _sma(bars: list[Bar], i: int, n: int) -> float:
+    return sum(b.close for b in bars[i - n + 1:i + 1]) / n
+
+
+def trend_pullback_long(fast: int = 20, slow: int = 50):
+    """Uptrend, dip to the fast SMA, reclaim it. Long until the trend breaks.
+
+    Worth validating first: it is the best template in the shadow ledger through
+    2026-07-27 (+$264.66 on 4 wins in 5) and five samples is not evidence."""
+
+    def signal(bars: list[Bar], i: int) -> int:
+        if i < slow + 1:
+            return 0
+        close = bars[i].close
+        if close < _sma(bars, i, slow):          # trend gone -> flat
+            return 0
+        fast_now, fast_prev = _sma(bars, i, fast), _sma(bars, i - 1, fast)
+        reclaimed = bars[i - 1].close < fast_prev and close > fast_now
+        return 1 if (reclaimed or close > fast_now) else 0
+
+    return signal
+
+
+def momentum_continuation(lookback: int = 20, threshold: float = 0.05):
+    """Long strong momentum, short weak. Two-sided, so it exercises the short path."""
+
+    def signal(bars: list[Bar], i: int) -> int:
+        if i < lookback:
+            return 0
+        past = bars[i - lookback].close
+        if past <= 0:
+            return 0
+        ret = (bars[i].close - past) / past
+        if ret >= threshold:
+            return 1
+        if ret <= -threshold:
+            return -1
+        return 0
+
+    return signal
+
+
 def breakout(lookback: int = 20):
     """Long when the close makes a new `lookback`-day high, flat on a new low."""
 
