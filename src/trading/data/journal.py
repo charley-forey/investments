@@ -101,6 +101,20 @@ CREATE TABLE IF NOT EXISTS kv_state (
     value TEXT NOT NULL
 );
 
+-- Market events detected by the tick stream, drained by the daemon's cost gate.
+-- Append-only with a consumed marker: the stream and the daemon are separate
+-- processes, so a read-modify-write on kv_state would race.
+CREATE TABLE IF NOT EXISTS wake_events (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    kind TEXT NOT NULL,                 -- 'trigger' | 'orb'
+    detail TEXT,
+    price REAL,
+    consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_wake_unconsumed ON wake_events (consumed_at, id);
+
 CREATE TABLE IF NOT EXISTS heartbeats (
     id INTEGER PRIMARY KEY,
     ts TEXT NOT NULL,
@@ -642,6 +656,35 @@ class Journal:
             "INSERT INTO kv_state (key, value) VALUES (?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
+        )
+        self.conn.commit()
+
+    # -- wake events (tick stream -> daemon cost gate) -------------------------
+
+    def record_wake_event(self, *, symbol: str, kind: str, detail: str | None = None,
+                          price: float | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO wake_events (ts, symbol, kind, detail, price) VALUES (?,?,?,?,?)",
+            (utcnow(), symbol.upper(), kind, detail, price),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def pending_wake_events(self, *, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM wake_events WHERE consumed_at IS NULL ORDER BY id LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def consume_wake_events(self, ids: list[int]) -> None:
+        """Mark drained. Kept separate from the read so a crash between the two
+        re-delivers the event rather than silently dropping a real breakout."""
+        if not ids:
+            return
+        self.conn.executemany(
+            "UPDATE wake_events SET consumed_at=? WHERE id=?",
+            [(utcnow(), int(i)) for i in ids],
         )
         self.conn.commit()
 

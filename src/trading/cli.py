@@ -306,6 +306,17 @@ def cmd_stream(_args) -> int:
     return 0
 
 
+def cmd_marketstream(_args) -> int:
+    import logging
+
+    from .broker.market_stream import run_market_stream
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    run_market_stream(get_config())
+    return 0
+
+
 def cmd_run_once(args) -> int:
     from .agents.client import make_client
     from .orchestrator import Orchestrator
@@ -795,6 +806,9 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--port", type=int, default=8787)
     dash.set_defaults(fn=cmd_dashboard)
     sub.add_parser("stream", help="run the real-time fill websocket").set_defaults(fn=cmd_stream)
+    sub.add_parser("marketstream",
+                   help="run the real-time market-data websocket (queues wake events)"
+                   ).set_defaults(fn=cmd_marketstream)
     sub.add_parser("preflight", help="go/no-go self-check before running live").set_defaults(
         fn=cmd_preflight
     )

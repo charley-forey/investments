@@ -193,6 +193,16 @@ def should_run_intraday_llm(config: Config, journal: Journal, broker, account,
     if not getattr(agents, "trigger_gate_enabled", True):
         return GateDecision(True, "trigger gate disabled")
 
+    # Events the tick stream saw between cycles. These are the whole point of the
+    # stream: a level crossed at 10:02 and faded by 10:12 used to be invisible to a
+    # 15-minute cron. Drained here so the same event cannot bill twice.
+    pending = journal.pending_wake_events()
+    if pending:
+        journal.consume_wake_events([int(e["id"]) for e in pending])
+        detail = "; ".join(f"{e['symbol']} {e['kind']} {e['detail'] or ''}".strip()
+                           for e in pending[:4])
+        return GateDecision(True, f"market event: {detail}")
+
     # Situational awareness means ONE look per window, not one per cycle inside it.
     # These three 45-minute windows cover 135 of the session's 390 minutes, so
     # re-firing every cycle spent ~$2.30/day re-reading the same tape.
