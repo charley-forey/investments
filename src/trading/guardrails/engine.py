@@ -89,6 +89,27 @@ class GuardrailEngine:
                  f"position reconciliation mismatch — new entries blocked until resolved "
                  f"({self.journal.get_state('reconcile_halt')})")
 
+        # Binary-event wall. A new STOCK entry that must survive an FOMC/CPI/NFP/PCE/
+        # GDP print or the name's own earnings is an unhedged coin flip: the risk
+        # agent can only shrink it (qty_mult), never refuse it, so nothing stopped
+        # CRM being opened the day before the 7/29 FOMC. Defined-risk verticals pass
+        # — that is what prompts.py already tells the agent to reach for into a
+        # binary — and reducing orders always pass, so this can never trap a position.
+        event_days = limits.events.block_stock_entry_within_days
+        if (event_days > 0 and not proposal.reduces_position
+                and proposal.asset_class == "stock"):
+            try:
+                from ..data.calendar_feed import binary_events_within
+
+                near = binary_events_within(self.config, proposal.symbol, event_days)
+            except Exception:
+                near = []  # never block a trade because the calendar file is broken
+            if near:
+                fail("event_wall",
+                     f"new stock entry within {event_days}d of a binary event "
+                     f"({'; '.join(near[:3])}) — use a defined-risk vertical dated "
+                     f"past it, or wait")
+
         # Strategy lifecycle stage. A candidate/backtest tag (sizing fraction 0)
         # cannot trade in any mode. In live mode only small-live/scaled may trade,
         # and the stage's fraction scales the position cap.
@@ -533,15 +554,30 @@ class OrderPipeline:
 
         # Protective bracket: opening long positions with a stop attach a stop-loss
         # (and a take-profit at N x risk if no explicit target) atomically.
+        #
+        # With exits.trailing_pct set, the take-profit leg is deliberately omitted.
+        # A resting target and a trailing stop cannot coexist: the target is always
+        # nearer than the trail, so it fires first and the trail never runs. The
+        # backtest is unambiguous (1,280 trades, 9y, 10 symbols) -- trail 8% scores
+        # +0.459 mean OOS R against +0.197 for a fixed 2.5R target, and "trail +
+        # target" scores exactly the same as "target" alone, i.e. the trail is dead
+        # code beside it. See docs/backtest_trailing_exit_2026-07-28.md.
+        #
+        # The stop leg always stays. Dropping the target means an unreachable daemon
+        # leaves the position with downside capped and upside open, which is the
+        # right way round; broker/sync.ensure_protective_stops re-arms stops (never
+        # targets) for exactly this reason.
         stop_loss = take_profit = None
         if not proposal.reduces_position and proposal.side == "buy" and proposal.stop_price:
             stop_loss = proposal.stop_price
-            take_profit = proposal.target_price
-            if take_profit is None and proposal.limit_price:
-                risk = proposal.limit_price - proposal.stop_price
-                r_mult = self.config.limits.orders.bracket_default_target_r
-                if risk > 0 and r_mult > 0:
-                    take_profit = round(proposal.limit_price + r_mult * risk, 2)
+            trailing = self.config.limits.exits.trailing_pct
+            if not (trailing and trailing > 0):
+                take_profit = proposal.target_price
+                if take_profit is None and proposal.limit_price:
+                    risk = proposal.limit_price - proposal.stop_price
+                    r_mult = self.config.limits.orders.bracket_default_target_r
+                    if risk > 0 and r_mult > 0:
+                        take_profit = round(proposal.limit_price + r_mult * risk, 2)
 
         broker_order_id = None
         if self.broker is not None:

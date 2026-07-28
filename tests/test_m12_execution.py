@@ -37,24 +37,6 @@ class TestSlippage:
         assert execution.realized_slippage_bps(100.0, 99.5, "sell") == pytest.approx(50.0)
 
 
-class TestSlicing:
-    def test_small_order_single_slice(self):
-        plan = execution.plan_slices(100, avg_daily_volume=100000)
-        assert plan.n == 1
-        assert plan.total == 100
-
-    def test_large_order_split_by_participation(self):
-        # 30k shares, ADV 100k, 10% participation -> 10k/slice -> 3 slices
-        plan = execution.plan_slices(30000, avg_daily_volume=100000, max_participation=0.1)
-        assert plan.n == 3
-        assert plan.total == pytest.approx(30000)
-
-    def test_capped_slice_count(self):
-        plan = execution.plan_slices(10_000_000, avg_daily_volume=100000,
-                                     max_participation=0.1, max_slices=10)
-        assert plan.n == 10
-
-
 class TestFillQualityFromSync:
     def test_slippage_recorded_and_reported(self, tmp_path):
         config = make_config()

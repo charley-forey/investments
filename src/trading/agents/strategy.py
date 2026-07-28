@@ -109,7 +109,7 @@ def run_strategy_session(
     resolved = config.settings.agents.tools_for("strategy")
     ctx = ToolContext(
         config=config, journal=journal, broker=broker,
-        account_state=account, agent_name="strategy",
+        account_state=account, agent_name="strategy", cycle=cycle,
     )
     registry = ToolRegistry(ctx, list(resolved.registry))
 

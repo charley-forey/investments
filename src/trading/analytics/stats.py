@@ -41,15 +41,43 @@ def _term_of(score: dict) -> str:
     return "long" if "term=long" in notes else "short"
 
 
+def _round_trips(scores: list[dict]) -> list[float]:
+    """Collapse per-lot score rows into one P&L per round trip.
+
+    A score row is a closed TAX LOT, not a trade. One SMCI position entered on six
+    partial fills and exited on two produced seven rows, and the EOD review duly
+    reported "7 trades, expectancy $-2.40" for what was a single -$16.83 position.
+    That count is not cosmetic: it is `stats.trades`, which gates
+    paper_to_live_min_trades (30) and sizes the small-sample shrink in
+    autocalibrate. Left alone, one position exited in 30 partial fills clears the
+    bar for trading real money.
+
+    Lots are grouped by the proposal that opened them. Rows with no proposal_id
+    stay individual — unattributable, so the safe reading is the conservative one.
+    """
+    groups: dict = {}
+    order: list = []
+    for i, s in enumerate(scores):
+        pid = s.get("proposal_id")
+        key = ("prop", int(pid)) if pid is not None else ("row", s.get("id", i))
+        if key not in groups:
+            groups[key] = 0.0
+            order.append(key)
+        groups[key] += float(s["pnl_usd"] or 0.0)
+    return [groups[k] for k in order]
+
+
 def compute_stats(scores: list[dict], rates: TaxRates) -> StrategyStats | None:
     if not scores:
         return None
     tag = scores[0].get("strategy_tag") or "untagged"
-    pnls = [float(s["pnl_usd"] or 0.0) for s in scores]
+    pnls = _round_trips(scores)
     wins = [p for p in pnls if p > 0]
     losses = [p for p in pnls if p < 0]
     n = len(pnls)
     gross = sum(pnls)
+    # After-tax stays per-lot: the holding term is a property of the lot, not of the
+    # round trip, and a position can straddle the long/short boundary.
     after_tax = sum(after_tax_pnl(float(s["pnl_usd"] or 0.0), _term_of(s), rates) for s in scores)
 
     # Max drawdown on the cumulative gross curve.
@@ -90,10 +118,30 @@ def portfolio_summary(journal: Journal, rates: TaxRates) -> str:
     by_tag = stats_by_tag(journal, rates)
     if not by_tag:
         return "no closed trades scored yet"
-    lines = ["Per-strategy performance:"]
+    # Labelled all-time because it is: scores_for_tag has no date filter. The note
+    # is written daily, so an unlabelled block reads as "today" — the 7/28 EOD
+    # review restated a 5-day-old total under a 7/28 heading.
+    lines = ["Per-strategy performance (all-time, closed round trips):"]
     for tag in sorted(by_tag):
         lines.append("  " + by_tag[tag].summary())
     total = sum(s.gross_pnl for s in by_tag.values())
     total_at = sum(s.after_tax_pnl for s in by_tag.values())
     lines.append(f"Total realized: gross ${total:+.2f}, after-tax ${total_at:+.2f}")
+    return "\n".join(lines)
+
+
+def open_positions_summary(account) -> str:
+    """Open risk at the close. Absent from the EOD note entirely, so a day whose
+    only activity was opening a position read as a day with no activity at all."""
+    positions = getattr(account, "positions", None) or []
+    if not positions:
+        return "Open positions: none (flat)."
+    lines = ["Open positions (unrealized, not in the totals above):"]
+    total = 0.0
+    for p in positions:
+        upl = float(getattr(p, "unrealized_pl", 0.0) or 0.0)
+        total += upl
+        lines.append(f"  {p.symbol}: {p.qty:g} @ {getattr(p, 'avg_entry_price', 0):.2f}"
+                     f" -> unrealized ${upl:+.2f}")
+    lines.append(f"  Total unrealized: ${total:+.2f}")
     return "\n".join(lines)

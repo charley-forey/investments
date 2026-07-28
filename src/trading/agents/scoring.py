@@ -10,6 +10,7 @@ from pathlib import Path
 
 from ..broker.models import AccountState
 from ..config import Config
+from ..cost import Usage
 from ..data.journal import Journal
 from ..tools.registry import ToolContext, ToolRegistry
 from . import prompts
@@ -19,8 +20,10 @@ MAX_LESSONS = 40  # keep the file small so it stays cheap in cached context
 
 
 def run_scoring_session(
-    client, config: Config, journal: Journal, broker, account: AccountState
+    client, config: Config, journal: Journal, broker, account: AccountState,
+    usage: Usage | None = None,
 ) -> list[str]:
+    """Pass `usage` to accumulate this session's spend; it was previously unmetered."""
     resolved = config.settings.agents.tools_for("scoring")
     ctx = ToolContext(
         config=config, journal=journal, broker=broker,
@@ -51,6 +54,8 @@ def run_scoring_session(
         web_search_max_uses=resolved.web_search_max_uses,
         effort=config.settings.agents.effort_for("scoring"),
     )
+    if usage is not None:
+        usage.add(result.usage)
     lessons = [
         line.strip()[2:].strip()
         for line in result.final_text.splitlines()

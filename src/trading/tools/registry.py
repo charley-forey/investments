@@ -25,6 +25,11 @@ class ToolContext:
     broker: object            # AlpacaBroker or a stub in tests
     account_state: AccountState
     agent_name: str = "agent"
+    # Which cycle this run belongs to. The proposal budget is per-cycle
+    # (max_proposals_intraday=1 vs max_proposals_per_cycle=2), and the tools used to
+    # read the latter unconditionally -- so the prompt said "at most 1" while the
+    # mechanical ceiling was 2. Whichever the agent believed, they disagreed.
+    cycle: str = "intraday"
     drafts: list[OrderProposal] = field(default_factory=list)
 
 
@@ -692,7 +697,7 @@ class ToolRegistry:
         return "\n".join(lines)
 
     def _t_propose_order(self, inp: dict) -> str:
-        max_props = self.ctx.config.settings.agents.max_proposals_per_cycle
+        max_props = self.ctx.config.settings.agents.proposals_cap(self.ctx.cycle)
         if len(self.ctx.drafts) >= max_props:
             return f"error: proposal budget for this cycle ({max_props}) already used"
         legs = [OptionLeg(**leg) for leg in inp.get("legs", [])]
@@ -738,7 +743,7 @@ class ToolRegistry:
     def _t_propose_vertical(self, inp: dict) -> str:
         from ..analytics.options import build_vertical, chain_rows
 
-        max_props = self.ctx.config.settings.agents.max_proposals_per_cycle
+        max_props = self.ctx.config.settings.agents.proposals_cap(self.ctx.cycle)
         if len(self.ctx.drafts) >= max_props:
             return f"error: proposal budget for this cycle ({max_props}) already used"
 

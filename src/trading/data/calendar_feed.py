@@ -71,6 +71,39 @@ def _load_existing(path: Path) -> list[dict]:
         return []
 
 
+# Market-wide prints that gap everything, regardless of the name traded.
+BINARY_MACRO = {"FOMC", "CPI", "NFP", "PCE", "GDP"}
+
+
+def binary_events_within(config, symbol: str, days: int, *, today=None) -> list[str]:
+    """Labels of binary events landing within `days` for `symbol`.
+
+    Covers the name's own earnings plus market-wide macro prints. Reads the same
+    data/calendar.json the get_calendar tool shows the agent, so the guardrail and
+    the agent's view of event risk cannot disagree."""
+    if days <= 0:
+        return []
+    today = today or date.today()
+    horizon = (today + timedelta(days=days)).isoformat()
+    today_iso = today.isoformat()
+    sym = (symbol or "").upper()
+
+    hits = []
+    for e in _load_existing(Path(config.settings.paths.calendar_file)):
+        when = str(e.get("date") or "")
+        if not (today_iso <= when <= horizon):
+            continue
+        e_sym = str(e.get("symbol") or "").upper()
+        label = str(e.get("event") or "")
+        is_macro = not e_sym and (
+            e.get("event_type") == "macro" or label.upper() in BINARY_MACRO)
+        if is_macro:
+            hits.append(f"{label or 'macro'} {when}")
+        elif e_sym and e_sym == sym:
+            hits.append(f"{sym} {label or 'event'} {when}")
+    return hits
+
+
 def _merge_events(existing: list[dict], fetched: list[dict],
                   *, keep_past_days: int = 0) -> list[dict]:
     today = date.today()

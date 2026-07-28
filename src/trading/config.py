@@ -110,6 +110,14 @@ class ExitLimits(BaseModel):
     option_roll_dte: int | None = 7         # roll/close options inside a week of expiry
 
 
+class EventGate(BaseModel):
+    """Binary-event risk. The premarket note has said 'no swing long that must
+    survive the print' since 7/28; nothing enforced it, so CRM was opened the day
+    before an FOMC. Blocks new STOCK entries only — defined-risk verticals are the
+    sanctioned way to express a pre-event view, and exits are never blocked."""
+    block_stock_entry_within_days: int = Field(default=0, ge=0)  # 0 = off
+
+
 class Limits(BaseModel):
     mode: Literal["paper", "live"] = "paper"
     position: PositionLimits
@@ -125,6 +133,7 @@ class Limits(BaseModel):
     portfolio: PortfolioLimits = PortfolioLimits()
     reconciliation: Reconciliation = Reconciliation()
     exits: ExitLimits = ExitLimits()
+    events: EventGate = EventGate()
 
 
 class Schedule(BaseModel):

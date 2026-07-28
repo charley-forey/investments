@@ -150,6 +150,13 @@ def review_proposal(
             create_kwargs["tools"] = tools
         response = client.messages.create(**create_kwargs)
         spent.add(usage_from_response(response))
+        # Counted here rather than in the dispatch branch below so searches on a
+        # turn that ends without tool_use are still billed to us.
+        spent.web_searches += sum(
+            1 for b in response.content
+            if getattr(b, "type", None) == "server_tool_use"
+            and getattr(b, "name", "") == "web_search"
+        )
         if response.stop_reason == "pause_turn":
             messages.append({"role": "assistant", "content": response.content})
             continue

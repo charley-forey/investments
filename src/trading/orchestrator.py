@@ -19,12 +19,21 @@ from .agents import scoring as scoring_mod
 from .agents import strategy as strategy_mod
 from .analytics import lifecycle
 from .analytics.scorer import score_closed_trades
-from .analytics.stats import portfolio_summary
+from .analytics.stats import open_positions_summary, portfolio_summary
 from .broker.sync import cancel_stale_orders, sync_fills
 from .config import Config
 from .data.journal import Journal
 from .guardrails.engine import OrderPipeline
 from .guardrails.models import OrderProposal
+
+_BILLING_HALT_KEY = "llm_billing_halt"
+_BILLING_RETRY_MINUTES = 30.0
+
+# Share of the daily budget any single hour may consume. On 2026-07-28 the 09:30-11:00
+# window burned the whole $15 (58 of 74 sessions) and the trailing-24h cap then starved
+# the afternoon from 10:30 on — including the postclose learning cycle, which is on the
+# same budget. A per-hour slice keeps decision capacity available all session.
+_HOURLY_BUDGET_SHARE = 0.25
 
 
 @dataclass
@@ -84,10 +93,12 @@ class Orchestrator:
                 report.skipped = "kill switch active"
                 self.journal.heartbeat(f"cycle:{cycle}", status="skip", detail=report.skipped)
                 return report
-            if self._cost_capped():
-                report.skipped = "cost cap reached"
-                self.journal.heartbeat(f"cycle:{cycle}", status="skip", detail=report.skipped)
-                return report
+            # NB the cost cap is NOT checked here. It gates the LLM only, and it used
+            # to sit on this line -- which meant that when it tripped (10:30am on
+            # 2026-07-28, 208 times) stop/target/trailing/expiry management and stale
+            # order cancellation stopped running too. Exits are deterministic and free;
+            # they must never be priced out. The check now lives in _trade_cycle, just
+            # above the strategy agent.
             try:
                 if not self.broker.market_open():
                     report.skipped = "market closed"
@@ -143,6 +154,19 @@ class Orchestrator:
             self._manage_positions(account, report, market_open)
         except Exception as e:
             report.notes.append(f"manage_positions failed: {e}")
+
+        # Everything above this line is deterministic and free. Everything below can
+        # call the LLM, so the daily budget gates here — after the book is managed.
+        if self._cost_capped():
+            report.skipped = "cost cap reached"
+            report.notes.append("LLM skipped: cost cap reached (exits still ran)")
+            self.journal.heartbeat("cycle:intraday", status="skip", detail=report.skipped)
+            return
+        if self._billing_halted():
+            report.skipped = "LLM billing halt (backing off)"
+            report.notes.append("LLM skipped: billing halt (exits still ran)")
+            self.journal.heartbeat("cycle:intraday", status="skip", detail=report.skipped)
+            return
 
         # Cost gate: skip the expensive strategy LLM unless a trigger fires,
         # a position needs attention, or we're in a forced situational-awareness slot.
@@ -209,6 +233,9 @@ class Orchestrator:
             report.notes.append(f"strategy agent failed: {e}")
             self._alert_llm_down(e)
             return
+        # A call got through, so any prior billing halt is stale.
+        if self.journal.get_state(_BILLING_HALT_KEY):
+            self.journal.set_state(_BILLING_HALT_KEY, "")
         self._record_usage("intraday", "strategy", session.usage, report)
         report.proposals = len(session.drafts)
 
@@ -370,6 +397,20 @@ class Orchestrator:
         config.limits.exits. Stock exits are submitted through the guardrail pipeline;
         option exits are flagged for the strategy agent (a defined-risk close needs the
         multi-leg path, so we don't synthesize a naked closing leg here)."""
+        # Drop peaks for names we no longer hold, before the early return below --
+        # otherwise re-entering a symbol inherits the old run's high-water mark and
+        # the trailing rule closes the new position on its first tick.
+        try:
+            held = [p.symbol for p in (account.positions or [])]
+            self.journal.conn.execute(
+                "DELETE FROM kv_state WHERE key LIKE 'hwm:%'"
+                + (" AND key NOT IN (%s)" % ",".join("?" * len(held)) if held else ""),
+                [f"hwm:{s}" for s in held],
+            )
+            self.journal.conn.commit()
+        except Exception:
+            pass
+
         if not account.positions:
             return
         from datetime import date
@@ -393,10 +434,33 @@ class Orchestrator:
                     opened[sym] = d
         except Exception:
             pass
+        # High-water marks: the trailing rule's missing half. ExitRules documents
+        # high_water as caller-owned, but nobody ever populated it, so trailing_pct
+        # was inert whatever it was set to ("off until a high-water source is wired").
+        # Persisted per symbol so a daemon restart does not reset the peak to entry
+        # and hand back a whole run's profit.
+        high_water: dict[str, float] = {}
+        for p in account.positions:
+            mark = marks.get(p.symbol)
+            if mark is None or mark <= 0:
+                continue
+            key = f"hwm:{p.symbol}"
+            try:
+                prior = float(self.journal.get_state(key) or 0) or None
+            except ValueError:
+                prior = None
+            # Peak favorable: the high for longs, the low for shorts.
+            peak = mark if prior is None else (
+                max(prior, mark) if p.qty > 0 else min(prior, mark))
+            high_water[p.symbol] = peak
+            if peak != prior:
+                self.journal.set_state(key, str(peak))
+
         rules = ExitRules(
             stop_loss_pct=ex.stop_loss_pct, take_profit_pct=ex.take_profit_pct,
             trailing_pct=ex.trailing_pct, max_holding_days=ex.max_holding_days,
             option_roll_dte=ex.option_roll_dte, open_dates=opened,
+            high_water=high_water,
         )
         for act in evaluate_exits(account.positions, marks, rules=rules):
             pos = account.position_for(act.symbol)
@@ -540,24 +604,61 @@ class Orchestrator:
             return None
 
     def _cost_capped(self) -> bool:
-        """True if the trailing-24h Anthropic spend has hit the configured cap —
-        runaway-cost protection that pauses agent (LLM) work."""
+        """True if Anthropic spend has hit the daily cap or this hour's slice of it.
+
+        Two windows, because one was not enough:
+
+        * Calendar day, not trailing 24h. A trailing window let last night's spend
+          suppress this morning — the cap first tripped at 10:30am ET on 2026-07-28
+          partly on the back of the previous evening.
+        * Per-hour slice. Without it a single busy hour can spend the whole day's
+          budget and leave the afternoon (and the postclose learning cycle) with
+          nothing, which is exactly what happened.
+        """
         cap = self.config.settings.agents.max_daily_cost_usd
         if cap <= 0:
             return False
-        day_ago = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
-        spent = self.journal.cost_since(day_ago)
+        now = datetime.now(timezone.utc)
+        spent = self.journal.cost_since(now.replace(
+            hour=0, minute=0, second=0, microsecond=0).isoformat())
         if spent >= cap:
             self.journal.heartbeat("cost_cap", status="warn",
-                                   detail=f"24h spend ${spent:.2f} >= cap ${cap:.2f}")
+                                   detail=f"today ${spent:.2f} >= cap ${cap:.2f}")
             try:
                 notify.notify_event(self.config, self.journal, "Cost cap reached",
-                                    f"24h Anthropic spend ${spent:.2f} >= ${cap:.2f}; "
+                                    f"Anthropic spend today ${spent:.2f} >= ${cap:.2f}; "
                                     "agent cycles paused")
             except Exception:
                 pass
             return True
+
+        hour_cap = cap * _HOURLY_BUDGET_SHARE
+        hour_spent = self.journal.cost_since(
+            now.replace(minute=0, second=0, microsecond=0).isoformat())
+        if hour_spent >= hour_cap:
+            # Deliberately quiet: this is pacing, not an incident. It clears on the
+            # hour, so alerting on it would page once an hour for normal operation.
+            self.journal.heartbeat(
+                "cost_cap", status="warn",
+                detail=f"hourly ${hour_spent:.2f} >= ${hour_cap:.2f} (paced)")
+            return True
         return False
+
+    def _billing_halted(self) -> bool:
+        """True while we are backing off from a billing rejection.
+
+        A dead credit balance is not a transient error -- retrying it once a minute
+        cannot fix it. On 2026-07-28 that produced 102 identical 400s and 102 alerts
+        between 18:16 and 19:59. Probe once every _BILLING_RETRY_MINUTES instead, so
+        the system still recovers by itself when the balance is topped up."""
+        stamp = self.journal.get_state(_BILLING_HALT_KEY)
+        if not stamp:
+            return False
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(stamp)
+        except ValueError:
+            return False
+        return age < timedelta(minutes=_BILLING_RETRY_MINUTES)
 
     def _alert_llm_down(self, exc: Exception) -> None:
         """Loud alarm when the agent can no longer think. Credit exhaustion is
@@ -567,6 +668,9 @@ class Orchestrator:
         out_of_credit = "credit balance is too low" in detail.lower()
         title = "Anthropic credit exhausted" if out_of_credit else "Strategy agent down"
         self.journal.heartbeat("llm", status="error", detail=detail[:400])
+        if out_of_credit:
+            self.journal.set_state(_BILLING_HALT_KEY,
+                                   datetime.now(timezone.utc).isoformat())
         try:
             notify.notify_event(
                 self.config, self.journal, title,
@@ -740,16 +844,23 @@ class Orchestrator:
             report.notes.append("scoring agent skipped (no graded evidence)")
         else:
             try:
+                spent = cost.Usage()
                 lessons = self._score(
-                    self.client, self.config, self.journal, self.broker, account
+                    self.client, self.config, self.journal, self.broker, account,
+                    usage=spent,
                 )
+                self._record_usage("postclose", "scoring", spent, report)
                 report.notes.append(f"{len(lessons)} lessons recorded")
             except Exception as e:
                 report.notes.append(f"scoring agent failed: {e}")
         # 3. EOD performance snapshot into memory.
         perf = portfolio_summary(self.journal, self.config.settings.tax)
-        self._write_memory("eod_review.md", "postclose",
-                           f"{perf}\n\nStages: {lifecycle.stages_summary(self.journal)}")
+        today = f"Scored today: {score_report.scored} round-trip lot(s), " \
+                f"gross ${score_report.gross_pnl:+.2f}"
+        self._write_memory(
+            "eod_review.md", "postclose",
+            f"{today}\n\n{perf}\n\n{open_positions_summary(account)}"
+            f"\n\nStages: {lifecycle.stages_summary(self.journal)}")
         report.notes.append("wrote memory/eod_review.md")
 
     # -- premarket: write a watchlist note -----------------------------------
@@ -761,8 +872,10 @@ class Orchestrator:
         # Refresh the market-intel digest at the start of the day.
         if cycle == "premarket":
             try:
-                if self._run_curation():
+                spent = cost.Usage()
+                if self._run_curation(spent):
                     report.notes.append("refreshed market-intel digest")
+                self._record_usage(cycle, "intel", spent, report)
             except Exception as e:
                 report.notes.append(f"intel curation failed: {e}")
         session = self._run_strategy(
@@ -807,7 +920,7 @@ class Orchestrator:
         finally:
             store.close()
 
-    def _run_curation(self) -> str:
+    def _run_curation(self, usage=None) -> str:
         import os
 
         from .data.intel import IntelStore
@@ -817,7 +930,7 @@ class Orchestrator:
             return ""
         store = IntelStore(path)
         try:
-            return intel_mod.run_intel_session(self.client, self.config, store)
+            return intel_mod.run_intel_session(self.client, self.config, store, usage)
         finally:
             store.close()
 

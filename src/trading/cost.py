@@ -21,6 +21,11 @@ _DEFAULT = (5.0, 25.0)
 _CACHE_READ_MULT = 0.1
 _CACHE_WRITE_MULT = 1.25  # 5-minute TTL; 1h TTL would be 2.0
 
+# Anthropic server-side web_search: $10 per 1,000 searches, billed on top of tokens.
+# Invisible to the token ledger, so it used to be spent entirely off-book — 72
+# strategy sessions on 2026-07-28 could each run up to `web_search_max_uses`.
+WEB_SEARCH_USD = 0.01
+
 
 @dataclass
 class Usage:
@@ -28,12 +33,14 @@ class Usage:
     output_tokens: int = 0
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0
+    web_searches: int = 0
 
     def add(self, other: "Usage") -> None:
         self.input_tokens += other.input_tokens
         self.output_tokens += other.output_tokens
         self.cache_read_tokens += other.cache_read_tokens
         self.cache_write_tokens += other.cache_write_tokens
+        self.web_searches += other.web_searches
 
 
 def usage_from_response(response) -> Usage:
@@ -67,5 +74,11 @@ def split_cost(usage: Usage, model: str) -> tuple[float, float]:
     return input_cost, usage.output_tokens * out_rate / 1_000_000
 
 
+def tool_cost(usage: Usage) -> float:
+    """Server-side tool charges. Not a token lever, so deliberately kept out of
+    split_cost -- but it is real money and must reach the daily cap."""
+    return usage.web_searches * WEB_SEARCH_USD
+
+
 def estimate_cost(usage: Usage, model: str) -> float:
-    return round(sum(split_cost(usage, model)), 6)
+    return round(sum(split_cost(usage, model)) + tool_cost(usage), 6)

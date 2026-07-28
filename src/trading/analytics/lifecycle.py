@@ -127,7 +127,16 @@ def run_lifecycle(journal: Journal, config: Config) -> list[StageChange]:
 
 
 def stages_summary(journal: Journal) -> str:
+    """Marks stages that are the 'paper' default rather than a recorded decision.
+
+    The EOD note printed `news-impulse=paper` for weeks with zero `stage:*` rows in
+    kv_state — reading as a promotion decision when it was just the fallback in
+    get_stage."""
     tags = journal.distinct_strategy_tags()
     if not tags:
         return "no strategies tracked yet"
-    return "; ".join(f"{t}={get_stage(journal, t)}" for t in sorted(tags))
+    parts = []
+    for t in sorted(tags):
+        recorded = journal.get_state(f"stage:{t}")
+        parts.append(f"{t}={get_stage(journal, t)}" + ("" if recorded else " (default)"))
+    return "; ".join(parts)

@@ -429,7 +429,7 @@ def cmd_backtest(args) -> int:
         return 1
     signal = getattr(strat, SIGNALS[args.strategy])()
     bt_kw = dict(stop_pct=args.stop_pct, target_r=args.target_r,
-                 allow_shorts=args.shorts)
+                 trail_pct=args.trail_pct, allow_shorts=args.shorts)
 
     if args.walkforward:
         from backtest.walkforward import gate_strategy, walk_forward
@@ -767,6 +767,9 @@ def main(argv: list[str] | None = None) -> int:
     bt.add_argument("--target-r", type=float, default=None,
                     help="take-profit at N x the stop distance; with --stop-pct this "
                          "is what tests whether limits.orders.min_reward_risk is right")
+    bt.add_argument("--trail-pct", type=float, default=None,
+                    help="trailing stop this far off the peak favorable price, e.g. "
+                         "0.08; pair with no --target-r to test letting winners run")
     bt.add_argument("--shorts", action="store_true",
                     help="allow the signal to go short (-1)")
     bt.add_argument("--tag", default=None, help="strategy tag to gate/promote")

@@ -474,8 +474,15 @@ class Journal:
         return [r["slippage_bps"] for r in rows]
 
     def trades_since(self, since: datetime) -> int:
+        """Distinct broker orders, not rows.
+
+        sync_fills writes one `orders` row per incremental fill delta on top of the
+        submission row, all sharing a broker_order_id. Counting rows made a single
+        CRM entry burn 4 of the 10 daily trades on 2026-07-28, and that inflated
+        number is what the strategy prompt reports as "remaining"."""
         row = self.conn.execute(
-            "SELECT COUNT(*) AS n FROM orders WHERE ts >= ?",
+            "SELECT COUNT(DISTINCT COALESCE(broker_order_id, CAST(id AS TEXT))) AS n "
+            "FROM orders WHERE ts >= ?",
             (since.astimezone(timezone.utc).isoformat(timespec="seconds"),),
         ).fetchone()
         return int(row["n"])
