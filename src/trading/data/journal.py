@@ -23,6 +23,7 @@ CREATE TABLE IF NOT EXISTS proposals (
     order_type TEXT NOT NULL,           -- 'limit' | 'market'
     limit_price REAL,
     stop_price REAL,                    -- planned stop for sizing (stocks)
+    target_price REAL,                  -- planned take-profit; with stop_price gives R
     legs_json TEXT,                     -- options legs, JSON
     thesis TEXT,
     expected_edge_usd REAL,
@@ -99,6 +100,39 @@ CREATE TABLE IF NOT EXISTS kv_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Market events detected by the tick stream, drained by the daemon's cost gate.
+-- Append-only with a consumed marker: the stream and the daemon are separate
+-- processes, so a read-modify-write on kv_state would race.
+CREATE TABLE IF NOT EXISTS wake_events (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    kind TEXT NOT NULL,                 -- 'trigger' | 'orb'
+    detail TEXT,
+    price REAL,
+    consumed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_wake_unconsumed ON wake_events (consumed_at, id);
+
+-- Orders the LLM and risk agent approved in advance, held until price crosses a
+-- level. The tick stream fires them through the normal guardrail pipeline, which
+-- is what makes sub-second execution safe rather than a bypass.
+CREATE TABLE IF NOT EXISTS armed_plans (
+    id INTEGER PRIMARY KEY,
+    ts TEXT NOT NULL,
+    symbol TEXT NOT NULL,
+    direction TEXT NOT NULL,            -- 'above' | 'below'
+    level REAL NOT NULL,
+    expires_at TEXT NOT NULL,
+    proposal_json TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'armed',  -- armed | fired | expired | cancelled
+    fired_at TEXT,
+    fired_price REAL,
+    proposal_id INTEGER,
+    note TEXT
+);
+CREATE INDEX IF NOT EXISTS ix_armed_active ON armed_plans (status, symbol);
 
 CREATE TABLE IF NOT EXISTS heartbeats (
     id INTEGER PRIMARY KEY,
@@ -234,6 +268,11 @@ class Journal:
         if "cache_write_tokens" not in usage_cols:
             self.conn.execute(
                 "ALTER TABLE usage ADD COLUMN cache_write_tokens INTEGER NOT NULL DEFAULT 0")
+        # target_price on proposals: without it, reward:risk — the thing that made
+        # expectancy negative — cannot be measured on the proposals table at all.
+        prop_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(proposals)")}
+        if "target_price" not in prop_cols:
+            self.conn.execute("ALTER TABLE proposals ADD COLUMN target_price REAL")
         snap_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(signal_snapshot)")}
         for col in ("atm_iv", "iv_rank", "pc_skew", "trigger_level", "cand_score"):
             if col not in snap_cols:
@@ -326,6 +365,7 @@ class Journal:
         strategy_tag: str = "manual",
         limit_price: float | None = None,
         stop_price: float | None = None,
+        target_price: float | None = None,
         legs: list[dict] | None = None,
         thesis: str | None = None,
         expected_edge_usd: float | None = None,
@@ -337,12 +377,13 @@ class Journal:
         cur = self.conn.execute(
             """INSERT INTO proposals
                (ts, agent, strategy_tag, symbol, asset_class, side, qty, order_type,
-                limit_price, stop_price, legs_json, thesis, expected_edge_usd,
-                max_loss_usd, confidence, discovery_source, score_at_entry)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                limit_price, stop_price, target_price, legs_json, thesis,
+                expected_edge_usd, max_loss_usd, confidence, discovery_source,
+                score_at_entry)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 utcnow(), agent, strategy_tag, symbol.upper(), asset_class, side, qty,
-                order_type, limit_price, stop_price,
+                order_type, limit_price, stop_price, target_price,
                 json.dumps(legs) if legs else None, thesis, expected_edge_usd,
                 max_loss_usd, confidence, discovery_source, score_at_entry,
             ),
@@ -634,6 +675,92 @@ class Journal:
             "INSERT INTO kv_state (key, value) VALUES (?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (key, value),
+        )
+        self.conn.commit()
+
+    # -- armed plans (pre-authorised orders fired by the tick stream) ----------
+
+    def arm_plan(self, *, symbol: str, direction: str, level: float,
+                 expires_at: str, proposal_json: str, note: str | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO armed_plans (ts, symbol, direction, level, expires_at, "
+            "proposal_json, note) VALUES (?,?,?,?,?,?,?)",
+            (utcnow(), symbol.upper(), direction, float(level), expires_at,
+             proposal_json, note),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def active_armed_plans(self, symbol: str | None = None) -> list[dict]:
+        """Armed and unexpired. Expiry is enforced on read so a stale plan can
+        never fire, even if the sweeper has not run."""
+        now = utcnow()
+        sql = "SELECT * FROM armed_plans WHERE status='armed' AND expires_at > ?"
+        args: list = [now]
+        if symbol:
+            sql += " AND symbol=?"
+            args.append(symbol.upper())
+        return [dict(r) for r in self.conn.execute(sql + " ORDER BY id", args)]
+
+    def claim_armed_plan(self, plan_id: int, *, price: float | None = None) -> bool:
+        """Take exclusive ownership of a plan before acting on it.
+
+        Single-use by construction: only an 'armed' row moves to 'firing', so two
+        ticks racing the same plan cannot both submit it. Returns True for the one
+        caller that won."""
+        cur = self.conn.execute(
+            "UPDATE armed_plans SET status='firing', fired_at=?, fired_price=? "
+            "WHERE id=? AND status='armed'",
+            (utcnow(), price, int(plan_id)),
+        )
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def finalize_armed_plan(self, plan_id: int, status: str, *,
+                            proposal_id: int | None = None,
+                            note: str | None = None) -> None:
+        """Record the outcome of a plan this caller already claimed."""
+        self.conn.execute(
+            "UPDATE armed_plans SET status=?, proposal_id=COALESCE(?, proposal_id), "
+            "note=COALESCE(?, note) WHERE id=?",
+            (status, proposal_id, note, int(plan_id)),
+        )
+        self.conn.commit()
+
+    def expire_armed_plans(self) -> int:
+        cur = self.conn.execute(
+            "UPDATE armed_plans SET status='expired' WHERE status='armed' AND expires_at <= ?",
+            (utcnow(),),
+        )
+        self.conn.commit()
+        return cur.rowcount
+
+    # -- wake events (tick stream -> daemon cost gate) -------------------------
+
+    def record_wake_event(self, *, symbol: str, kind: str, detail: str | None = None,
+                          price: float | None = None) -> int:
+        cur = self.conn.execute(
+            "INSERT INTO wake_events (ts, symbol, kind, detail, price) VALUES (?,?,?,?,?)",
+            (utcnow(), symbol.upper(), kind, detail, price),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def pending_wake_events(self, *, limit: int = 20) -> list[dict]:
+        rows = self.conn.execute(
+            "SELECT * FROM wake_events WHERE consumed_at IS NULL ORDER BY id LIMIT ?",
+            (limit,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def consume_wake_events(self, ids: list[int]) -> None:
+        """Mark drained. Kept separate from the read so a crash between the two
+        re-delivers the event rather than silently dropping a real breakout."""
+        if not ids:
+            return
+        self.conn.executemany(
+            "UPDATE wake_events SET consumed_at=? WHERE id=?",
+            [(utcnow(), int(i)) for i in ids],
         )
         self.conn.commit()
 

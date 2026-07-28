@@ -20,6 +20,7 @@ def make_config(**limit_overrides) -> Config:
         orders=OrderLimits(
             max_order_notional_usd=5000.0, max_new_trades_per_day=5,
             max_new_trades_per_week=15, allow_market_orders=False,
+            min_reward_risk=1.5,
         ),
         loss_kill_switch=LossKillSwitch(max_daily_loss_pct=3.0),
         symbols=SymbolLimits(min_price=5.0, min_avg_daily_volume=500000),

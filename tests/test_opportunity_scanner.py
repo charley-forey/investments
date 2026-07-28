@@ -123,7 +123,15 @@ def test_gate_wakes_on_high_score(tmp_path):
         config, journal, StubBroker(make_account()), make_account(), now_et=now,
     )
     assert decision.run_llm
-    assert "opportunity score" in decision.reason
+    assert "new/rising opportunity" in decision.reason
+
+    # candidates.json is sorted and truncated to top_n, so a standing high score
+    # is always present. Only NEW or materially rising names are news; re-asking
+    # with the same file must not bill another call.
+    repeat = should_run_intraday_llm(
+        config, journal, StubBroker(make_account()), make_account(), now_et=now,
+    )
+    assert not repeat.run_llm
 
 
 def test_learning_promote_and_stats(tmp_path):

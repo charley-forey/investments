@@ -56,6 +56,21 @@ TOOL_SCHEMAS: dict[str, dict] = {
             "required": ["symbol"],
         },
     },
+    "size_position": {
+        "description": "The share count to propose for a stock entry, computed from the live "
+                       "caps — call this instead of guessing a qty. Returns the legal max, the "
+                       "resulting notional and stop-risk, and WHICH cap bound it. Propose the "
+                       "qty it returns; going smaller needs a reason named in the thesis.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string"},
+                "entry_price": {"type": "number", "description": "your intended limit price"},
+                "stop_price": {"type": "number", "description": "your protective stop"},
+            },
+            "required": ["symbol", "entry_price", "stop_price"],
+        },
+    },
     "get_bars": {
         "description": "Recent daily OHLCV bars for a symbol (compact table).",
         "input_schema": {
@@ -210,6 +225,20 @@ TOOL_SCHEMAS: dict[str, dict] = {
                 "strategy_tag": {"type": "string"},
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "reduces_position": {"type": "boolean"},
+                "arm_level": {
+                    "type": "number",
+                    "description": "Pre-authorise instead of sending now: hold this "
+                                   "order until price crosses this level, then the tick "
+                                   "stream executes it in milliseconds. Deciding in "
+                                   "advance beats deciding at the event, which costs "
+                                   "~60s. Use for 'buy the breakout of X' setups.",
+                },
+                "arm_direction": {"type": "string", "enum": ["above", "below"]},
+                "arm_valid_hours": {
+                    "type": "number",
+                    "description": "How long the armed plan stays live (default 8, "
+                                   "i.e. the rest of the session).",
+                },
             },
             "required": ["symbol", "asset_class", "side", "thesis",
                          "expected_edge_usd", "strategy_tag"],
@@ -309,6 +338,34 @@ class ToolRegistry:
                      f"— do not size or enter on this quote; wait for a tight book "
                      f"(<0.4%) or confirm with a fresh last trade.")
         return line
+
+    def _t_size_position(self, inp: dict) -> str:
+        lim = self.ctx.config.limits
+        equity = self.ctx.account_state.equity
+        entry = float(inp.get("entry_price") or 0)
+        stop = float(inp.get("stop_price") or 0)
+        if entry <= 0 or stop <= 0:
+            return "error: entry_price and stop_price must both be > 0 to size a position."
+        if abs(entry - stop) <= 0:
+            return "error: stop_price equals entry_price — no risk per share to size against."
+        max_qty, by_notional, by_risk, binding, hard_cap = self._stock_size_limits(
+            entry, stop, lim, equity
+        )
+        if max_qty <= 0:
+            return (f"error: no legal size at entry {entry:g} / stop {stop:g} "
+                    f"(cap ${hard_cap:,.0f}, equity ${equity:,.0f}).")
+        risk_budget = equity * lim.position.risk_per_trade_pct / 100.0
+        notional = max_qty * entry
+        risk_usd = abs(entry - stop) * max_qty
+        return (
+            f"{inp['symbol'].upper()}: propose qty={max_qty}\n"
+            f"  notional ${notional:,.0f} ({notional / hard_cap:.0%} of the "
+            f"${hard_cap:,.0f} cap)\n"
+            f"  stop-risk ${risk_usd:,.0f} ({risk_usd / risk_budget:.0%} of the "
+            f"${risk_budget:,.0f} risk budget)\n"
+            f"  BINDING: {binding}  (notional allows {by_notional}, risk allows {by_risk})\n"
+            f"This is the size to propose. Smaller needs a reason stated in the thesis."
+        )
 
     def _t_get_bars(self, inp: dict) -> str:
         days = self.ctx.config.settings.agents.bars_lookback_days
@@ -744,30 +801,41 @@ class ToolRegistry:
             return self._stock_sizing_error(proposal, lim, equity)
         return self._option_sizing_error(proposal, lim)
 
-    def _stock_sizing_error(self, proposal: OrderProposal, lim, equity: float) -> str | None:
+    def _stock_size_limits(self, price: float, stop_price: float, lim, equity: float):
+        """The legal share count for one stock entry, and which cap produced it.
+
+        Extracted so the precheck and the `size_position` tool cannot disagree —
+        this arithmetic used to live only inside the error path, which the agent
+        saw only when it was already oversized, i.e. effectively never."""
         import math
 
         from ..guardrails.account_math import size_stock_position
 
-        price = float(proposal.limit_price or 0)
-        if price <= 0:
-            return None
-        notional = price * proposal.qty
         pos_cap = min(lim.position.max_position_usd,
                       equity * lim.position.max_position_pct / 100.0)
-        order_cap = lim.orders.max_order_notional_usd
-        hard_cap = min(pos_cap, order_cap)
-
+        hard_cap = min(pos_cap, lim.orders.max_order_notional_usd)
         max_by_notional = math.floor(hard_cap / price) if price > 0 else 0
         max_by_risk = size_stock_position(
             equity=equity,
             risk_per_trade_pct=lim.position.risk_per_trade_pct,
             entry_price=price,
-            stop_price=float(proposal.stop_price or 0),
+            stop_price=stop_price,
             max_position_usd=lim.position.max_position_usd,
             max_position_pct=lim.position.max_position_pct,
         )
         max_qty = min(max_by_notional, max_by_risk) if max_by_risk > 0 else max_by_notional
+        binding = "position cap" if max_by_notional <= max_by_risk or max_by_risk <= 0 \
+            else "risk budget"
+        return max_qty, max_by_notional, max_by_risk, binding, hard_cap
+
+    def _stock_sizing_error(self, proposal: OrderProposal, lim, equity: float) -> str | None:
+        price = float(proposal.limit_price or 0)
+        if price <= 0:
+            return None
+        notional = price * proposal.qty
+        max_qty, max_by_notional, max_by_risk, _binding, hard_cap = self._stock_size_limits(
+            price, float(proposal.stop_price or 0), lim, equity
+        )
 
         if notional > hard_cap:
             return (f"error: notional ${notional:,.2f} exceeds cap ${hard_cap:,.2f} "

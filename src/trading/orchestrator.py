@@ -151,11 +151,10 @@ class Orchestrator:
         if not gate.run_llm:
             report.skipped = gate.reason
             report.notes.append(f"LLM skipped: {gate.reason}")
-            try:
-                from .analytics.snapshot import snapshot_universe
-                snapshot_universe(self.config, self.journal, self.broker, cycle="intraday")
-            except Exception as e:
-                report.notes.append(f"snapshot failed: {e}")
+            # The universe snapshot is its own scheduled job. It used to run here,
+            # which made a skipped cycle cost 88 quotes and 88 rows — affordable at
+            # a 15-minute cadence, ruinous now that this runs every minute to drain
+            # the tick stream's wake queue.
             return
         report.notes.append(f"LLM gate: {gate.reason}")
 
@@ -224,13 +223,6 @@ class Orchestrator:
         except Exception as e:
             report.notes.append(f"cycle narrative not recorded: {e}")
 
-        # Deterministic per-interval signal snapshot of the whole universe (no LLM).
-        try:
-            from .analytics.snapshot import snapshot_universe
-            snapshot_universe(self.config, self.journal, self.broker, cycle="intraday")
-        except Exception as e:
-            report.notes.append(f"snapshot failed: {e}")
-
         for draft in session.drafts:
             # Tag discovery source from active scanner candidates / core universe.
             self._tag_discovery(draft)
@@ -281,11 +273,14 @@ class Orchestrator:
             # daily cost cap is enforced against a fraction of real spend.
             self._record_usage("intraday", "risk", verdict.usage, report,
                                model=self.config.settings.agents.model_for("risk"))
-            if verdict.verdict != "approve":
+            if not verdict.allows_trade:
                 report.vetoed += 1
                 pid = self._journal_veto(draft, "risk_agent", verdict)
                 self._record_reasoning(pid, session)
                 continue
+            # 'amend' = the concern is size, not the setup. Take the trade smaller
+            # rather than not at all; mechanical guardrails still run below.
+            draft = verdict.scaled(draft)
 
             # High-conviction trades get an adversarial red-team pass; a veto here
             # skips the trade even though risk approved it.
@@ -301,6 +296,20 @@ class Orchestrator:
                     self._record_reasoning(pid, session)
                     continue
 
+            # Pre-authorised: risk approved the plan, but it waits for its level.
+            # The tick stream fires it in milliseconds when price crosses, running
+            # this same pipeline at that moment against a live account and quote.
+            if draft.is_armed_plan:
+                try:
+                    pid = self._arm_plan(draft, verdict)
+                    report.notes.append(
+                        f"armed {draft.symbol} {draft.arm_direction} {draft.arm_level:g} "
+                        f"(plan {pid})")
+                    self._record_reasoning(pid, session)
+                except Exception as e:
+                    report.notes.append(f"arm {draft.symbol} failed: {e}")
+                continue
+
             # Approved by risk -> run the deterministic guardrail pipeline.
             quote = self._quote_for(draft)
             try:
@@ -315,8 +324,9 @@ class Orchestrator:
                 continue
             # Attach the risk approval + captured strategy reasoning to the proposal.
             self.journal.record_verdict(
-                result.proposal_id, source="risk_agent", verdict="approve",
-                reason=verdict.reason,
+                result.proposal_id, source="risk_agent", verdict=verdict.verdict,
+                reason=verdict.reason + (f" | amended to {verdict.qty_mult:.2f}x size"
+                                         if verdict.verdict == "amend" else ""),
             )
             self._record_reasoning(result.proposal_id, session)
             try:
@@ -581,12 +591,43 @@ class Orchestrator:
             cache_write_tokens=getattr(usage, "cache_write_tokens", 0),
         )
 
+    def _arm_plan(self, draft: OrderProposal, verdict) -> int:
+        """Journal the approved-but-waiting order and store it for the tick stream.
+
+        The proposal row is written with status 'armed' so the plan is auditable
+        before it fires; the real submission gets its own proposal row at fire time,
+        which is what keeps counterfactual grading honest about when we committed."""
+        pid = self.journal.record_proposal(
+            agent=draft.agent, strategy_tag=draft.strategy_tag, symbol=draft.symbol,
+            asset_class=draft.asset_class, side=draft.side, qty=draft.qty,
+            order_type=draft.order_type, limit_price=draft.limit_price,
+            stop_price=draft.stop_price, target_price=draft.target_price,
+            legs=[l.model_dump(mode="json") for l in draft.legs] or None,
+            thesis=draft.thesis, expected_edge_usd=draft.expected_edge_usd,
+            max_loss_usd=draft.max_loss_usd, confidence=draft.confidence,
+            discovery_source=getattr(draft, "discovery_source", None),
+            score_at_entry=getattr(draft, "score_at_entry", None),
+        )
+        self.journal.set_proposal_status(pid, "armed")
+        self.journal.record_verdict(
+            pid, source="risk_agent", verdict=verdict.verdict,
+            reason=f"{verdict.reason} | armed at {draft.arm_direction} {draft.arm_level:g}",
+        )
+        expires = (datetime.now(timezone.utc)
+                   + timedelta(hours=draft.arm_valid_hours)).isoformat()
+        self.journal.arm_plan(
+            symbol=draft.symbol, direction=draft.arm_direction, level=draft.arm_level,
+            expires_at=expires, proposal_json=draft.model_dump_json(),
+            note=f"proposal {pid}",
+        )
+        return pid
+
     def _journal_veto(self, draft: OrderProposal, source: str, verdict) -> int:
         pid = self.journal.record_proposal(
             agent=draft.agent, strategy_tag=draft.strategy_tag, symbol=draft.symbol,
             asset_class=draft.asset_class, side=draft.side, qty=draft.qty,
             order_type=draft.order_type, limit_price=draft.limit_price,
-            stop_price=draft.stop_price,
+            stop_price=draft.stop_price, target_price=draft.target_price,
             legs=[l.model_dump(mode="json") for l in draft.legs] or None,
             thesis=draft.thesis, expected_edge_usd=draft.expected_edge_usd,
             max_loss_usd=draft.max_loss_usd, confidence=draft.confidence,

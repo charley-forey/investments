@@ -238,8 +238,13 @@ def build_vertical(
         return None, "no OTM strike available to form the wing leg"
 
     def per_contract_loss(net: float, width: float) -> float:
-        # debit: you can lose the whole debit; credit: you can lose width minus credit.
-        return (net if mode == "debit" else (width - net)) * 100.0
+        # debit: you can lose the whole debit. credit: the true worst case is
+        # width - credit, but the guardrail deliberately ignores credit received
+        # (account_math.analyze_option_legs) because that credit is not guaranteed
+        # at fill. Sizing off the netted number here meant the builder produced
+        # contract counts the guardrail then rejected as options_max_loss — which is
+        # why no credit spread has ever reached the broker. Match the guardrail.
+        return (net if mode == "debit" else width) * 100.0
 
     width_target = max(spot * target_width_pct, 0.01)
     best = None                 # (|width - target|, wing_row, width, net)

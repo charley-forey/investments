@@ -34,7 +34,11 @@ universe:
 schedule:
   timezone: America/New_York
   premarket_research: 08:30
-  intraday_scan_every_minutes: 15
+  # How often the daemon DRAINS the wake queue, not how often it calls the LLM —
+  # the cost gate decides that, and a skipped cycle is pure Python plus one SQLite
+  # read. At 15 the tick stream's sub-second detection still waited up to 15
+  # minutes for a reaction, which wasted the whole point of it.
+  intraday_scan_every_minutes: 1
   postclose_review: '16:30'
   weekend_research_day: sat
   weekend_research_time: '10:00'
@@ -129,4 +133,7 @@ agents:
     risk: 0
     redteam: 0
     scoring: 0
-data_feed: iex
+# sip = consolidated tape (all US exchanges). Requires Algo Trader Plus, which is
+# active. IEX was ~2% of volume and quoted one-sided books that the risk agent
+# correctly read as "do not enter" — see broker/alpaca.py.
+data_feed: sip

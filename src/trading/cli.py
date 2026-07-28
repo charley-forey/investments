@@ -306,6 +306,17 @@ def cmd_stream(_args) -> int:
     return 0
 
 
+def cmd_marketstream(_args) -> int:
+    import logging
+
+    from .broker.market_stream import run_market_stream
+
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    run_market_stream(get_config())
+    return 0
+
+
 def cmd_run_once(args) -> int:
     from .agents.client import make_client
     from .orchestrator import Orchestrator
@@ -387,28 +398,40 @@ def cmd_ingest(args) -> int:
     return 0
 
 
+SIGNALS = {
+    "sma": "sma_crossover",
+    "breakout": "breakout",
+    "trend-pullback-long": "trend_pullback_long",
+    "momentum-continuation": "momentum_continuation",
+}
+
+
 def cmd_backtest(args) -> int:
+    import backtest.strategies as strat
     from backtest.engine import run_backtest
-    from backtest.strategies import breakout, sma_crossover
 
     bars = _load_bars_for(args.symbol, args.days)
     if not bars:
         print(f"no bars for {args.symbol}")
         return 1
-    signal = sma_crossover() if args.strategy == "sma" else breakout()
+    signal = getattr(strat, SIGNALS[args.strategy])()
+    bt_kw = dict(stop_pct=args.stop_pct, target_r=args.target_r,
+                 allow_shorts=args.shorts)
 
     if args.walkforward:
         from backtest.walkforward import gate_strategy, walk_forward
 
-        wf = walk_forward(bars, signal)
+        wf = walk_forward(bars, signal, **bt_kw)
         print(f"{args.symbol} {args.strategy} walk-forward: {wf.summary()} "
               f"-> {'PASS' if wf.passed() else 'FAIL'}")
         if args.tag:
             print("  " + gate_strategy(_journal(), args.tag, wf))
         return 0
 
-    result = run_backtest(bars, signal)
+    result = run_backtest(bars, signal, **bt_kw)
     print(f"{args.symbol} {args.strategy} over {len(bars)} bars: {result.summary()}")
+    if args.stop_pct:
+        print(f"  exits: {result.exit_breakdown()}")
 
     if args.montecarlo:
         from backtest.montecarlo import bootstrap
@@ -724,8 +747,15 @@ def main(argv: list[str] | None = None) -> int:
 
     bt = sub.add_parser("backtest", help="backtest a reference strategy on a symbol")
     bt.add_argument("symbol")
-    bt.add_argument("--strategy", choices=["sma", "breakout"], default="sma")
+    bt.add_argument("--strategy", choices=sorted(SIGNALS), default="sma")
     bt.add_argument("--days", type=int, default=365)
+    bt.add_argument("--stop-pct", type=float, default=None,
+                    help="protective stop this far from entry, e.g. 0.02 for 2%%")
+    bt.add_argument("--target-r", type=float, default=None,
+                    help="take-profit at N x the stop distance; with --stop-pct this "
+                         "is what tests whether limits.orders.min_reward_risk is right")
+    bt.add_argument("--shorts", action="store_true",
+                    help="allow the signal to go short (-1)")
     bt.add_argument("--tag", default=None, help="strategy tag to gate/promote")
     bt.add_argument("--promote", action="store_true",
                     help="promote candidate->paper if expectancy is positive")
@@ -795,6 +825,9 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--port", type=int, default=8787)
     dash.set_defaults(fn=cmd_dashboard)
     sub.add_parser("stream", help="run the real-time fill websocket").set_defaults(fn=cmd_stream)
+    sub.add_parser("marketstream",
+                   help="run the real-time market-data websocket (queues wake events)"
+                   ).set_defaults(fn=cmd_marketstream)
     sub.add_parser("preflight", help="go/no-go self-check before running live").set_defaults(
         fn=cmd_preflight
     )

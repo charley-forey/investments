@@ -22,6 +22,9 @@ _TRIGGER_RE = re.compile(
     re.IGNORECASE,
 )
 _NEAR_PCT = 0.005  # 0.5% band for "near"
+# A candidate already known at this score is not news; a jump of this many points is.
+_SCORE_JUMP = 10.0
+_SEEN_CANDIDATES_KEY = "gate_seen_candidates"
 
 
 @dataclass
@@ -96,16 +99,21 @@ def _et_now() -> datetime:
     return datetime.now(ZoneInfo("America/New_York"))
 
 
-def _forced_scan_slot(now_et: datetime | None = None) -> bool:
-    """Always run a full LLM scan at open / midday / close for situational awareness."""
+_FORCED_WINDOWS = [
+    ("open", 9 * 60 + 30, 10 * 60 + 15),
+    ("midday", 12 * 60 + 0, 12 * 60 + 45),
+    ("close", 15 * 60 + 0, 15 * 60 + 45),
+]
+
+
+def _forced_scan_slot(now_et: datetime | None = None) -> str | None:
+    """The situational-awareness window we're inside, or None."""
     now = now_et or _et_now()
     hm = now.hour * 60 + now.minute
-    windows = [
-        (9 * 60 + 30, 10 * 60 + 15),   # open
-        (12 * 60 + 0, 12 * 60 + 45),   # midday
-        (15 * 60 + 0, 15 * 60 + 45),   # close
-    ]
-    return any(lo <= hm <= hi for lo, hi in windows)
+    for name, lo, hi in _FORCED_WINDOWS:
+        if lo <= hm <= hi:
+            return name
+    return None
 
 
 def _trigger_hit(broker, trigger: Trigger, *, tolerance_pct: float = _NEAR_PCT) -> bool:
@@ -185,8 +193,26 @@ def should_run_intraday_llm(config: Config, journal: Journal, broker, account,
     if not getattr(agents, "trigger_gate_enabled", True):
         return GateDecision(True, "trigger gate disabled")
 
-    if _forced_scan_slot(now_et):
-        return GateDecision(True, "forced situational-awareness scan slot")
+    # Events the tick stream saw between cycles. These are the whole point of the
+    # stream: a level crossed at 10:02 and faded by 10:12 used to be invisible to a
+    # 15-minute cron. Drained here so the same event cannot bill twice.
+    pending = journal.pending_wake_events()
+    if pending:
+        journal.consume_wake_events([int(e["id"]) for e in pending])
+        detail = "; ".join(f"{e['symbol']} {e['kind']} {e['detail'] or ''}".strip()
+                           for e in pending[:4])
+        return GateDecision(True, f"market event: {detail}")
+
+    # Situational awareness means ONE look per window, not one per cycle inside it.
+    # These three 45-minute windows cover 135 of the session's 390 minutes, so
+    # re-firing every cycle spent ~$2.30/day re-reading the same tape.
+    window = _forced_scan_slot(now_et)
+    if window:
+        today = (now_et or _et_now()).date().isoformat()
+        seen_key = f"forced_slot:{today}:{window}"
+        if journal.get_state(seen_key) is None:
+            journal.set_state(seen_key, "1")
+            return GateDecision(True, f"situational-awareness scan ({window})")
 
     if account.positions and _position_needs_attention(account, broker, config):
         return GateDecision(True, "open position near stop/target")
@@ -194,16 +220,30 @@ def should_run_intraday_llm(config: Config, journal: Journal, broker, account,
     if _regime_shift(journal, broker):
         return GateDecision(True, "regime shift (SPY move)")
 
-    # High OpportunityScore candidates wake the LLM without waiting for a price print.
+    # A high OpportunityScore wakes the LLM — but only when it is NEWS.
+    #
+    # candidates.json is sorted by score and truncated to top_n (8 of 88), with a
+    # 36h TTL, so "is anything above the wake score?" was always yes: the best of 88
+    # names clears a middling bar by construction. That made this gate structurally
+    # unable to say no — it fired on 26 of 26 cycles on 2026-07-27 and cost $5.97 to
+    # rediscover that NVDA still scores 100. Wake on a NEW name or a materially
+    # rising one; a score that has been 100 all afternoon is not an event.
     try:
         from .analytics.autocalibrate import effective_wake_score
         from .scanner.movers import load_candidates
         wake = effective_wake_score(config, journal)
-        hot = [c for c in load_candidates(config)
-               if float(c.get("score") or 0) >= wake]
-        if hot:
-            syms = ", ".join(f"{c['symbol']}={c['score']:.0f}" for c in hot[:4])
-            return GateDecision(True, f"opportunity score >= {wake:g}: {syms}")
+        hot = {c["symbol"]: float(c.get("score") or 0) for c in load_candidates(config)
+               if float(c.get("score") or 0) >= wake}
+        prev = json.loads(journal.get_state(_SEEN_CANDIDATES_KEY) or "{}")
+        fresh = {s: v for s, v in hot.items()
+                 if s not in prev or v - prev[s] >= _SCORE_JUMP}
+        if hot != prev:
+            journal.set_state(_SEEN_CANDIDATES_KEY, json.dumps(hot))
+        if fresh:
+            syms = ", ".join(f"{s}={v:.0f}"
+                             + ("" if s not in prev else f" (+{v - prev[s]:.0f})")
+                             for s, v in list(fresh.items())[:4])
+            return GateDecision(True, f"new/rising opportunity >= {wake:g}: {syms}")
     except Exception:
         pass
 

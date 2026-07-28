@@ -20,19 +20,27 @@ from pathlib import Path
 
 # Profiles are field OVERRIDES on the balanced baseline (config/limits.yaml).
 # "balanced" is the baseline itself, so it carries no overrides (identity overlay).
+# NB `max_position_pct` and the order-notional cap must be here: risk_per_trade_pct
+# alone cannot move real position size, because risk taken = notional x stop distance
+# and the notional cap binds for any stop tighter than risk%/cap%. Without these the
+# dial silently did nothing, contradicting its own "bigger positions" docstring.
 PROFILES: dict[str, dict[str, float]] = {
     "conservative": {
         "risk_per_trade_pct": 0.5,
+        "max_position_pct": 7.0,
+        "max_position_usd": 7000.0,
         "max_gross_exposure_pct": 60.0,
         "max_new_trades_per_day": 5,
-        "options_max_loss_usd": 500.0,
+        "options_max_loss_usd": 1000.0,
     },
     "balanced": {},
     "aggressive": {
         "risk_per_trade_pct": 2.0,
+        "max_position_pct": 20.0,
+        "max_position_usd": 20000.0,
         "max_gross_exposure_pct": 150.0,
         "max_new_trades_per_day": 8,
-        "options_max_loss_usd": 2000.0,
+        "options_max_loss_usd": 4000.0,
     },
 }
 DEFAULT_PROFILE = "balanced"
@@ -47,12 +55,18 @@ def apply_profile(limits, profile: str):
     if not over:  # None (unknown) or {} (balanced) -> baseline unchanged
         return limits
     return limits.model_copy(update={
-        "position": limits.position.model_copy(
-            update={"risk_per_trade_pct": over["risk_per_trade_pct"]}),
+        "position": limits.position.model_copy(update={
+            "risk_per_trade_pct": over["risk_per_trade_pct"],
+            "max_position_pct": over["max_position_pct"],
+            "max_position_usd": over["max_position_usd"],
+        }),
         "portfolio": limits.portfolio.model_copy(
             update={"max_gross_exposure_pct": over["max_gross_exposure_pct"]}),
-        "orders": limits.orders.model_copy(
-            update={"max_new_trades_per_day": int(over["max_new_trades_per_day"])}),
+        "orders": limits.orders.model_copy(update={
+            "max_new_trades_per_day": int(over["max_new_trades_per_day"]),
+            # Independent cap — left behind, it silently binds first.
+            "max_order_notional_usd": over["max_position_usd"],
+        }),
         "options": limits.options.model_copy(
             update={"max_loss_per_trade_usd": over["options_max_loss_usd"]}),
     })

@@ -133,3 +133,44 @@ def test_schemas_returns_only_allowed(tmp_path):
     reg = ToolRegistry(ctx, READ_ONLY_TOOLS)
     names = {s["name"] for s in reg.schemas()}
     assert names == set(READ_ONLY_TOOLS)
+
+
+def _size(tmp_path, entry, stop, equity=100000.0):
+    """Run size_position and return its text. Fixture caps: $5,000 notional, 1% risk."""
+    from stubs import make_account as mk
+    ctx = make_ctx(tmp_path)
+    ctx.account_state = mk(equity=equity)
+    reg = ToolRegistry(ctx, STRATEGY_TOOLS)
+    return reg.dispatch("size_position",
+                    {"symbol": "AAPL", "entry_price": entry, "stop_price": stop})
+
+
+def test_size_position_names_the_position_cap_when_the_stop_is_tight(tmp_path):
+    # $100 stock, 1% stop. Risk budget $1,000 would allow 1,000 shares; the $5,000
+    # notional cap allows 50. The cap binds — this is the case that produced $56 of
+    # risk on a $100k account and was invisible because nothing ever reported it.
+    out = _size(tmp_path, 100.0, 99.0)
+    assert "qty=50" in out
+    assert "BINDING: position cap" in out
+
+
+def test_size_position_names_the_risk_budget_when_the_stop_is_wide(tmp_path):
+    # 20% stop: risk budget $1,000 / $20 per share = 50 shares, vs 50 by notional.
+    # Push the stop wider still so risk is unambiguously the binding constraint.
+    out = _size(tmp_path, 100.0, 70.0)   # $30/share risk -> 33 shares
+    assert "qty=33" in out
+    assert "BINDING: risk budget" in out
+
+
+def test_size_position_reports_utilisation_of_both_budgets(tmp_path):
+    out = _size(tmp_path, 100.0, 99.0)
+    assert "% of the $5,000 cap" in out
+    assert "risk budget" in out
+
+
+def test_size_position_rejects_a_zero_width_stop(tmp_path):
+    assert "error" in _size(tmp_path, 100.0, 100.0)
+
+
+def test_size_position_rejects_missing_prices(tmp_path):
+    assert "error" in _size(tmp_path, 0.0, 99.0)

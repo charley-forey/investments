@@ -51,8 +51,13 @@ function Stop-IfWedged($name) {
 }
 
 function Start-IfNotRunning($name, $procArgs, $outLog, $errLog) {
+    # Match the subcommand exactly, the same way Stop-IfWedged does. A substring
+    # match would see "marketstream" as "stream" and silently never restart the
+    # fill websocket once both exist.
     $running = Get-CimInstance Win32_Process -Filter "Name = 'trading.exe'" |
-        Where-Object { $_.CommandLine -match $name }
+        Where-Object {
+            ($_.CommandLine -match 'trading\.exe\W+(\w+)') -and $Matches[1] -eq $name
+        }
     if ($running) {
         Write-Host "$name already running (pid $($running.ProcessId))"
         return
@@ -68,6 +73,9 @@ function Start-IfNotRunning($name, $procArgs, $outLog, $errLog) {
 Stop-IfWedged "daemon"
 Start-IfNotRunning "daemon" "daemon" "data\daemon.log" "data\daemon.err.log"
 Start-IfNotRunning "stream" "stream" "data\stream.log" "data\stream.err.log"
+# Tick-level detection. If this dies the daemon's 15m cron still runs, so the
+# failure mode is the latency we had before it existed, not a blind system.
+Start-IfNotRunning "marketstream" "marketstream" "data\marketstream.log" "data\marketstream.err.log"
 Start-IfNotRunning "dashboard" "dashboard" "data\dashboard.log" "data\dashboard.err.log"
 
 Write-Host ""
