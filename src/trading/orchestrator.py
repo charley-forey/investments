@@ -214,6 +214,17 @@ class Orchestrator:
                 extra += f"\n\n{rc}"
         except Exception:
             pass
+        # The same question answered from ten years of replay rather than from the
+        # live ledger's handful of single-regime rows. Both are shown: they measure
+        # different things (shadow hit rate vs R against a passive hold) and
+        # disagreement between them is information.
+        try:
+            from .analytics.sweep import regime_context as bt_regime_context
+            br = bt_regime_context(self.journal, regime_trend, regime_vol)
+            if br:
+                extra += f"\n\n{br}"
+        except Exception:
+            pass
         digest = self._intel_digest()
         if digest:
             extra += f"\n\nMarket intelligence digest:\n{digest}"
@@ -267,7 +278,8 @@ class Orchestrator:
             self._tag_discovery(draft)
             # Volatility-targeted sizing: shrink an oversized stock entry to a
             # risk-appropriate size (never grow it), then apply a drawdown throttle.
-            self._risk_size(draft, account, report)
+            self._risk_size(draft, account, report,
+                            regime=(regime_trend, regime_vol))
 
             # Deterministic same-day re-pitch suppression: an unchanged entry idea
             # (same symbol+side+strategy_tag) already vetoed/rejected today is
@@ -551,7 +563,8 @@ class Orchestrator:
         except Exception as e:
             report.notes.append(f"option exit {pos.symbol} failed: {e}")
 
-    def _risk_size(self, draft: OrderProposal, account, report: CycleReport) -> None:
+    def _risk_size(self, draft: OrderProposal, account, report: CycleReport,
+                   *, regime: tuple = (None, None)) -> None:
         """Clamp an opening stock buy to a volatility-targeted size (never larger than
         the agent proposed), then scale by a drawdown throttle. Off when
         portfolio.vol_target_annual is 0. Best-effort: no vol/price -> leave as-is."""
@@ -583,7 +596,16 @@ class Orchestrator:
         # the graded ledger shows works, out of what doesn't. Bounded in kv_state.
         from .analytics.autocalibrate import size_multiplier
         cal_mult = size_multiplier(self.journal, draft.strategy_tag)
-        sized = int(target * drawdown_throttle(dd, soft=circuit / 2, hard=circuit) * cal_mult)
+        # Regime conditioning: the sweep measures each strategy against an
+        # exposure-matched passive hold IN EACH REGIME, and these strategies lose in
+        # strong uptrends while earning their keep in choppier tape. Scale risk into
+        # the regimes where the edge was actually measured. 1.0 when the regime is
+        # unknown or under-sampled -- absence of evidence must not shrink positions.
+        from .analytics.sweep import regime_size_multiplier
+        reg_mult = regime_size_multiplier(
+            self.journal, draft.strategy_tag, regime[0], regime[1])
+        sized = int(target * drawdown_throttle(dd, soft=circuit / 2, hard=circuit)
+                    * cal_mult * reg_mult)
         if sized < draft.qty:
             old = draft.qty
             draft.qty = max(sized, 0)
@@ -591,6 +613,8 @@ class Orchestrator:
                 f"vol-sized {draft.symbol} {old:g}->{draft.qty:g} "
                 f"(vol {vol:.0%}"
                 + (f", cal x{cal_mult:g}" if cal_mult < 1.0 else "")
+                + (f", regime {regime[0]}/{regime[1]} x{reg_mult:.2f}"
+                   if reg_mult < 1.0 else "")
                 + (f", dd {dd:.0%}" if dd > 0 else "") + ")"
             )
 

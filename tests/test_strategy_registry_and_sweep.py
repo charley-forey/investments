@@ -9,6 +9,7 @@ backtest against a live tag.
 
 from __future__ import annotations
 
+import pytest
 from pathlib import Path
 
 from trading import strategies as registry
@@ -131,3 +132,87 @@ class TestLifecycleGate:
         j = Journal(tmp_path / "j.db")
         assert lifecycle.promote_after_backtest(j, "t", -0.5) is None
         assert lifecycle.get_stage(j, "t") == "unproven"
+
+
+class TestRegimeConditioning:
+    """The sweep found these strategies lose to a passive hold in calm uptrends and
+    earn their keep in choppier tape. Sizing is conditioned on that."""
+
+    def _seed(self, tmp_path, regime_payload):
+        import json
+        j = Journal(tmp_path / "r.db")
+        j.set_state("backtest:trend-pullback-long",
+                    json.dumps({"mean_r": 0.4, "mean_alpha_r": -2.5, "trades": 8794,
+                                "symbols_tested": 88, "symbols_positive": 29,
+                                "passed": False, "regime": regime_payload}))
+        return j
+
+    def test_negative_regime_scales_size_down(self, tmp_path):
+        from trading.analytics.sweep import regime_size_multiplier
+
+        j = self._seed(tmp_path, {"up/calm": {"alpha": -796.5, "per_trade": -0.268,
+                                              "trades": 2978}})
+        mult = regime_size_multiplier(j, "trend-pullback-long", "up", "calm")
+        assert 0.25 <= mult < 1.0
+        assert mult == pytest.approx(1.0 + (-0.268 / 0.5) * 0.75, abs=1e-3)
+
+    def test_positive_regime_is_full_size(self, tmp_path):
+        from trading.analytics.sweep import regime_size_multiplier
+
+        j = self._seed(tmp_path, {"up/normal": {"alpha": 281.8, "per_trade": 0.216,
+                                                "trades": 1304}})
+        assert regime_size_multiplier(j, "trend-pullback-long", "up", "normal") == 1.0
+
+    def test_multiplier_has_a_floor(self, tmp_path):
+        """sideways/elevated measured -1.85R/trade. Without a floor that is a
+        negative position size."""
+        from trading.analytics.sweep import REGIME_MIN_MULT, regime_size_multiplier
+
+        j = self._seed(tmp_path, {"sideways/elevated": {"alpha": -738.2,
+                                                        "per_trade": -1.85,
+                                                        "trades": 399}})
+        assert regime_size_multiplier(
+            j, "trend-pullback-long", "sideways", "elevated") == REGIME_MIN_MULT
+
+    def test_thin_sample_does_not_shrink_positions(self, tmp_path):
+        """Absence of evidence is not evidence of absence: an under-sampled regime
+        must return 1.0, or every new regime would silently quarter position size."""
+        from trading.analytics.sweep import regime_size_multiplier
+
+        j = self._seed(tmp_path, {"down/calm": {"alpha": -9.0, "per_trade": -1.0,
+                                                "trades": 9}})
+        assert regime_size_multiplier(j, "trend-pullback-long", "down", "calm") == 1.0
+
+    def test_unknown_regime_and_unknown_tag_are_neutral(self, tmp_path):
+        from trading.analytics.sweep import regime_size_multiplier
+
+        j = self._seed(tmp_path, {"up/calm": {"alpha": -700.0, "per_trade": -0.3,
+                                              "trades": 2978}})
+        assert regime_size_multiplier(j, "trend-pullback-long", "unknown", "calm") == 1.0
+        assert regime_size_multiplier(j, "trend-pullback-long", None, None) == 1.0
+        assert regime_size_multiplier(j, "never-swept", "up", "calm") == 1.0
+
+    def test_regime_labels_use_the_live_classifier(self):
+        """Historical labelling and the live read must be the same function, or the
+        conditioning conditions on a regime it was never measured in."""
+        from trading.analytics.sweep import regime_labels
+        from trading.tools.market_context import compute_regime
+
+        bars = [_B(100.0 * (1.005 ** i)) for i in range(120)]
+        labels = regime_labels(bars)
+        assert len(labels) == len(bars)
+        assert labels[:49] == [None] * 49, "no label before there is enough history"
+        expected = compute_regime([b.close for b in bars[-60:]])
+        assert labels[-1] == f"{expected.trend}/{expected.vol_state}"
+        assert labels[-1].startswith("up/"), "a steady climb must classify as up"
+
+    def test_regime_alpha_normalises_per_trade(self):
+        """The raw total scales with how much of the decade a regime occupied, so
+        `up/calm` would dominate purely by being common."""
+        from trading.analytics.sweep import _regime_alpha
+
+        out = _regime_alpha({"up/calm": {"r": 100.0, "trades": 200, "held": 500,
+                                         "bench_r": 200.0, "bars": 1000}})
+        rec = out["up/calm"]
+        assert rec["alpha"] == pytest.approx(100.0 - 200.0 * 0.5)
+        assert rec["per_trade"] == pytest.approx(rec["alpha"] / 200)

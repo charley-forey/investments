@@ -236,6 +236,14 @@ def _write_sweep_memory(config, report) -> None:
     body.append("PASS = positive mean out-of-sample R across walk-forward folds and "
                 "positive on >=60% of symbols. A validated strategy trades at full "
                 "size; an unproven one at 25%.")
+    regimes = report.regime_markdown()
+    if regimes:
+        body += ["", "## Alpha per trade by market regime (R vs an exposure-matched "
+                 "passive hold; trade count in parens)", "", regimes, "",
+                 "Live position sizing is scaled by these: a strategy is cut toward "
+                 "25% in regimes where it measured negative, full size where positive. "
+                 "The regime is read off SPY with the same classifier the live path "
+                 "uses, so history and today cannot disagree."]
     mem = Path(config.settings.paths.memory_dir)
     mem.mkdir(parents=True, exist_ok=True)
     (mem / "backtest_sweep.md").write_text("\n".join(body) + "\n", encoding="utf-8")
