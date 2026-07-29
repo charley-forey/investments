@@ -72,7 +72,26 @@ reconciliation:
   tolerance_shares: 1
 exits:
   stop_loss_pct: 8
-  take_profit_pct: 25
-  trailing_pct: null
+  # Was 25. Off, to match what was actually measured: the winning backtest arm is
+  # "trail, no target". A surviving +25% cap would silently reimpose the ceiling
+  # the trail exists to remove, just further out.
+  take_profit_pct: null
+  # Was null, and inert even when set (nothing populated ExitRules.high_water).
+  # Now wired, and it REPLACES the resting take-profit leg — the two cannot coexist,
+  # the nearer target always fires first and the trail never runs.
+  # 1,280 trades, 9y, 10 symbols, 40 walk-forward windows:
+  #   fixed 2.5R target  +0.197 mean OOS R, 72% positive folds, worst -0.325
+  #   trail 6%           +0.404 mean OOS R, 85% positive folds, worst -0.386
+  #   trail 8%           +0.459 mean OOS R, 80% positive folds, worst -0.279  <-
+  # 8% wins on mean R and on the worst fold. Unlike target_r this is measured off
+  # the peak price, not off the stop distance, so the "live stops are 1-2%, the
+  # backtest's are 2%" caveat that capped min_reward_risk at 2.5 does not apply.
+  # See docs/backtest_trailing_exit_2026-07-28.md.
+  trailing_pct: 8
   max_holding_days: null
   option_roll_dte: 7
+events:
+  # Block a NEW STOCK entry within this many days of a binary event (FOMC/CPI/NFP/
+  # PCE/GDP, or the name's own earnings). Exits and defined-risk verticals are never
+  # blocked. 2 covers "opened today, prints tomorrow" — the 7/28 CRM case.
+  block_stock_entry_within_days: 2

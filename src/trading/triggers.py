@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -25,6 +25,22 @@ _NEAR_PCT = 0.005  # 0.5% band for "near"
 # A candidate already known at this score is not news; a jump of this many points is.
 _SCORE_JUMP = 10.0
 _SEEN_CANDIDATES_KEY = "gate_seen_candidates"
+
+# Wake-event cooldown, keyed on (symbol, kind).
+#
+# The tick stream debounces per symbol at 30 minutes, but the universe is ~90 names,
+# so a single risk-off open queues hundreds of events: 2026-07-28 recorded 475 (29 in
+# the minute 13:35 alone). pending_wake_events() drains at most 20 per cycle and the
+# poller runs every minute, so the backlog alone guaranteed ~24 back-to-back LLM
+# sessions — 72 that day, $12.83, one proposal. Every other gate below already got a
+# dedup for exactly this reason; this path never did.
+#
+# An event still wakes the LLM the first time. A repeat of the SAME (symbol, kind)
+# inside the window is suppressed unless price has moved materially since — an ORB
+# that keeps extending is genuinely new information, one that sits there is not.
+_WAKE_COOLDOWN_KEY = "gate_wake_cooldown"
+_WAKE_COOLDOWN_MINUTES = 20.0
+_WAKE_REPRICE_PCT = 1.0
 
 
 @dataclass
@@ -180,6 +196,54 @@ def _regime_shift(journal: Journal, broker, *, threshold_pct: float = 0.4) -> bo
     return abs(spy - prev_px) / prev_px * 100.0 >= threshold_pct
 
 
+def _novel_wake_events(journal: Journal, events: list[dict],
+                       *, now: datetime | None = None) -> list[dict]:
+    """Drop wake events whose (symbol, kind) already woke the LLM recently.
+
+    State is one JSON blob under a single kv key -- same shape as
+    _SEEN_CANDIDATES_KEY -- so a busy open cannot write hundreds of kv rows.
+    """
+    now = now or datetime.now(timezone.utc)
+    try:
+        seen = json.loads(journal.get_state(_WAKE_COOLDOWN_KEY) or "{}")
+    except ValueError:
+        seen = {}
+
+    fresh: list[dict] = []
+    for e in events:
+        key = f"{e.get('symbol')}:{e.get('kind')}"
+        price = e.get("price")
+        prior = seen.get(key)
+        if isinstance(prior, list) and len(prior) == 2:
+            prior_ts, prior_px = prior
+            try:
+                age_min = (now - datetime.fromisoformat(prior_ts)).total_seconds() / 60.0
+            except (TypeError, ValueError):
+                age_min = _WAKE_COOLDOWN_MINUTES + 1
+            moved = (
+                price is not None and prior_px
+                and abs(float(price) - float(prior_px)) / abs(float(prior_px)) * 100.0
+                >= _WAKE_REPRICE_PCT
+            )
+            if age_min < _WAKE_COOLDOWN_MINUTES and not moved:
+                continue
+        fresh.append(e)
+        seen[key] = [now.isoformat(), price]
+
+    # Forget entries older than one cooldown so the blob cannot grow without bound.
+    cutoff = now - timedelta(minutes=_WAKE_COOLDOWN_MINUTES)
+    for key in list(seen):
+        entry = seen[key]
+        try:
+            if datetime.fromisoformat(entry[0]) < cutoff:
+                del seen[key]
+        except (TypeError, ValueError, IndexError):
+            del seen[key]
+
+    journal.set_state(_WAKE_COOLDOWN_KEY, json.dumps(seen))
+    return fresh
+
+
 @dataclass
 class GateDecision:
     run_llm: bool
@@ -196,12 +260,17 @@ def should_run_intraday_llm(config: Config, journal: Journal, broker, account,
     # Events the tick stream saw between cycles. These are the whole point of the
     # stream: a level crossed at 10:02 and faded by 10:12 used to be invisible to a
     # 15-minute cron. Drained here so the same event cannot bill twice.
-    pending = journal.pending_wake_events()
+    # Drain the whole burst, not 20 at a time: a 475-event open took 24 cycles to
+    # clear at the old limit, and each of those cycles billed a session. Novelty is
+    # judged across the entire batch below, so a big drain is now the cheap path.
+    pending = journal.pending_wake_events(limit=500)
     if pending:
         journal.consume_wake_events([int(e["id"]) for e in pending])
-        detail = "; ".join(f"{e['symbol']} {e['kind']} {e['detail'] or ''}".strip()
-                           for e in pending[:4])
-        return GateDecision(True, f"market event: {detail}")
+        fresh = _novel_wake_events(journal, pending)
+        if fresh:
+            detail = "; ".join(f"{e['symbol']} {e['kind']} {e['detail'] or ''}".strip()
+                               for e in fresh[:4])
+            return GateDecision(True, f"market event: {detail}")
 
     # Situational awareness means ONE look per window, not one per cycle inside it.
     # These three 45-minute windows cover 135 of the session's 390 minutes, so

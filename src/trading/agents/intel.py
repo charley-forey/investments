@@ -9,6 +9,7 @@ headline context beyond the stored Alpaca news stream.
 from __future__ import annotations
 
 from ..config import Config
+from ..cost import Usage, usage_from_response
 from ..data.intel import IntelStore
 from ..tools.assignment import web_search_tool_schema
 from . import prompts
@@ -28,8 +29,13 @@ def _recent_intel_text(store: IntelStore, universe: list[str]) -> str:
     return "\n".join(lines)
 
 
-def run_intel_session(client, config: Config, store: IntelStore) -> str:
-    """Produce and persist a market-intel digest. Returns the digest markdown."""
+def run_intel_session(client, config: Config, store: IntelStore,
+                      usage: Usage | None = None) -> str:
+    """Produce and persist a market-intel digest. Returns the digest markdown.
+
+    Pass `usage` to have token/web-search spend accumulated into it; this loop is
+    hand-rolled rather than run_agent's, and used to report nothing at all, so its
+    cost never reached the ledger the daily cap reads."""
     universe = config.settings.universe.core
     context = _recent_intel_text(store, universe)
     resolved = config.settings.agents.tools_for("intel")
@@ -70,6 +76,13 @@ def run_intel_session(client, config: Config, store: IntelStore) -> str:
         if tools:
             kwargs["tools"] = tools
         response = client.messages.create(**kwargs)
+        if usage is not None:
+            usage.add(usage_from_response(response))
+            usage.web_searches += sum(
+                1 for b in response.content
+                if getattr(b, "type", None) == "server_tool_use"
+                and getattr(b, "name", "") == "web_search"
+            )
 
         text_parts = [b.text for b in response.content if getattr(b, "type", None) == "text"]
         if text_parts:

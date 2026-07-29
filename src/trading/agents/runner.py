@@ -128,6 +128,7 @@ def run_agent(
             for block in response.content:
                 if (getattr(block, "type", None) == "server_tool_use"
                         and getattr(block, "name", "") == WEB_SEARCH):
+                    total_usage.web_searches += 1
                     tool_calls.append({
                         "name": WEB_SEARCH,
                         "input": getattr(block, "input", None) or {},
@@ -142,6 +143,7 @@ def run_agent(
             btype = getattr(block, "type", None)
             if btype == "server_tool_use" and getattr(block, "name", "") == WEB_SEARCH:
                 called.append(WEB_SEARCH)
+                total_usage.web_searches += 1
                 tool_calls.append({
                     "name": WEB_SEARCH,
                     "input": getattr(block, "input", None) or {},

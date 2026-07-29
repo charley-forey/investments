@@ -127,6 +127,7 @@ def run_backtest(
     starting_capital: float = 10_000.0,
     stop_pct: float | None = None,
     target_r: float | None = None,
+    trail_pct: float | None = None,
     allow_shorts: bool = False,
 ) -> BacktestResult:
     """Bar-replay backtest. Enter on a 0->±1 signal transition (fill at close),
@@ -137,7 +138,13 @@ def run_backtest(
     intrabar against the bar's high/low, stop first — a bar that spans both is
     scored as a loss, because tick order is unknowable and the optimistic reading
     is how backtests lie. Without `stop_pct` the behaviour is the original
-    long-flat close-to-close replay."""
+    long-flat close-to-close replay.
+
+    `trail_pct` gives back that fraction of the peak favorable price since entry.
+    Set `target_r=None` with it to test letting winners run. The trail is measured
+    against the peak as of the PREVIOUS bar, never this bar's own high — using a
+    high that may have printed after the exit is the same lie as the optimistic
+    stop/target ordering above."""
     trades: list[Trade] = []
     curve: list[float] = []
     realized = 0.0
@@ -146,6 +153,7 @@ def run_backtest(
     entry_price = 0.0
     stop_price: float | None = None
     target_price: float | None = None
+    peak: float | None = None      # best favorable price since entry (trailing stop)
     prev = 0
 
     def _cost(a: float, b: float) -> float:
@@ -180,12 +188,28 @@ def run_backtest(
             hit_tgt = (target_price is not None
                        and (bar.high >= target_price if direction > 0
                             else bar.low <= target_price))
+            trail_price = None
+            if trail_pct and trail_pct > 0 and peak is not None:
+                trail_price = (peak * (1 - trail_pct) if direction > 0
+                               else peak * (1 + trail_pct))
+            hit_trail = trail_price is not None and (
+                bar.low <= trail_price if direction > 0 else bar.high >= trail_price)
             if hit_stop:
                 realized += _close(i, stop_price, "stop")
+                direction = 0
+            elif hit_trail:
+                realized += _close(i, trail_price, "trail")
                 direction = 0
             elif hit_tgt:
                 realized += _close(i, target_price, "target")
                 direction = 0
+
+        # Peak updates only after this bar's exits are resolved, so a trail can
+        # never be measured against a high the position never got to see.
+        if direction != 0:
+            peak = (max(peak, bar.high) if peak is not None else bar.high) \
+                if direction > 0 else \
+                (min(peak, bar.low) if peak is not None else bar.low)
 
         sig = signal(bars, i)
         if not allow_shorts and sig < 0:
@@ -194,6 +218,7 @@ def run_backtest(
             direction = 1 if sig > 0 else -1
             entry_idx = i
             entry_price = bar.close
+            peak = bar.close
             stop_price, target_price = _brackets(entry_price, direction)
         elif direction != 0 and sig != direction:
             # Back to flat, or an outright reversal.
@@ -203,6 +228,7 @@ def run_backtest(
                 direction = 1 if sig > 0 else -1
                 entry_idx = i
                 entry_price = bar.close
+                peak = bar.close
                 stop_price, target_price = _brackets(entry_price, direction)
 
         prev = sig

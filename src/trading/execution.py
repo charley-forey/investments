@@ -1,10 +1,9 @@
-"""Execution-quality helpers: smart limit placement, order slicing, and realized
-slippage. Pure functions the pipeline and analytics use to stop leaking edge at
-the point of execution."""
+"""Execution-quality helpers: smart limit placement and realized slippage. Pure
+functions the pipeline and analytics use to stop leaking edge at the point of
+execution."""
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 
@@ -29,36 +28,6 @@ def realized_slippage_bps(reference: float, fill: float, side: str) -> float:
     if side == "buy":
         return (fill - reference) / reference * 10_000
     return (reference - fill) / reference * 10_000
-
-
-@dataclass
-class SlicePlan:
-    slices: list[float]
-
-    @property
-    def n(self) -> int:
-        return len(self.slices)
-
-    @property
-    def total(self) -> float:
-        return sum(self.slices)
-
-
-def plan_slices(total_qty: float, avg_daily_volume: float, *,
-                max_participation: float = 0.1, max_slices: int = 10) -> SlicePlan:
-    """Split an order so no single child exceeds `max_participation` of average
-    daily volume (TWAP-style equal slices). Small orders stay a single slice; the
-    number of slices is capped so we don't over-fragment."""
-    if total_qty <= 0:
-        return SlicePlan([])
-    per_slice_cap = avg_daily_volume * max_participation if avg_daily_volume > 0 else total_qty
-    if per_slice_cap <= 0 or total_qty <= per_slice_cap:
-        return SlicePlan([total_qty])
-    n = min(max_slices, math.ceil(total_qty / per_slice_cap))
-    base = total_qty / n
-    slices = [round(base, 4)] * (n - 1)
-    slices.append(round(total_qty - sum(slices), 4))  # remainder on the last slice
-    return SlicePlan(slices)
 
 
 @dataclass
