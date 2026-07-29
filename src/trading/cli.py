@@ -378,8 +378,59 @@ def cmd_stats(_args) -> int:
     return 0
 
 
+def cmd_stage(args) -> int:
+    """Read/set a strategy's lifecycle stage.
+
+    There was no way to set a stage outside the test suite, which is part of why
+    zero `stage:*` rows existed after nine days of trading."""
+    from .analytics.lifecycle import STAGE_SIZING, STAGES, get_stage, set_stage
+    from .strategies import STRATEGIES
+
+    journal = _journal()
+    if args.action == "list":
+        tags = sorted(set(STRATEGIES) | set(journal.distinct_strategy_tags()))
+        for tag in tags:
+            recorded = journal.get_state(f"stage:{tag}")
+            stage = get_stage(journal, tag)
+            print(f"  {tag}: {stage} ({STAGE_SIZING.get(stage, 0.0):.0%} size)"
+                  + ("" if recorded else "  [default]"))
+        return 0
+    if not args.tag or not args.stage:
+        print("usage: trading stage set <tag> <stage>")
+        return 2
+    if args.stage not in STAGES:
+        print(f"unknown stage '{args.stage}'; choose from {', '.join(STAGES)}")
+        return 2
+    old = get_stage(journal, args.tag)
+    set_stage(journal, args.tag, args.stage)
+    print(f"{args.tag}: {old} -> {args.stage} "
+          f"({STAGE_SIZING.get(args.stage, 0.0):.0%} of normal size)")
+    return 0
+
+
+def cmd_sweep(args) -> int:
+    """Run the nightly walk-forward sweep on demand."""
+    from .analytics.sweep import run_sweep
+
+    config = get_config()
+    journal = _journal()
+    report = run_sweep(config, journal, promote=not args.dry_run)
+    for res in sorted(report.results, key=lambda r: -r.mean_r):
+        print("  " + res.summary())
+    if report.promoted:
+        print(f"\npromoted to paper: {', '.join(report.promoted)}")
+    elif args.dry_run:
+        print("\n(dry run — no stage changes)")
+    return 0
+
+
 def _load_bars_for(symbol, days):
-    """Prefer the persisted bar store; fall back to a live broker fetch."""
+    """Prefer the persisted bar store; fall back to a live broker fetch.
+
+    `days` was accepted and then ignored for the stored path, which returned the
+    entire history. Harmless while the store held 3 symbols, silently wrong the
+    moment it holds ten years: every `--days` sweep would quietly test a different
+    window than it reported."""
     from backtest.engine import Bar
     from trading.data.bars import BarStore
 
@@ -387,6 +438,8 @@ def _load_bars_for(symbol, days):
     store = BarStore(config.settings.paths.bars_db)
     rows = store.load_bars(symbol)
     if rows:
+        if days and days > 0:
+            rows = rows[-int(days):]
         return [Bar(date=b.date, open=b.open, high=b.high, low=b.low,
                     close=b.close, volume=b.volume) for b in rows]
     from backtest.engine import bars_from_alpaca_df
@@ -401,7 +454,12 @@ def cmd_ingest(args) -> int:
     config = get_config()
     store = BarStore(config.settings.paths.bars_db)
     broker = _broker()
-    symbols = args.symbols or config.settings.universe.core
+    symbols = args.symbols
+    if not symbols and getattr(args, "screen", False):
+        from trading.scanner.universe import load_screen_universe
+
+        symbols = load_screen_universe().symbols
+    symbols = symbols or config.settings.universe.core
     total = 0
     for sym in symbols:
         n = ingest_symbol(store, broker, sym, days=args.days)
@@ -411,12 +469,17 @@ def cmd_ingest(args) -> int:
     return 0
 
 
-SIGNALS = {
-    "sma": "sma_crossover",
-    "breakout": "breakout",
-    "trend-pullback-long": "trend_pullback_long",
-    "momentum-continuation": "momentum_continuation",
-}
+def _signals() -> dict[str, str]:
+    """Backtestable tags -> signal function name, from the one registry.
+
+    Was a second, independently maintained dict here; it shared no entries with the
+    playbook directory, so nothing the agent could trade could be backtested."""
+    from trading.strategies import STRATEGIES
+
+    return {t: s.signal for t, s in sorted(STRATEGIES.items()) if s.signal}
+
+
+SIGNALS = _signals()
 
 
 def cmd_backtest(args) -> int:
@@ -785,7 +848,20 @@ def main(argv: list[str] | None = None) -> int:
     ing = sub.add_parser("ingest", help="fetch and persist bar history")
     ing.add_argument("symbols", nargs="*", help="symbols (default: configured universe)")
     ing.add_argument("--days", type=int, default=365)
+    ing.add_argument("--screen", action="store_true",
+                     help="ingest the full screen-universe pool instead of core")
     ing.set_defaults(fn=cmd_ingest)
+
+    st = sub.add_parser("stage", help="read or set a strategy's lifecycle stage")
+    st.add_argument("action", choices=["list", "set"])
+    st.add_argument("tag", nargs="?")
+    st.add_argument("stage", nargs="?")
+    st.set_defaults(fn=cmd_stage)
+
+    sw = sub.add_parser("sweep", help="walk-forward every registered strategy")
+    sw.add_argument("--dry-run", action="store_true",
+                    help="report only; do not promote any strategy")
+    sw.set_defaults(fn=cmd_sweep)
 
     tx = sub.add_parser("tax", help="tax accounting: wash sales, realized gains, harvesting")
     tx.add_argument("action", choices=["wash", "report", "export", "harvest"])

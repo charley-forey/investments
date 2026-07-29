@@ -68,20 +68,42 @@ def _bars_shim(df):
     })() for _, r in df.iterrows()]
 
 
-def suggest_template(day_pct: float, gap_pct: float, rvol: float,
-                     news_spike: float, range_break: float) -> str:
-    """Map dominant signals to a playbook-ish pattern name."""
-    if news_spike >= 0.6 and abs(day_pct) >= 0.02:
-        return "news-impulse"
-    if gap_pct >= 0.015 and rvol >= 1.5:
-        return "gap-and-go"
+def suggest_template(day_pct: float, rvol: float, range_break: float,
+                     sma_gap: float, dist20: float, dist_from_high: float) -> str | None:
+    """Map dominant signals to a strategy tag from the registry, or None.
+
+    Every branch here must name a tag that exists in `trading.strategies` and has a
+    backtest signal behind it, because this function IS the funnel: the templates it
+    emits are injected into the strategy prompt as "prefer these strategy_tags"
+    (orchestrator) and become the `template` column the grading ledger slices by.
+
+    Four branches were deleted rather than fixed:
+
+    * `news-impulse` — tested `news_spike >= 0.6` where `news_spike` is
+      `_clamp(news_count_24h / 5.0)`, i.e. **3+ headlines in 24h** plus a 2% move. A
+      headline *count*, no sentiment, no direction: every megacap on any active day.
+      It labelled 127 of 208 graded candidates and its proposals graded -$553. There
+      is no historical headline store, so it could never be backtested either.
+    * `relative-strength-long/short` — was just the `day_pct >= 0` fallthrough, the
+      default bucket rather than a signal, despite the name promising a comparison
+      against SPY. Graded -$901 / -$169.
+    * `gap-and-go` — no backtestable signal and no path to one.
+    * `vwap-mean-reversion` — tested `day_pct <= -0.02 and rvol >= 1.3` and touched
+      no VWAP at all.
+
+    Returning None is deliberate and safe: a candidate still scores and still
+    surfaces, it just carries no strategy suggestion. Every consumer already guards
+    for it (`movers` prints "?", the grading queries filter `template IS NOT NULL`).
+    """
+    # Uptrend, pulled back to the moving average, still near the highs. Mirrors
+    # backtest.strategies.trend_pullback_long, the one signal with validated edge.
+    if sma_gap > 0 and -0.02 <= dist20 <= 0.02 and dist_from_high >= -0.10:
+        return "trend-pullback-long"
     if range_break >= 0.6 and rvol >= 1.2:
-        return "orb-breakout"
-    if day_pct <= -0.02 and rvol >= 1.3:
-        return "vwap-mean-reversion"
+        return "extended-from-sma"
     if abs(day_pct) >= 0.025 and rvol >= 1.5:
         return "momentum-continuation"
-    return "relative-strength-long" if day_pct >= 0 else "relative-strength-short"
+    return None
 
 
 def score_opportunity(
@@ -95,6 +117,11 @@ def score_opportunity(
     momentum: float,
     spread_bps: float | None,
     dist20: float = 0.0,
+    # Trend shape, for the trend-pullback-long branch of suggest_template. Default
+    # to values that cannot match it, so a caller that omits them gets no tag rather
+    # than a wrong one.
+    sma_gap: float = 0.0,
+    dist_from_high: float = -1.0,
     spy_day_pct: float = 0.0,
     news_count_24h: int = 0,
     days_to_event: int | None = None,
@@ -159,7 +186,8 @@ def score_opportunity(
         news_spike=round(news_s, 3), calendar=round(cal_signed, 3),
         social=round(social_s, 3), liquidity_ok=True,
     )
-    template = suggest_template(day_pct, gap_pct, rvol, news_s, range_s)
+    template = suggest_template(day_pct, rvol, range_s,
+                                sma_gap, dist20, dist_from_high)
 
     # Soft trigger: near last for continuation, or above/below based on direction.
     if day_pct >= 0:
@@ -221,7 +249,8 @@ def scan_symbol(broker, symbol: str, *, spy_day_pct: float = 0.0,
     return score_opportunity(
         symbol=symbol, last=last, day_pct=day_pct, gap_pct=gap_pct, rvol=rvol,
         atr_pct=feats.atr_pct, momentum=feats.momentum_20, spread_bps=spread_bps,
-        dist20=dist20, spy_day_pct=spy_day_pct, news_count_24h=news_count_24h,
+        dist20=dist20, sma_gap=feats.sma_gap, dist_from_high=feats.dist_from_high,
+        spy_day_pct=spy_day_pct, news_count_24h=news_count_24h,
         days_to_event=days_to_event, social_mentions=social_mentions,
         min_price=min_price, min_adv=min_adv, adv=adv,
         max_spread_bps=max_spread_bps, weights=weights,

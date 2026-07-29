@@ -236,7 +236,7 @@ class TestBacktestGate:
         config = make_config()
         journal = Journal(tmp_path / "j.db")
         lifecycle.set_stage(journal, "t", "candidate")
-        change = lifecycle.promote_after_backtest(journal, "t", expectancy=5.0)
+        change = lifecycle.promote_after_backtest(journal, "t", expectancy_r=0.5)
         assert change and change.new_stage == "paper"
         pipeline = OrderPipeline(config, journal, StubBroker(make_account()))
         res = pipeline.process(stock(), make_account(), make_quote(), market_is_open=True)
@@ -245,7 +245,7 @@ class TestBacktestGate:
     def test_negative_backtest_no_promotion(self, tmp_path):
         journal = Journal(tmp_path / "j.db")
         lifecycle.set_stage(journal, "t", "candidate")
-        assert lifecycle.promote_after_backtest(journal, "t", expectancy=-1.0) is None
+        assert lifecycle.promote_after_backtest(journal, "t", expectancy_r=-0.2) is None
         assert lifecycle.get_stage(journal, "t") == "candidate"
 
 
