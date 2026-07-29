@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import pytest
 
 from trading.broker.models import AccountState, PositionView, Quote
@@ -8,6 +10,49 @@ from trading.config import (
 )
 from trading.data.journal import Journal
 from trading.guardrails.engine import OrderPipeline
+
+
+# Per-test data directory, set by the autouse fixture below.
+#
+# Paths() defaults are RELATIVE ("data/journal.db"), and production resolves them
+# against the project root in load_config. Tests build Config directly, so the
+# defaults stayed relative and `.resolve()` turned them into the developer's real
+# data/ via the cwd. Anything deriving a sidecar file from the journal's directory --
+# scanner.movers.candidates_path, triggers.triggers_path -- then read live files:
+# test_snapshot_universe_standalone saw 2 core symbols + the 8 real scanner
+# candidates and asserted 10 == 2. The tests were fine; the fixture was lying to them.
+_DATA_ROOT: Path | None = None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_data_dir(tmp_path):
+    """Point every make_config() at a private data dir. Autouse so no test can opt
+    out by forgetting -- forgetting is exactly how this got in."""
+    global _DATA_ROOT
+    _DATA_ROOT = tmp_path / "data"
+    _DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        yield _DATA_ROOT
+    finally:
+        _DATA_ROOT = None
+
+
+def _test_paths() -> Paths:
+    """Data under the per-test directory; playbooks from the real repo, since they
+    are version-controlled inputs the agent legitimately reads."""
+    root = _DATA_ROOT or Path("data")
+    repo = Path(__file__).resolve().parents[1]
+    return Paths(
+        journal_db=str(root / "journal.db"),
+        bars_dir=str(root / "bars"),
+        bars_db=str(root / "bars.db"),
+        intel_db=str(root / "intel.db"),
+        vectors_db=str(root / "vectors.db"),
+        fundamentals_db=str(root / "fundamentals.db"),
+        memory_dir=str(root / "memory"),
+        playbooks_dir=str(repo / "playbooks"),
+        calendar_file=str(root / "calendar.json"),
+    )
 
 
 def make_config(**limit_overrides) -> Config:
@@ -42,7 +87,7 @@ def make_config(**limit_overrides) -> Config:
         universe=Universe(core=["SPY", "AAPL"]),
         schedule=Schedule(),
         tax=TaxRates(federal_short_term_rate=0.24, federal_long_term_rate=0.15, state_rate=0.05),
-        paths=Paths(),
+        paths=_test_paths(),
         agents=AgentSettings(),
     )
     return Config(limits=limits, settings=settings, secrets=Secrets())
