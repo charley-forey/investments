@@ -58,7 +58,7 @@ def test_propose_registers_draft_without_executing(tmp_path):
     out = reg.dispatch("propose_order", {
         "symbol": "AAPL", "asset_class": "stock", "side": "buy", "qty": 10,
         "limit_price": 180.0, "stop_price": 175.0, "thesis": "test",
-        "expected_edge_usd": 50.0, "strategy_tag": "test-tag",
+        "expected_edge_usd": 50.0, "strategy_tag": "breakout",
     })
     assert "draft #1" in out
     assert len(ctx.drafts) == 1
@@ -72,7 +72,7 @@ def test_propose_validates_opening_stock_needs_stop(tmp_path):
     out = reg.dispatch("propose_order", {
         "symbol": "AAPL", "asset_class": "stock", "side": "buy", "qty": 10,
         "limit_price": 180.0, "thesis": "no stop", "expected_edge_usd": 50.0,
-        "strategy_tag": "t",
+        "strategy_tag": "breakout",
     })
     assert out.startswith("error:")
     assert ctx.drafts == []
@@ -84,7 +84,7 @@ def test_propose_respects_budget(tmp_path):
     reg = ToolRegistry(ctx, STRATEGY_TOOLS)
     args = {"symbol": "AAPL", "asset_class": "stock", "side": "buy", "qty": 5,
             "limit_price": 180.0, "stop_price": 175.0, "thesis": "t",
-            "expected_edge_usd": 50.0, "strategy_tag": "t"}
+            "expected_edge_usd": 50.0, "strategy_tag": "breakout"}
     assert "draft #1" in reg.dispatch("propose_order", dict(args))
     assert reg.dispatch("propose_order", dict(args)).startswith("error:")
     assert len(ctx.drafts) == 1
@@ -96,7 +96,7 @@ def test_propose_rejects_oversized_with_max_qty(tmp_path):
     out = reg.dispatch("propose_order", {
         "symbol": "META", "asset_class": "stock", "side": "buy", "qty": 40,
         "limit_price": 650.0, "stop_price": 630.0, "thesis": "oversized",
-        "expected_edge_usd": 200.0, "strategy_tag": "rel-strength",
+        "expected_edge_usd": 200.0, "strategy_tag": "breakout",
     })
     assert out.startswith("error:")
     assert "max qty" in out
@@ -111,7 +111,7 @@ def test_propose_rejects_excessive_risk(tmp_path):
     out = reg.dispatch("propose_order", {
         "symbol": "AAPL", "asset_class": "stock", "side": "buy", "qty": 20,
         "limit_price": 180.0, "stop_price": 150.0, "thesis": "wide stop",
-        "expected_edge_usd": 100.0, "strategy_tag": "t",
+        "expected_edge_usd": 100.0, "strategy_tag": "breakout",
     })
     assert out.startswith("error:")
     assert "risk" in out.lower()

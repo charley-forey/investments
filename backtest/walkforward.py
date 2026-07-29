@@ -41,12 +41,21 @@ class WalkForwardResult:
     def passed(self, *, min_mean_expectancy: float = 0.0,
                min_positive_fraction: float = 0.6) -> bool:
         """Pass when out-of-sample expectancy is positive on average AND positive in
-        a majority of folds that actually traded — robustness, not a lucky fit."""
+        a majority of folds that actually traded — robustness, not a lucky fit.
+
+        Gates on R, not dollars. Dollar expectancy is per-share P&L at qty=1, so
+        across a universe priced $20 to $900 it ranks by share price rather than by
+        edge: a mediocre signal on expensive stocks beats a good one on cheap stocks
+        every time. R normalises by the risk actually taken, which is also the unit
+        `min_reward_risk` is set in. Falls back to dollars only when no fold produced
+        an R (no stop configured), where the two are at least monotonic per symbol."""
         if self.evaluated_folds == 0:
             return False
         frac = self.positive_folds / self.evaluated_folds
-        return (self.mean_expectancy > min_mean_expectancy
-                and frac >= min_positive_fraction)
+        metric = self.mean_expectancy_r
+        if metric is None:
+            metric = self.mean_expectancy
+        return metric > min_mean_expectancy and frac >= min_positive_fraction
 
     @property
     def mean_expectancy_r(self) -> float | None:
@@ -93,10 +102,13 @@ def gate_strategy(journal, tag: str, wf: WalkForwardResult) -> str:
     from trading.analytics import lifecycle
 
     stage = lifecycle.get_stage(journal, tag)
-    if stage not in ("candidate", "backtest"):
+    if stage not in lifecycle.PROMOTABLE_BY_BACKTEST:
         return f"{tag}: stage '{stage}' — walk-forward gate not applicable"
     if wf.passed():
-        change = lifecycle.promote_after_backtest(journal, tag, wf.mean_expectancy)
+        metric = wf.mean_expectancy_r
+        if metric is None:
+            metric = wf.mean_expectancy
+        change = lifecycle.promote_after_backtest(journal, tag, metric)
         if change:
             return f"{tag}: PASSED walk-forward -> promoted to {change.new_stage}"
     return f"{tag}: did not pass walk-forward ({wf.summary()}) — stays {stage}"

@@ -41,7 +41,7 @@ def test_loop_captures_draft_from_propose(tmp_path):
         _Response([tool_use_block("t1", "propose_order", {
             "symbol": "AAPL", "asset_class": "stock", "side": "buy", "qty": 10,
             "limit_price": 180.0, "stop_price": 175.0, "thesis": "breakout",
-            "expected_edge_usd": 60.0, "strategy_tag": "news-breakout",
+            "expected_edge_usd": 60.0, "strategy_tag": "breakout",
         })], "tool_use"),
         _Response([text_block("proposed AAPL")], "end_turn"),
     ]
@@ -52,7 +52,7 @@ def test_loop_captures_draft_from_propose(tmp_path):
     )
     assert len(result.drafts) == 1
     assert result.drafts[0].symbol == "AAPL"
-    assert result.drafts[0].strategy_tag == "news-breakout"
+    assert result.drafts[0].strategy_tag == "breakout"
 
 
 def test_loop_respects_iteration_cap(tmp_path):

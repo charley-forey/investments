@@ -128,7 +128,7 @@ def _check_sizing_precheck(config: Config, result: PaperProofResult) -> None:
         out = reg.dispatch("propose_order", {
             "symbol": "META", "asset_class": "stock", "side": "buy", "qty": 40,
             "limit_price": 650.0, "stop_price": 630.0, "thesis": "size check",
-            "expected_edge_usd": 200.0, "strategy_tag": "paper-proof",
+            "expected_edge_usd": 200.0, "strategy_tag": "breakout",
         })
         ok = out.startswith("error:") and "max qty" in out
         result.add("sizing-precheck", ok,

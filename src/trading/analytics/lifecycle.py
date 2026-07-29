@@ -15,12 +15,13 @@ from ..config import Config
 from ..data.journal import Journal
 from .stats import StrategyStats, stats_by_tag
 
-STAGES = ["candidate", "backtest", "paper", "small-live", "scaled"]
+STAGES = ["candidate", "backtest", "unproven", "paper", "small-live", "scaled"]
 
 # Fraction of the normal position cap a strategy at each stage may use.
 STAGE_SIZING = {
     "candidate": 0.0,      # not tradeable yet
     "backtest": 0.0,
+    "unproven": 0.25,      # tradeable, but nothing has validated it -- see get_stage
     "paper": 1.0,          # paper mode: full paper sizing
     "small-live": 0.25,    # live but throttled
     "scaled": 1.0,
@@ -36,7 +37,19 @@ class StageChange:
 
 
 def get_stage(journal: Journal, tag: str) -> str:
-    return journal.get_state(f"stage:{tag}", "paper")  # default new tags to paper
+    """Default `unproven`, NOT `paper`.
+
+    This defaulted to `paper` (sizing 1.0), so every tag the agent invented traded at
+    full size on first sight while `guardrails/engine.py` rejected others with "needs
+    a passing backtest to reach paper" -- describing a gate that had never run for
+    anything. There were zero `stage:*` rows in kv_state after nine days.
+
+    `candidate` (0.0) would be the pure answer but it halts all trading: nothing can
+    reach `paper` except the nightly sweep, which needs live tags to have traded.
+    `unproven` at 0.25 keeps the system running while making "validated by backtest"
+    worth 4x in position size, which is the incentive we actually want.
+    """
+    return journal.get_state(f"stage:{tag}", "unproven")
 
 
 def set_stage(journal: Journal, tag: str, stage: str) -> None:
@@ -47,16 +60,29 @@ def sizing_fraction(journal: Journal, tag: str) -> float:
     return STAGE_SIZING.get(get_stage(journal, tag), 0.0)
 
 
+PROMOTABLE_BY_BACKTEST = ("candidate", "backtest", "unproven")
+
+
 def promote_after_backtest(
-    journal: Journal, tag: str, expectancy: float, *, min_expectancy: float = 0.0
+    journal: Journal, tag: str, expectancy_r: float, *, min_expectancy: float = 0.0
 ) -> StageChange | None:
-    """A candidate/backtest strategy that clears the backtest expectancy bar is
-    promoted to `paper` (where it may trade paper capital). No-op otherwise."""
+    """A candidate/backtest/unproven strategy that clears the walk-forward bar is
+    promoted to `paper` (full paper sizing). No-op otherwise.
+
+    `expectancy_r` is in R (risk multiples), not dollars. It used to be dollars,
+    which is meaningless across a universe priced $20 to $900 at qty=1 — the gate
+    would have promoted whichever signal happened to trade expensive stocks.
+
+    This is the ceiling on automatic promotion: it can never reach `small-live` or
+    `scaled`, so the sweep cannot widen its own mandate into real money. Those
+    transitions stay with `evaluate_tag` (real closed trades) and the
+    `live.approval_required` gate.
+    """
     stage = get_stage(journal, tag)
-    if stage in ("candidate", "backtest") and expectancy > min_expectancy:
+    if stage in PROMOTABLE_BY_BACKTEST and expectancy_r > min_expectancy:
         set_stage(journal, tag, "paper")
         change = StageChange(tag, stage, "paper",
-                             f"backtest expectancy ${expectancy:+.2f} > ${min_expectancy:.2f}")
+                             f"walk-forward {expectancy_r:+.3f}R > {min_expectancy:.3f}R")
         journal.heartbeat("lifecycle", detail=f"{tag}: {stage}->paper (backtest)")
         return change
     return None

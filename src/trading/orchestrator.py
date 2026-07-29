@@ -195,6 +195,18 @@ class Orchestrator:
         stages = lifecycle.stages_summary(self.journal)
         perf = portfolio_summary(self.journal, self.config.settings.tax)
         extra = f"Strategy stages: {stages}\n{perf}"
+        # What ten years of replay says about each strategy. The live ledger is two
+        # closed positions deep; this is the only statistically meaningful evidence
+        # the agent has, so it goes in beside the live numbers rather than behind a
+        # tool call it has no reason to make.
+        try:
+            from .analytics.sweep import sweep_context
+
+            sw = sweep_context(self.journal)
+            if sw:
+                extra += f"\n{sw}"
+        except Exception:
+            pass
         try:
             from .analytics.candidate_grading import regime_context
             rc = regime_context(self.journal, regime_trend, regime_vol)

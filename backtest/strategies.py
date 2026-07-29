@@ -42,6 +42,28 @@ def trend_pullback_long(fast: int = 20, slow: int = 50):
     return signal
 
 
+def extended_from_sma(lookback: int = 20, threshold: float = 0.036):
+    """Long while price is stretched above its `lookback` SMA, flat when it reverts.
+
+    This is what the scanner branch formerly called "orb-breakout" actually computed
+    — `range_break` is distance from the 20d SMA scaled by relative volume, on daily
+    bars, with no opening range anywhere in it. Encoded here so the name finally has
+    a signal behind it and the sweep can say whether it is worth trading at all.
+
+    The 3.6% default is where the old scanner branch tripped: `range_break >= 0.6`
+    with rvol >= 2 needs `abs(dist20) - 0.01 >= 0.03`."""
+
+    def signal(bars: list[Bar], i: int) -> int:
+        if i < lookback:
+            return 0
+        sma = _sma(bars, i, lookback)
+        if sma <= 0:
+            return 0
+        return 1 if (bars[i].close - sma) / sma >= threshold else 0
+
+    return signal
+
+
 def momentum_continuation(lookback: int = 20, threshold: float = 0.05):
     """Long strong momentum, short weak. Two-sided, so it exercises the short path."""
 

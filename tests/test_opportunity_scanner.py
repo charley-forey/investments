@@ -44,10 +44,39 @@ def test_score_opportunity_ranks_hot_name():
     assert opp.trigger_level > 0
 
 
-def test_suggest_template():
-    assert suggest_template(0.03, 0.02, 2.0, 0.8, 0.2) == "news-impulse"
-    assert suggest_template(0.02, 0.02, 2.0, 0.1, 0.2) == "gap-and-go"
-    assert suggest_template(0.01, 0.0, 1.5, 0.1, 0.8) == "orb-breakout"
+def test_suggest_template_emits_only_registered_tags():
+    """Every tag the scanner can emit must be backtestable, because this function is
+    the funnel: its output is injected into the strategy prompt as a suggestion and
+    becomes the `template` column the grading ledger slices by."""
+    from trading.strategies import STRATEGIES
+
+    for tag in ("trend-pullback-long", "extended-from-sma", "momentum-continuation"):
+        assert tag in STRATEGIES and STRATEGIES[tag].backtestable
+
+
+def test_suggest_template_trend_pullback():
+    # uptrend (sma_gap>0), sitting on the 20d SMA, near the highs
+    assert suggest_template(0.005, 1.0, 0.0, 0.03, 0.0, -0.02) == "trend-pullback-long"
+
+
+def test_suggest_template_extended_and_momentum():
+    # extended from the SMA on volume, but NOT a pullback (dist20 far from zero)
+    assert suggest_template(0.01, 1.5, 0.8, -0.01, 0.09, -0.01) == "extended-from-sma"
+    # big move on volume, no trend/extension qualification
+    assert suggest_template(0.03, 2.0, 0.0, -0.01, 0.09, -0.30) == "momentum-continuation"
+
+
+def test_deleted_templates_are_gone():
+    """news-impulse tested `news_count_24h/5 >= 0.6` -- 3+ headlines and a 2% move,
+    i.e. every megacap on an active day. It labelled 127 of 208 graded candidates and
+    graded -$553. relative-strength-* was the `day_pct >= 0` fallthrough, not a
+    signal, and graded -$901/-$169. None could ever be backtested."""
+    dead = {"news-impulse", "gap-and-go", "relative-strength-long",
+            "relative-strength-short", "vwap-mean-reversion", "orb-breakout"}
+    # A formerly-news-impulse setup: strong move, high volume, headlines everywhere.
+    assert suggest_template(0.03, 2.0, 0.0, -0.01, 0.09, -0.30) not in dead
+    # A setup matching nothing now returns None rather than a default bucket.
+    assert suggest_template(0.001, 0.5, 0.0, -0.05, 0.09, -0.40) is None
 
 
 def test_movers_scan_writes_candidates(tmp_path):

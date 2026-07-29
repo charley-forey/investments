@@ -33,6 +33,13 @@ class ToolContext:
     drafts: list[OrderProposal] = field(default_factory=list)
 
 
+def _proposable_tags() -> list[str]:
+    # Module-level import would be circular (strategies -> backtest -> trading).
+    from ..strategies import proposable_tags
+
+    return proposable_tags()
+
+
 LEG_SCHEMA = {
     "type": "object",
     "properties": {
@@ -227,7 +234,14 @@ TOOL_SCHEMAS: dict[str, dict] = {
                 "legs": {"type": "array", "items": LEG_SCHEMA},
                 "thesis": {"type": "string"},
                 "expected_edge_usd": {"type": "number"},
-                "strategy_tag": {"type": "string"},
+                "strategy_tag": {
+                    "type": "string",
+                    "enum": _proposable_tags(),
+                    "description": "Which registered strategy this is. Each has a "
+                                   "playbook and a backtest behind it; read_playbook "
+                                   "describes them. Options use propose_vertical, "
+                                   "which sets its own tag.",
+                },
                 "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 "reduces_position": {"type": "boolean"},
                 "arm_level": {
@@ -700,6 +714,16 @@ class ToolRegistry:
         max_props = self.ctx.config.settings.agents.proposals_cap(self.ctx.cycle)
         if len(self.ctx.drafts) >= max_props:
             return f"error: proposal budget for this cycle ({max_props}) already used"
+        # A schema enum is a hint, not a gate -- the model can and did emit tags
+        # outside it, and an unregistered tag becomes a permanent ledger key that no
+        # backtest, playbook or stage can ever be looked up against. Same
+        # self-correcting error-string pattern as _sizing_precheck below.
+        from ..strategies import validate_tag
+
+        bad_tag = validate_tag(inp.get("strategy_tag", ""),
+                               inp.get("asset_class", "stock"))
+        if bad_tag:
+            return f"error: {bad_tag}"
         legs = [OptionLeg(**leg) for leg in inp.get("legs", [])]
         proposal = OrderProposal(
             agent=self.ctx.agent_name,

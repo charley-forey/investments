@@ -202,6 +202,74 @@ def run_autocalibrate_safe() -> None:
         journal.close()
 
 
+def run_backtest_sweep_safe() -> None:
+    """Replay every registered strategy over the stored bars and gate on the result.
+
+    Deliberately after grading (17:15) and autocalibrate (17:25): those consume the
+    day's live evidence, this consumes ten years of it."""
+    from .analytics.sweep import run_sweep
+
+    config = get_config()
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        report = run_sweep(config, journal)
+        _write_sweep_memory(config, report)
+        log.info("backtest sweep: %d strategies, %d promoted",
+                 len(report.results), len(report.promoted))
+    except Exception:
+        log.exception("backtest sweep failed")
+        journal.heartbeat("backtest_sweep", status="error", detail="run failed")
+    finally:
+        journal.close()
+
+
+def _write_sweep_memory(config, report) -> None:
+    """Into memory/ so the premarket agent reads it via read_memory."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    stamp = datetime.now(timezone.utc).isoformat(timespec="minutes")
+    body = [f"# backtest sweep — {stamp}", "", report.as_markdown(), ""]
+    if report.promoted:
+        body.append(f"Promoted to `paper` this run: {', '.join(report.promoted)}")
+    body.append("")
+    body.append("PASS = positive mean out-of-sample R across walk-forward folds and "
+                "positive on >=60% of symbols. A validated strategy trades at full "
+                "size; an unproven one at 25%.")
+    mem = Path(config.settings.paths.memory_dir)
+    mem.mkdir(parents=True, exist_ok=True)
+    (mem / "backtest_sweep.md").write_text("\n".join(body) + "\n", encoding="utf-8")
+
+
+def run_bar_ingest_safe() -> None:
+    """Keep the local bar history current so the sweep runs offline and free."""
+    from .broker.alpaca import AlpacaBroker
+    from .data.bars import BarStore, ingest_symbol
+    from .scanner.universe import load_screen_universe
+
+    config = get_config()
+    store = BarStore(config.settings.paths.bars_db)
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        broker = AlpacaBroker(config)
+        symbols = load_screen_universe().symbols or config.settings.universe.core
+        total = 0
+        for sym in symbols:
+            try:
+                total += ingest_symbol(store, broker, sym, days=3650)
+            except Exception:
+                log.warning("bar ingest failed for %s", sym)
+        log.info("bar ingest: %d bars over %d symbols", total, len(symbols))
+        journal.heartbeat("bar_ingest", status="ok",
+                          detail=f"{total} bars, {len(symbols)} symbols")
+    except Exception:
+        log.exception("bar ingest failed")
+        journal.heartbeat("bar_ingest", status="error", detail="run failed")
+    finally:
+        store.close()
+        journal.close()
+
+
 def run_calendar_safe() -> None:
     from .data.calendar_feed import refresh_calendar
     from .data.journal import Journal
@@ -282,6 +350,14 @@ def build_scheduler():
     scheduler.add_job(run_autocalibrate_safe,
                       CronTrigger(day_of_week="mon-fri", hour="17", minute="25"),
                       id="autocalibrate", max_instances=1)
+    # Refresh the local bar history, then replay every strategy against it. Ingest
+    # first so the sweep always sees today's close; both are free and offline-ish.
+    scheduler.add_job(run_bar_ingest_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="17", minute="30"),
+                      id="bar_ingest", max_instances=1)
+    scheduler.add_job(run_backtest_sweep_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="17", minute="35"),
+                      id="backtest_sweep", max_instances=1)
     # Continuous market-intelligence ingestion during extended market hours.
     scheduler.add_job(
         run_intel_safe,

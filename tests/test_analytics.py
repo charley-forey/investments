@@ -69,15 +69,18 @@ class TestStats:
 
 
 class TestLifecycle:
-    def test_default_stage_is_paper(self, tmp_path):
+    def test_default_stage_is_unproven_not_paper(self, tmp_path):
+        """An invented tag used to default straight to full paper size. Nothing has
+        validated it, so it gets quarter size until the sweep says otherwise."""
         journal = Journal(tmp_path / "j.db")
-        assert lifecycle.get_stage(journal, "new-tag") == "paper"
-        assert lifecycle.sizing_fraction(journal, "new-tag") == 1.0
+        assert lifecycle.get_stage(journal, "new-tag") == "unproven"
+        assert lifecycle.sizing_fraction(journal, "new-tag") == 0.25
 
     def test_promote_paper_to_live(self, tmp_path):
         journal = Journal(tmp_path / "j.db")
         config = make_config()
         # gates: 30 trades, expectancy > 0. Seed 30 small winners.
+        lifecycle.set_stage(journal, "t", "paper")   # default is 'unproven' now
         for i in range(30):
             seed_closed_trade(journal, "A", "t", 100.0, 101.0)
         score_closed_trades(journal)
@@ -89,6 +92,7 @@ class TestLifecycle:
     def test_no_promotion_below_trade_bar(self, tmp_path):
         journal = Journal(tmp_path / "j.db")
         config = make_config()
+        lifecycle.set_stage(journal, "t", "paper")   # default is 'unproven' now
         for i in range(5):  # far below the 30-trade gate
             seed_closed_trade(journal, "A", "t", 100.0, 101.0)
         score_closed_trades(journal)
