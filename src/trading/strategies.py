@@ -62,6 +62,12 @@ STRATEGIES: dict[str, Strategy] = {
     "trend-pullback-short": Strategy(
         "trend-pullback-short", "trend_pullback_short", "trend-pullback-short"),
     "breakdown": Strategy("breakdown", "breakdown", "breakdown"),
+    # Buys statistical stretch below the mean and waits for reversion. Targets the
+    # cells where every trend rule bleeds -- up/calm and sideways/calm, which
+    # together are most of the decade and currently have almost no positive
+    # strategy at all.
+    "mean-reversion": Strategy(
+        "mean-reversion", "mean_reversion", "mean-reversion"),
     # The only entry here that is not a trend bet. All the others are long-vol
     # directional rules that want the same tape, which is exactly why they share a
     # regime signature and all fail in the same cells. This one is short-vol and

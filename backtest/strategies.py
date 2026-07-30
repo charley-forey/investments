@@ -83,6 +83,44 @@ def momentum_continuation(lookback: int = 20, threshold: float = 0.05):
     return signal
 
 
+def _stdev(bars: list[Bar], i: int, n: int) -> float:
+    window = [b.close for b in bars[i - n + 1:i + 1]]
+    if len(window) < 2:
+        return 0.0
+    mean = sum(window) / len(window)
+    return (sum((x - mean) ** 2 for x in window) / (len(window) - 1)) ** 0.5
+
+
+def mean_reversion(lookback: int = 20, entry_z: float = -1.5, exit_z: float = 0.0):
+    """Buy statistical stretch BELOW the mean; flat once it reverts.
+
+    The registry's other rules are all long-vol trend bets, which is why they share
+    a regime signature and lose together in quiet tape: a 2% stop grazes on noise
+    and sells moves that never needed exiting. This is the opposite bet -- it wants
+    price to come BACK, so it should earn where they bleed (up/calm, sideways/calm),
+    which are the cells with no positive strategy at all.
+
+    Long-only by construction: shorting stretch in a market with upward drift is
+    fighting the drift, and the short tags already measure -0.53 in up/calm.
+    """
+
+    def signal(bars: list[Bar], i: int) -> int:
+        if i < lookback:
+            return 0
+        sma = _sma(bars, i, lookback)
+        sd = _stdev(bars, i, lookback)
+        if sd <= 0 or sma <= 0:
+            return 0
+        z = (bars[i].close - sma) / sd
+        if z <= entry_z:
+            return 1
+        if z >= exit_z:
+            return 0
+        return 1 if bars[i - 1].close < _sma(bars, i - 1, lookback) else 0
+
+    return signal
+
+
 def trend_pullback_short(fast: int = 20, slow: int = 50):
     """Mirror of `trend_pullback_long`: downtrend, rally into the fast SMA, fail.
 
