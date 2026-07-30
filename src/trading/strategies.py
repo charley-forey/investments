@@ -62,6 +62,17 @@ STRATEGIES: dict[str, Strategy] = {
     "trend-pullback-short": Strategy(
         "trend-pullback-short", "trend_pullback_short", "trend-pullback-short"),
     "breakdown": Strategy("breakdown", "breakdown", "breakdown"),
+    # The only entry here that is not a trend bet. All the others are long-vol
+    # directional rules that want the same tape, which is exactly why they share a
+    # regime signature and all fail in the same cells. This one is short-vol and
+    # mean-reverting: it sells rich premium and profits from price NOT moving.
+    #
+    # signal=None on purpose. There is no options price history to replay, so it
+    # cannot be backtested and can never pass the sweep gate. It therefore stays at
+    # `unproven` (0.25x) and earns its record from the live grading ledger instead
+    # -- which is the honest treatment, not a loophole: quarter size on an
+    # unvalidated idea is the same deal every other tag gets.
+    "vol-premium": Strategy("vol-premium", None, "vol-premium"),
     # Baseline for the sweep to measure the others against; not a licence to trade.
     "sma-crossover": Strategy(
         "sma-crossover", "sma_crossover", None, proposable=False),

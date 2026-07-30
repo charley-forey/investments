@@ -232,6 +232,18 @@ class Orchestrator:
                 extra += f"\n\n{rc}"
         except Exception:
             pass
+        # The non-trend read. Every other signal here is a long-vol directional bet,
+        # which is why they share a regime signature and fail together; this one is
+        # short-vol and mean-reverting. It was only reachable via get_options_chain,
+        # a tool the agent called zero times in 1,049 calls on 2026-07-29.
+        try:
+            from .scanner.vol_premium import scan_context
+
+            vp = scan_context(self.journal, regime_trend)
+            if vp:
+                extra += f"\n\n{vp}"
+        except Exception:
+            pass
         # The same question answered from ten years of replay rather than from the
         # live ledger's handful of single-regime rows. Both are shown: they measure
         # different things (shadow hit rate vs R against a passive hold) and

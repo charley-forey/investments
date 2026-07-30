@@ -459,12 +459,18 @@ class ToolRegistry:
         # Deterministic vol-premium read from IV rank + regime + event window.
         try:
             from ..data.calendar_provider import get_calendar_provider
-            from ..scanner.vol_premium import describe_suggestion, suggest_vol_structure
+            from ..scanner.vol_premium import (
+                describe_suggestion, latest_stretch, suggest_vol_structure,
+            )
             from .market_context import market_regime
             trend = market_regime(self.ctx.broker).trend
             events = get_calendar_provider(self.ctx.config).upcoming_events(
                 symbol, days=settings.options_chain_max_dte)
-            hint = describe_suggestion(suggest_vol_structure(rank, trend, bool(events)), symbol)
+            hint = describe_suggestion(
+                suggest_vol_structure(
+                    rank, trend, bool(events),
+                    stretch=latest_stretch(self.ctx.journal, symbol)),
+                symbol)
             if hint:
                 head += f"\n{hint}"
         except Exception:
