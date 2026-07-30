@@ -90,20 +90,6 @@ exits:
   trailing_pct: 8
   max_holding_days: null
   option_roll_dte: 7
-# Passive long core: the book's DEFAULT STATE, not a signal.
-# 40,212 backtested trades say no strategy beats an exposure-matched passive hold,
-# and the first 8 live days cost $63 of compute to realise $83 gross while flat.
-# Held deterministically (no LLM), regime-scaled, rebalanced only on a band.
-core_position:
-  enabled: true
-  symbol: SPY
-  # 40% at full weight. Regime scales it: up 1.0, sideways 0.6, down 0.25.
-  # At today's sideways/calm that is ~24% of equity.
-  target_pct: 40
-  # Drift, as % of equity, before a rebalance is worth its friction.
-  rebalance_band_pct: 5
-  # The core must never crowd out the overlay it exists to complement.
-  max_share_of_gross_pct: 50
 events:
   # Block a NEW STOCK entry within this many days of a binary event (FOMC/CPI/NFP/
   # PCE/GDP, or the name's own earnings). Exits and defined-risk verticals are never

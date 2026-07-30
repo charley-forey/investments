@@ -95,15 +95,8 @@ class GuardrailEngine:
         # CRM being opened the day before the 7/29 FOMC. Defined-risk verticals pass
         # — that is what prompts.py already tells the agent to reach for into a
         # binary — and reducing orders always pass, so this can never trap a position.
-        # The passive core is exempt for the same reason verticals are: it is not a
-        # directional bet on the print. It is also the book's default state, and
-        # binary events cover enough of the calendar that gating it here would mean
-        # it could essentially never be established.
-        from ..analytics.core_position import CORE_TAG as _CORE_TAG
-
         event_days = limits.events.block_stock_entry_within_days
         if (event_days > 0 and not proposal.reduces_position
-                and proposal.strategy_tag != _CORE_TAG
                 and proposal.asset_class == "stock"):
             try:
                 from ..data.calendar_feed import binary_events_within
@@ -120,16 +113,10 @@ class GuardrailEngine:
         # Strategy lifecycle stage. A candidate/backtest tag (sizing fraction 0)
         # cannot trade in any mode. In live mode only small-live/scaled may trade,
         # and the stage's fraction scales the position cap.
-        # The passive core is an ALLOCATION, not a signal: it makes no claim about
-        # a catalyst and has no backtest to pass, so the lifecycle ladder (which
-        # would size it at 0.25x as `unproven` forever) does not apply to it.
-        from ..analytics.core_position import CORE_TAG
-
-        is_core = proposal.strategy_tag == CORE_TAG
         stage = lifecycle.get_stage(self.journal, proposal.strategy_tag)
-        stage_frac = 1.0 if is_core else lifecycle.STAGE_SIZING.get(stage, 0.0)
+        stage_frac = lifecycle.STAGE_SIZING.get(stage, 0.0)
         live_size_scale = 1.0
-        if not proposal.reduces_position and not is_core:
+        if not proposal.reduces_position:
             if stage_frac <= 0:
                 fail("strategy_stage",
                      f"strategy '{proposal.strategy_tag}' at stage '{stage}' is not "
@@ -390,12 +377,7 @@ class GuardrailEngine:
         est_cost = account_math.estimate_cost_usd(
             proposal, quote, limits.cost_hurdle, option_leg_spreads=option_leg_spreads
         )
-        # The core is exempt: the hurdle asks "does this trade's alpha clear its
-        # friction", and a passive hold has no per-trade alpha — its return is the
-        # holding period, not the trade. Its churn is already bounded, and more
-        # tightly than this gate could: it only rebalances when drift exceeds
-        # core_position.rebalance_band_pct of equity.
-        if limits.cost_hurdle.enforce and not proposal.reduces_position and not is_core:
+        if limits.cost_hurdle.enforce and not proposal.reduces_position:
             if proposal.expected_edge_usd is None:
                 fail("cost_hurdle", "no expected_edge_usd stated; cannot clear cost hurdle")
             elif proposal.expected_edge_usd < limits.cost_hurdle.min_edge_multiple * est_cost:
