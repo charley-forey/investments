@@ -289,6 +289,20 @@ class Journal:
             "regime_trend TEXT, regime_vol TEXT, horizon_days INTEGER NOT NULL, "
             "entry_price REAL, forward_return REAL, direction_right INTEGER)"
         )
+        # `orb-breakout` was RENAMED to `extended-from-sma` (the scanner rule never
+        # measured an opening range -- it is distance from the 20d SMA times relative
+        # volume). The graded rows kept the dead name, so regime_edge could never
+        # match them against the live tag and the history was stranded. This is the
+        # one safe remap: the other retired templates (news-impulse,
+        # relative-strength-long/short) were DELETED as bad signals, not renamed, and
+        # attributing their record to a live tag would be fabricating evidence.
+        for table in ("candidate_outcomes", "signal_snapshot"):
+            try:
+                self.conn.execute(
+                    f"UPDATE {table} SET template='extended-from-sma' "
+                    "WHERE template='orb-breakout'")
+            except sqlite3.OperationalError:
+                pass
         po_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(proposal_outcomes)")}
         for col in ("regime_trend", "regime_vol"):
             if col not in po_cols:

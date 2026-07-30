@@ -94,7 +94,12 @@ class TestCostCap:
         assert report.skipped == "cost cap reached"
 
     def test_under_cap_runs(self, tmp_path):
-        orch = self._orch(tmp_path, cap=5.0, seeded_cost=1.0)
+        # Under the daily cap AND within this hour's paced slice. Seeded spend used
+        # to be 1.0 of a 5.0 cap -- 20% of the day's budget inside a single hour,
+        # which the pacing added in test_budget_pacing.py now correctly throttles.
+        # "Under the cap" is no longer sufficient on its own, and that is the point:
+        # a flat cap let four hours consume a 6.5-hour session.
+        orch = self._orch(tmp_path, cap=5.0, seeded_cost=0.2)
         report = orch.run_cycle("intraday")
         assert report.skipped is None
 

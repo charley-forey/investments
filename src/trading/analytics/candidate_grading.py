@@ -128,23 +128,47 @@ def regime_edge(journal: Journal, template: str | None,
 def regime_context(journal: Journal, regime_trend: str | None,
                    regime_vol: str | None, *, min_n: int = 5) -> str:
     """Compact per-template edge in the current regime for the strategy prompt, so
-    the agent sees which setups actually work in this tape."""
+    the agent sees which setups actually work in this tape.
+
+    Restricted to tags the agent can actually PROPOSE. The ledger still holds 417
+    rows from four templates that were deliberately deleted as bad signals
+    (`news-impulse` graded -$553, `relative-strength-long/short` were the
+    day_pct fallthrough bucket at -$901/-$169). Unfiltered, this told the agent
+    every cycle that its three best setups in the current regime were things
+    `validate_tag` mechanically rejects -- advice it could only waste reasoning on.
+    """
     if not regime_trend or not regime_vol:
         return ""
+    from .. import strategies as registry
+
+    tags = registry.proposable_tags()
+    if not tags:
+        return ""
+    placeholders = ",".join("?" * len(tags))
+    # Report the return the BET earned, not the raw price move. Pooling bullish and
+    # bearish candidates and averaging unsigned forward returns made the two columns
+    # contradict each other: extended-from-sma read "hit 87%, avg fwd -2.67%", which
+    # looks like a broken signal and is actually ten correct bearish calls. Signing
+    # by trigger_direction makes hit rate and return agree.
     rows = journal.conn.execute(
-        "SELECT template, COUNT(*) n, AVG(direction_right) hit, AVG(forward_return) fwd "
-        "FROM candidate_outcomes WHERE regime_trend=? AND regime_vol=? "
-        "AND direction_right IS NOT NULL AND template IS NOT NULL "
-        "GROUP BY template HAVING n >= ? ORDER BY hit DESC",
-        (regime_trend, regime_vol, min_n),
+        "SELECT o.template, COUNT(*) n, AVG(o.direction_right) hit, "
+        "  AVG(o.forward_return * CASE s.trigger_direction "
+        "        WHEN 'below' THEN -1 ELSE 1 END) earned "
+        "FROM candidate_outcomes o JOIN signal_snapshot s ON s.id = o.snapshot_id "
+        "WHERE o.regime_trend=? AND o.regime_vol=? "
+        "AND o.direction_right IS NOT NULL AND o.template IS NOT NULL "
+        f"AND o.template IN ({placeholders}) "
+        "GROUP BY o.template HAVING n >= ? ORDER BY hit DESC",
+        (regime_trend, regime_vol, *tags, min_n),
     ).fetchall()
     if not rows:
         return ""
     lines = [f"Template edge in the current regime ({regime_trend}/{regime_vol}), "
-             f"from shadow-graded candidates:"]
+             f"from shadow-graded candidates (return is what the bet earned, so a "
+             f"correct bearish call shows positive):"]
     for r in rows:
         lines.append(f"  {r['template']}: {r['n']} samples, hit {r['hit']*100:.0f}%, "
-                     f"avg fwd {r['fwd']*100:+.2f}%")
+                     f"avg earned {r['earned']*100:+.2f}%")
     return "\n".join(lines)
 
 
