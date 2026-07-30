@@ -42,6 +42,25 @@ _WAKE_COOLDOWN_KEY = "gate_wake_cooldown"
 _WAKE_COOLDOWN_MINUTES = 20.0
 _WAKE_REPRICE_PCT = 1.0
 
+# Minimum gap between LLM sessions on the ROUTINE wake path.
+#
+# The per-(symbol, kind) cooldown above throttles each name, but 41 watched names
+# each waking once per window still bought 146 sessions/day: any novel event in
+# any minute purchased a whole session. Lengthening the per-symbol cooldown barely
+# helps (90 min still gives 85 sessions) because the events are spread across
+# symbols, not repeated on one. A global floor is the lever that actually bites:
+# replayed against 2026-07-29's real 547 events, 5 minutes gives 55 sessions
+# against that day's 146-equivalent.
+#
+# This throttles ONLY ordinary market-event wakes. Explicit agent-named triggers,
+# a position near its stop/target, regime shifts and the forced situational-
+# awareness windows all bypass it, exits never reach this gate at all (they run
+# deterministically upstream), and armed plans fire from the tick stream without
+# an LLM. Worst case is a few minutes' delay reacting to an ORB on a watched name,
+# and the agent re-reads live quotes when it does run.
+_LAST_LLM_TS_KEY = "gate_last_llm_ts"
+_MIN_SESSION_GAP_MINUTES = 5.0
+
 
 @dataclass
 class Trigger:
@@ -244,6 +263,90 @@ def _novel_wake_events(journal: Journal, events: list[dict],
     return fresh
 
 
+def _actionable_symbols(config: Config, journal: Journal, account) -> set[str]:
+    """Symbols the agent could actually do something about this cycle.
+
+    The tick stream watches ~88 names and emits an ORB event for any of them: 508
+    on 2026-07-29, 475 the day before. But the agent only ever reasons about names
+    it holds, has armed, has on the watchlist, or the scanner surfaced -- the
+    reasoning log for all 124 sessions that day shows exactly that.
+
+    The core universe is included deliberately, even though it widens the set: the
+    scanner only refreshes candidates every 15 minutes, so gating purely on
+    watchlist+candidates would blind us to a genuine breakout on a core name for up
+    to a quarter of an hour. Dropping ~57 non-core streamed names is most of the
+    saving and costs no coverage the agent was using.
+    """
+    syms: set[str] = set()
+    try:
+        syms |= {s.upper() for s in (config.settings.universe.core or [])}
+    except Exception:
+        pass
+    try:
+        syms |= {p.symbol.upper() for p in (account.positions or [])}
+    except Exception:
+        pass
+    for loader in (
+        lambda: {p["symbol"].upper() for p in journal.active_armed_plans()},
+        lambda: {t.symbol.upper() for t in load_triggers(config)},
+    ):
+        try:
+            syms |= loader()
+        except Exception:
+            pass
+    try:
+        from .scanner.movers import load_candidates
+
+        syms |= {str(c.get("symbol", "")).upper() for c in load_candidates(config)}
+    except Exception:
+        pass
+    return {s for s in syms if s}
+
+
+def _armed_symbols(journal: Journal) -> set[str]:
+    try:
+        return {p["symbol"].upper() for p in journal.active_armed_plans()}
+    except Exception:
+        return set()
+
+
+def _actionable_wake_events(config: Config, journal: Journal, account,
+                            events: list[dict]) -> list[dict]:
+    """Drop wake events the LLM cannot act on, before they cost a session.
+
+    Two filters, in order of how much they save:
+
+    * ARMED. If a symbol already carries an armed plan, the decision is made and
+      the tick stream executes it in milliseconds without us. Waking to re-reach
+      the same conclusion is the exact loop that ran four times a minute on
+      2026-07-29 ("NET is at 266 vs its 277 trigger") at ~$0.12 a look.
+    * UNWATCHED. An `orb` event on a name that is not held, armed, on the
+      watchlist, or a live candidate has nothing behind it. Explicit `trigger`
+      events are never dropped -- those are levels the agent named itself.
+    """
+    armed = _armed_symbols(journal)
+    watched = _actionable_symbols(config, journal, account)
+    out = []
+    for e in events:
+        sym = str(e.get("symbol") or "").upper()
+        if sym in armed:
+            continue
+        if e.get("kind") == "orb" and sym not in watched:
+            continue
+        out.append(e)
+    return out
+
+
+def _minutes_since_last_session(journal: Journal, now: datetime) -> float:
+    raw = journal.get_state(_LAST_LLM_TS_KEY)
+    if not raw:
+        return float("inf")
+    try:
+        return (now - datetime.fromisoformat(raw)).total_seconds() / 60.0
+    except (TypeError, ValueError):
+        return float("inf")
+
+
 @dataclass
 class GateDecision:
     run_llm: bool
@@ -252,7 +355,20 @@ class GateDecision:
 
 def should_run_intraday_llm(config: Config, journal: Journal, broker, account,
                             *, now_et: datetime | None = None) -> GateDecision:
-    """Cheap pure-Python gate. When False, skip the strategy LLM this cycle."""
+    """Cheap pure-Python gate. When False, skip the strategy LLM this cycle.
+
+    Thin wrapper so the "when did we last spend money" clock is stamped in exactly
+    one place, whichever of the seven reasons below fired. This is the last check
+    before the strategy agent runs, so a True here means a session.
+    """
+    decision = _gate_decision(config, journal, broker, account, now_et=now_et)
+    if decision.run_llm:
+        journal.set_state(_LAST_LLM_TS_KEY, datetime.now(timezone.utc).isoformat())
+    return decision
+
+
+def _gate_decision(config: Config, journal: Journal, broker, account,
+                   *, now_et: datetime | None = None) -> GateDecision:
     agents = config.settings.agents
     if not getattr(agents, "trigger_gate_enabled", True):
         return GateDecision(True, "trigger gate disabled")
@@ -263,14 +379,25 @@ def should_run_intraday_llm(config: Config, journal: Journal, broker, account,
     # Drain the whole burst, not 20 at a time: a 475-event open took 24 cycles to
     # clear at the old limit, and each of those cycles billed a session. Novelty is
     # judged across the entire batch below, so a big drain is now the cheap path.
+    throttled = None
     pending = journal.pending_wake_events(limit=500)
     if pending:
         journal.consume_wake_events([int(e["id"]) for e in pending])
+        # Actionability first, then novelty: no point spending cooldown state on
+        # events that could never have justified a session.
+        pending = _actionable_wake_events(config, journal, account, pending)
         fresh = _novel_wake_events(journal, pending)
         if fresh:
-            detail = "; ".join(f"{e['symbol']} {e['kind']} {e['detail'] or ''}".strip()
-                               for e in fresh[:4])
-            return GateDecision(True, f"market event: {detail}")
+            gap = _minutes_since_last_session(journal, datetime.now(timezone.utc))
+            if gap >= _MIN_SESSION_GAP_MINUTES:
+                detail = "; ".join(f"{e['symbol']} {e['kind']} {e['detail'] or ''}".strip()
+                                   for e in fresh[:4])
+                return GateDecision(True, f"market event: {detail}")
+            # Throttled, NOT returned: every gate below still gets its say, so a
+            # named trigger, a position near its stop, or a regime shift can still
+            # fire inside the window. Only the routine market-event path waits.
+            throttled = (f"market event throttled ({gap:.1f}m since last session, "
+                         f"min {_MIN_SESSION_GAP_MINUTES:g}m)")
 
     # Situational awareness means ONE look per window, not one per cycle inside it.
     # These three 45-minute windows cover 135 of the session's 390 minutes, so
@@ -316,11 +443,14 @@ def should_run_intraday_llm(config: Config, journal: Journal, broker, account,
     except Exception:
         pass
 
+    # A hit on a symbol that is already armed needs no LLM: the plan fires from the
+    # tick stream, through the full guardrail pipeline, in milliseconds.
+    armed = _armed_symbols(journal)
     hits = []
     for t in load_triggers(config):
-        if _trigger_hit(broker, t):
+        if t.symbol.upper() not in armed and _trigger_hit(broker, t):
             hits.append(f"{t.symbol} {t.direction} {t.level:g}")
     if hits:
         return GateDecision(True, "trigger hit: " + "; ".join(hits[:4]))
 
-    return GateDecision(False, "no trigger / no forced slot — skipping LLM")
+    return GateDecision(False, throttled or "no trigger / no forced slot — skipping LLM")

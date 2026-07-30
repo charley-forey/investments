@@ -29,11 +29,23 @@ from .guardrails.models import OrderProposal
 _BILLING_HALT_KEY = "llm_billing_halt"
 _BILLING_RETRY_MINUTES = 30.0
 
-# Share of the daily budget any single hour may consume. On 2026-07-28 the 09:30-11:00
-# window burned the whole $15 (58 of 74 sessions) and the trailing-24h cap then starved
-# the afternoon from 10:30 on — including the postclose learning cycle, which is on the
-# same budget. A per-hour slice keeps decision capacity available all session.
-_HOURLY_BUDGET_SHARE = 0.25
+# Budget pacing. A flat 0.25 share per hour was the first attempt and it still
+# guaranteed a blind afternoon: four hours at the cap consumes a 6.5-hour session,
+# and on 2026-07-29 it did exactly that ($3.89/$3.89/$3.75/$3.16, done by 13:00 ET,
+# then "skipped: cost cap reached" every minute to the close — through the FOMC
+# decision, which is the single most informative hour of that day).
+#
+# The share now derives from how much of the session is actually left, so spend
+# spreads across it by construction. The floor stops a quiet morning from handing
+# one hour an unbounded allowance.
+_MIN_HOURLY_BUDGET_SHARE = 0.15
+# Reserved for the postclose learning cycle, which shares this budget and lost
+# every contest against intraday: it ran at cost=$0.000 on 07-29 and has not
+# produced a scoring row since at least 07-26. Intraday cannot spend this.
+_POSTCLOSE_RESERVE_USD = 0.75
+# Session bounds (ET) used only for pacing arithmetic.
+_SESSION_OPEN_HOUR = 9
+_SESSION_CLOSE_HOUR = 16
 
 
 @dataclass
@@ -49,11 +61,17 @@ class CycleReport:
     notes: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
+        # `notes` MUST be rendered. ~40 `except Exception` blocks in this file
+        # append there and nothing printed them, so a failure left no trace
+        # anywhere: the market digest 400'd on every premarket cycle for six
+        # days (2026-07-23 to 07-29) and the only symptom was a stale page.
+        # A swallowed exception that is also unlogged is not error handling.
+        suffix = f" | {'; '.join(self.notes)}" if self.notes else ""
         if self.skipped:
-            return f"[{self.cycle}] skipped: {self.skipped}"
+            return f"[{self.cycle}] skipped: {self.skipped}{suffix}"
         return (f"[{self.cycle}] proposals={self.proposals} vetoed={self.vetoed} "
                 f"submitted={self.submitted} rejected={self.rejected} "
-                f"pending={self.pending_approval} cost=${self.cost_usd:.3f}")
+                f"pending={self.pending_approval} cost=${self.cost_usd:.3f}{suffix}")
 
 
 class Orchestrator:
@@ -639,44 +657,78 @@ class Orchestrator:
         except Exception:
             return None
 
-    def _cost_capped(self) -> bool:
-        """True if Anthropic spend has hit the daily cap or this hour's slice of it.
+    def _session_now(self) -> datetime:
+        """Now in the configured market timezone.
 
-        Two windows, because one was not enough:
+        The day boundary must be the TRADING day. This used to use UTC midnight,
+        which is 20:00 ET the previous evening — so an evening's spend counted
+        against the next morning's budget.
+        """
+        try:
+            from zoneinfo import ZoneInfo
 
-        * Calendar day, not trailing 24h. A trailing window let last night's spend
-          suppress this morning — the cap first tripped at 10:30am ET on 2026-07-28
-          partly on the back of the previous evening.
-        * Per-hour slice. Without it a single busy hour can spend the whole day's
-          budget and leave the afternoon (and the postclose learning cycle) with
-          nothing, which is exactly what happened.
+            return datetime.now(ZoneInfo(self.config.settings.schedule.timezone))
+        except Exception:
+            return datetime.now(timezone.utc)
+
+    def _cost_capped(self, *, reserve: float = _POSTCLOSE_RESERVE_USD,
+                     pace: bool = True) -> bool:
+        """True if Anthropic spend has hit the daily cap or this hour's paced slice.
+
+        Three windows, because two were not enough:
+
+        * Calendar day in MARKET time, not UTC and not trailing 24h. A trailing
+          window let last night's spend suppress this morning; UTC midnight put the
+          boundary at 20:00 ET the evening before.
+        * A reserve the intraday agent cannot touch, so the postclose learning
+          cycle is not starved by the cycle that generates its evidence.
+        * A per-hour slice sized by how much of the SESSION IS LEFT, not a flat
+          share. A flat 25% still let four hours eat a 6.5-hour day — on
+          2026-07-29 the budget was gone by 13:00 ET and the system went dark
+          through the FOMC decision.
         """
         cap = self.config.settings.agents.max_daily_cost_usd
         if cap <= 0:
             return False
-        now = datetime.now(timezone.utc)
-        spent = self.journal.cost_since(now.replace(
-            hour=0, minute=0, second=0, microsecond=0).isoformat())
-        if spent >= cap:
-            self.journal.heartbeat("cost_cap", status="warn",
-                                   detail=f"today ${spent:.2f} >= cap ${cap:.2f}")
+        now = self._session_now()
+        day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        spent = self.journal.cost_since(
+            day_start.astimezone(timezone.utc).isoformat())
+
+        usable = max(0.0, cap - max(0.0, reserve))
+        if spent >= usable:
+            detail = f"today ${spent:.2f} >= ${usable:.2f}"
+            if reserve > 0:
+                detail += f" (cap ${cap:.2f} less ${reserve:.2f} postclose reserve)"
+            self.journal.heartbeat("cost_cap", status="warn", detail=detail)
             try:
                 notify.notify_event(self.config, self.journal, "Cost cap reached",
-                                    f"Anthropic spend today ${spent:.2f} >= ${cap:.2f}; "
-                                    "agent cycles paused")
+                                    f"Anthropic spend today ${spent:.2f} >= "
+                                    f"${usable:.2f}; agent cycles paused")
             except Exception:
                 pass
             return True
+        if not pace:
+            return False
 
-        hour_cap = cap * _HOURLY_BUDGET_SHARE
+        # Spread what is left over what is left. Self-correcting: a quiet morning
+        # widens the afternoon's allowance rather than expiring unused.
+        hours_left = _SESSION_CLOSE_HOUR - (now.hour + now.minute / 60.0)
+        hours_left = min(max(hours_left, 1.0),
+                         float(_SESSION_CLOSE_HOUR - _SESSION_OPEN_HOUR))
+        remaining = usable - spent
+        hour_cap = min(remaining,
+                       max(usable * _MIN_HOURLY_BUDGET_SHARE, remaining / hours_left))
         hour_spent = self.journal.cost_since(
-            now.replace(minute=0, second=0, microsecond=0).isoformat())
+            now.replace(minute=0, second=0, microsecond=0)
+               .astimezone(timezone.utc).isoformat())
         if hour_spent >= hour_cap:
             # Deliberately quiet: this is pacing, not an incident. It clears on the
             # hour, so alerting on it would page once an hour for normal operation.
             self.journal.heartbeat(
                 "cost_cap", status="warn",
-                detail=f"hourly ${hour_spent:.2f} >= ${hour_cap:.2f} (paced)")
+                detail=f"hourly ${hour_spent:.2f} >= ${hour_cap:.2f} "
+                       f"({hours_left:.1f}h left, paced)")
             return True
         return False
 
@@ -871,7 +923,10 @@ class Orchestrator:
         # 2. Qualitative lessons from the scoring agent -> memory/lessons.md.
         #    Deterministic scoring above always runs; the LLM lessons pause under the
         #    cost cap.
-        if self._cost_capped():
+        # Postclose spends the reserve intraday could not touch, and is not paced —
+        # it is a once-a-day cycle, so an hourly slice is meaningless for it. This
+        # is the learning loop; starving it is how the system stops improving.
+        if self._cost_capped(reserve=0.0, pace=False):
             report.notes.append("scoring agent skipped (cost cap)")
         elif not score_report.scored and not graded:
             # No graded outcome and no closed trade means there is nothing to learn
@@ -902,7 +957,8 @@ class Orchestrator:
     # -- premarket: write a watchlist note -----------------------------------
 
     def _note_cycle(self, cycle: str, account, report: CycleReport) -> None:
-        if self._cost_capped():
+        # Premarket runs once, before the session — nothing to pace against.
+        if self._cost_capped(reserve=0.0, pace=False):
             report.notes.append("agent research skipped (cost cap)")
             return
         # Refresh the market-intel digest at the start of the day.
@@ -1023,7 +1079,8 @@ class Orchestrator:
 
         # Deterministic weekly rollup + allocation above always run; the research
         # agent pauses under the cost cap.
-        if self._cost_capped():
+        # Weekend: no session to pace across, and no intraday competing for it.
+        if self._cost_capped(reserve=0.0, pace=False):
             report.notes.append("weekend research agent skipped (cost cap)")
             return
         extra_parts = []

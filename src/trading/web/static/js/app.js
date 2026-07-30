@@ -278,6 +278,21 @@ const signed = (n, f = F.usd) => n == null ? '—'
   : `<span class="${pnlCls(n)}">${F.sig(n)} ${f(Math.abs(n))}</span>`;
 const symLink = s => `<span class="sym" onclick="go('#/symbol/${encodeURIComponent(s)}')">${esc(s)}</span>`;
 
+/** How old the stored digest is, and loudly if that is too old.
+
+    The API has always returned `ts` and this card always threw it away, so a
+    digest frozen on 2026-07-23 rendered identically to one written this morning.
+    It stayed broken for six days because nothing on screen could say otherwise —
+    the model helpfully dates its own text, which reads as a fresh timestamp. */
+function digestAge(ts) {
+  if (!ts) return 'never generated';
+  const hours = (Date.now() - new Date(ts).getTime()) / 3.6e6;
+  if (!isFinite(hours)) return '';
+  if (hours < 1) return 'generated just now';
+  if (hours < 24) return `generated ${Math.round(hours)}h ago`;
+  return `STALE — ${Math.floor(hours / 24)}d old; the premarket cycle is not producing one`;
+}
+
 /** Just enough markdown for the digests the agent writes — escaped first, so the
     model's output can never inject markup. */
 function md(src) {
@@ -374,6 +389,7 @@ async function viewCockpit(main) {
         body: '<div id="hbStrip" class="strip"></div><div id="hbNote" class="hint" style="margin-top:9px"></div>' })}
       ${card({ title: 'Agent spend', cls: 'col-4', hint: 'by cycle type' })}
       ${card({ title: 'Latest market digest', cls: 'col-8', chart: false,
+        hint: digestAge(d.intel && d.intel.ts),
         actions: '<button onclick="go(\'#/markets\')">Open markets</button>',
         body: `<div class="prose md" id="digest">${d.intel && d.intel.digest
           ? md(d.intel.digest.slice(0, 3000)) : 'No digest yet — run a premarket cycle.'}</div>` })}

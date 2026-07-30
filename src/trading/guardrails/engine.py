@@ -95,8 +95,15 @@ class GuardrailEngine:
         # CRM being opened the day before the 7/29 FOMC. Defined-risk verticals pass
         # — that is what prompts.py already tells the agent to reach for into a
         # binary — and reducing orders always pass, so this can never trap a position.
+        # The passive core is exempt for the same reason verticals are: it is not a
+        # directional bet on the print. It is also the book's default state, and
+        # binary events cover enough of the calendar that gating it here would mean
+        # it could essentially never be established.
+        from ..analytics.core_position import CORE_TAG as _CORE_TAG
+
         event_days = limits.events.block_stock_entry_within_days
         if (event_days > 0 and not proposal.reduces_position
+                and proposal.strategy_tag != _CORE_TAG
                 and proposal.asset_class == "stock"):
             try:
                 from ..data.calendar_feed import binary_events_within
@@ -113,10 +120,16 @@ class GuardrailEngine:
         # Strategy lifecycle stage. A candidate/backtest tag (sizing fraction 0)
         # cannot trade in any mode. In live mode only small-live/scaled may trade,
         # and the stage's fraction scales the position cap.
+        # The passive core is an ALLOCATION, not a signal: it makes no claim about
+        # a catalyst and has no backtest to pass, so the lifecycle ladder (which
+        # would size it at 0.25x as `unproven` forever) does not apply to it.
+        from ..analytics.core_position import CORE_TAG
+
+        is_core = proposal.strategy_tag == CORE_TAG
         stage = lifecycle.get_stage(self.journal, proposal.strategy_tag)
-        stage_frac = lifecycle.STAGE_SIZING.get(stage, 0.0)
+        stage_frac = 1.0 if is_core else lifecycle.STAGE_SIZING.get(stage, 0.0)
         live_size_scale = 1.0
-        if not proposal.reduces_position:
+        if not proposal.reduces_position and not is_core:
             if stage_frac <= 0:
                 fail("strategy_stage",
                      f"strategy '{proposal.strategy_tag}' at stage '{stage}' is not "
@@ -154,6 +167,35 @@ class GuardrailEngine:
         # 2. Order type.
         if proposal.order_type == "market" and not limits.orders.allow_market_orders:
             fail("order_type", "market orders are disabled (allow_market_orders=false)")
+
+        # 2a. Protective-exit geometry. On 2026-07-29 proposal #33 declared a
+        # "protective stop" at 173, sent it as a LIMIT at 172 against a 183 bid,
+        # and instantly liquidated the only open position at 182.94. The risk
+        # agent had caught the identical defect on #32 and then approved #33
+        # anyway — so this must be a deterministic gate, not a judgement call.
+        if proposal.order_type == "stop":
+            trigger = proposal.stop_price
+            if trigger is None:
+                fail("stop_geometry", "order_type 'stop' requires stop_price (the trigger)")
+            elif proposal.side == "sell" and quote.bid > 0 and trigger >= quote.bid:
+                fail("stop_geometry",
+                     f"sell stop {trigger:g} is at or above the bid {quote.bid:g} — it "
+                     f"would trigger immediately and sell at the market. A protective "
+                     f"sell stop must sit BELOW the bid")
+            elif proposal.side == "buy" and quote.ask > 0 and trigger <= quote.ask:
+                fail("stop_geometry",
+                     f"buy stop {trigger:g} is at or below the ask {quote.ask:g} — it "
+                     f"would trigger immediately. A buy stop must sit ABOVE the ask")
+        elif proposal.reduces_position and proposal.stop_price is not None:
+            # Declares a stop level but is not a stop order: a mis-typed protective
+            # exit. A sell limit below the bid means "sell at that price or better"
+            # and fills now at the market; it does not rest. An intentional
+            # immediate exit simply omits stop_price, so this is unambiguous.
+            fail("stop_geometry",
+                 f"this is a {proposal.order_type} order carrying stop_price "
+                 f"{proposal.stop_price:g} — a resting protective stop needs "
+                 f"order_type='stop'. As written it executes immediately at the "
+                 f"market. Omit stop_price if you really do want out right now")
 
         # 3. Symbol rules.
         sym = proposal.symbol
@@ -348,7 +390,12 @@ class GuardrailEngine:
         est_cost = account_math.estimate_cost_usd(
             proposal, quote, limits.cost_hurdle, option_leg_spreads=option_leg_spreads
         )
-        if limits.cost_hurdle.enforce and not proposal.reduces_position:
+        # The core is exempt: the hurdle asks "does this trade's alpha clear its
+        # friction", and a passive hold has no per-trade alpha — its return is the
+        # holding period, not the trade. Its churn is already bounded, and more
+        # tightly than this gate could: it only rebalances when drift exceeds
+        # core_position.rebalance_band_pct of equity.
+        if limits.cost_hurdle.enforce and not proposal.reduces_position and not is_core:
             if proposal.expected_edge_usd is None:
                 fail("cost_hurdle", "no expected_edge_usd stated; cannot clear cost hurdle")
             elif proposal.expected_edge_usd < limits.cost_hurdle.min_edge_multiple * est_cost:
@@ -568,7 +615,12 @@ class OrderPipeline:
         # right way round; broker/sync.ensure_protective_stops re-arms stops (never
         # targets) for exactly this reason.
         stop_loss = take_profit = None
-        if not proposal.reduces_position and proposal.side == "buy" and proposal.stop_price:
+        if proposal.order_type == "stop":
+            # Not a bracket leg — this IS the order. alpaca.submit_order reads the
+            # trigger from stop_loss_price; without this it falls back to
+            # limit_price, which a protective stop need not carry at all.
+            stop_loss = proposal.stop_price
+        elif not proposal.reduces_position and proposal.side == "buy" and proposal.stop_price:
             stop_loss = proposal.stop_price
             trailing = self.config.limits.exits.trailing_pct
             if not (trailing and trailing > 0):

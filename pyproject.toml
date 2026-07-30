@@ -36,8 +36,15 @@ trading = "trading.cli:main"
 requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
+# `backtest` lives at the repo root, not under src/. It was therefore never
+# installed, so the nightly sweep died on `ModuleNotFoundError: No module named
+# 'backtest'` every night at 17:35 while the scheduler logged "executed
+# successfully". It passed under pytest and `python -m` only because those run
+# with the repo root on sys.path; the daemon runs as the `trading` console
+# script, which does not.
 [tool.setuptools.packages.find]
-where = ["src"]
+where = ["src", "."]
+include = ["trading*", "backtest*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

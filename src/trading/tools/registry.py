@@ -228,8 +228,24 @@ TOOL_SCHEMAS: dict[str, dict] = {
                 "asset_class": {"type": "string", "enum": ["stock", "option"]},
                 "side": {"type": "string", "enum": ["buy", "sell"]},
                 "qty": {"type": "number", "minimum": 0},
+                "order_type": {
+                    "type": "string",
+                    "enum": ["limit", "stop"],
+                    "description": "Default 'limit'. Use 'stop' for a PROTECTIVE EXIT "
+                                   "on a position you already hold: it rests until "
+                                   "price reaches stop_price, then executes. A sell "
+                                   "'limit' below the current bid does NOT rest — it "
+                                   "means 'sell at this price or better' and fills "
+                                   "immediately at the market, dumping the position "
+                                   "you meant to protect. If you are writing the word "
+                                   "'stop' in your thesis, this field must say 'stop'.",
+                },
                 "limit_price": {"type": "number"},
-                "stop_price": {"type": "number"},
+                "stop_price": {"type": "number",
+                               "description": "Protective stop level. With order_type "
+                                              "'stop' this is the trigger price; with "
+                                              "'limit' it is the bracket stop used for "
+                                              "sizing on an opening trade."},
                 "target_price": {"type": "number", "description": "take-profit for the bracket"},
                 "legs": {"type": "array", "items": LEG_SCHEMA},
                 "thesis": {"type": "string"},
@@ -250,7 +266,11 @@ TOOL_SCHEMAS: dict[str, dict] = {
                                    "order until price crosses this level, then the tick "
                                    "stream executes it in milliseconds. Deciding in "
                                    "advance beats deciding at the event, which costs "
-                                   "~60s. Use for 'buy the breakout of X' setups.",
+                                   "~60s. USE THIS WHENEVER the setup is valid but "
+                                   "price has not reached your entry — 'waiting for a "
+                                   "break of X' is an armed order at X, not a reason to "
+                                   "propose nothing. Arming is how an untriggered "
+                                   "setup becomes a trade instead of a re-read.",
                 },
                 "arm_direction": {"type": "string", "enum": ["above", "below"]},
                 "arm_valid_hours": {
@@ -732,7 +752,7 @@ class ToolRegistry:
             asset_class=inp["asset_class"],
             side=inp.get("side", "buy"),
             qty=float(inp.get("qty", 0)),
-            order_type="limit",
+            order_type=inp.get("order_type", "limit"),
             limit_price=inp.get("limit_price"),
             stop_price=inp.get("stop_price"),
             target_price=inp.get("target_price"),
@@ -745,7 +765,11 @@ class ToolRegistry:
         if proposal.asset_class == "stock":
             if proposal.qty <= 0:
                 return "error: stock proposal needs qty > 0"
-            if proposal.limit_price is None:
+            if proposal.order_type == "stop":
+                # The trigger is stop_price; a resting stop carries no limit.
+                if proposal.stop_price is None:
+                    return "error: order_type 'stop' needs stop_price (the trigger price)"
+            elif proposal.limit_price is None:
                 return "error: stock proposal needs limit_price"
             if not proposal.reduces_position and proposal.stop_price is None:
                 return "error: opening stock proposal needs stop_price (used for sizing/risk)"

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..cost import Usage, usage_from_response
+from ..cost import Usage, supports_adaptive_thinking, usage_from_response
 from ..data.journal import Journal
 from ..guardrails.models import OrderProposal
 from ..resilience import RetryConfig, with_retry
@@ -75,7 +75,15 @@ def run_agent(
     web_search_max_uses: int = 0,
     effort: str | None = None,
 ) -> AgentResult:
-    system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
+    # 1h TTL, not the 5m default. Render order is tools -> system -> messages, so
+    # this one breakpoint covers the frozen system prompt AND the tool schemas.
+    # Intraday sessions land minutes apart, so at 5m every session re-wrote a
+    # prefix that never changes: 635k write tokens on 2026-07-29 = $3.97 of a
+    # $15.07 day. 1h costs 2x on write vs 1.25x and breaks even at 3 reads; we get
+    # ~25/hour. The rolling tool-result breakpoint below stays at 5m -- that
+    # content IS per-session, and iterations are seconds apart.
+    system = [{"type": "text", "text": system_prompt,
+               "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
     tools = list(registry.schemas())
     if web_search and web_search_max_uses > 0:
         tools.append(web_search_tool_schema(web_search_max_uses))
@@ -95,12 +103,16 @@ def run_agent(
             kwargs = dict(
                 model=model,
                 max_tokens=max_tokens,
-                # summarized thinking so the agent's reasoning can be captured for
-                # transparency (the raw chain of thought is never exposed).
-                thinking={"type": "adaptive", "display": "summarized"},
                 system=system,
                 messages=messages,
             )
+            # Gated on the resolved model, not hardcoded: adaptive thinking is a
+            # 400 on Haiku 4.5 and older, and any role that resolves to one of
+            # those would fail every call. See supports_adaptive_thinking.
+            if supports_adaptive_thinking(model):
+                # summarized so the agent's reasoning can be captured for
+                # transparency (the raw chain of thought is never exposed).
+                kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
             if effort:
                 kwargs["output_config"] = {"effort": effort}
             if tools:

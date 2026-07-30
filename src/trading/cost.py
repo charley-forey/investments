@@ -19,7 +19,22 @@ PRICING: dict[str, tuple[float, float]] = {
 }
 _DEFAULT = (5.0, 25.0)
 _CACHE_READ_MULT = 0.1
-_CACHE_WRITE_MULT = 1.25  # 5-minute TTL; 1h TTL would be 2.0
+_CACHE_WRITE_MULT = 1.25   # 5-minute TTL
+_CACHE_WRITE_1H_MULT = 2.0  # 1-hour TTL, used for the frozen system+tools prefix
+
+# Models that accept `thinking={"type": "adaptive"}`. Older models require
+# {"type": "enabled", "budget_tokens": N} and return 400 on adaptive -- which is
+# exactly how the market digest died silently for six days (intel resolved to
+# claude-haiku-4-5 while sending adaptive). Unknown models get NO thinking rather
+# than a guess: a missing thinking block degrades an answer, a 400 loses it.
+ADAPTIVE_THINKING_MODELS = frozenset({
+    "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7", "claude-opus-4-6",
+    "claude-fable-5", "claude-mythos-5", "claude-sonnet-5", "claude-sonnet-4-6",
+})
+
+
+def supports_adaptive_thinking(model: str) -> bool:
+    return model in ADAPTIVE_THINKING_MODELS
 
 # Anthropic server-side web_search: $10 per 1,000 searches, billed on top of tokens.
 # Invisible to the token ledger, so it used to be spent entirely off-book — 72
@@ -32,7 +47,8 @@ class Usage:
     input_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
+    cache_write_tokens: int = 0        # 5-minute TTL writes
+    cache_write_1h_tokens: int = 0     # 1-hour TTL writes, billed at 2x not 1.25x
     web_searches: int = 0
 
     def add(self, other: "Usage") -> None:
@@ -40,6 +56,7 @@ class Usage:
         self.output_tokens += other.output_tokens
         self.cache_read_tokens += other.cache_read_tokens
         self.cache_write_tokens += other.cache_write_tokens
+        self.cache_write_1h_tokens += other.cache_write_1h_tokens
         self.web_searches += other.web_searches
 
 
@@ -48,11 +65,18 @@ def usage_from_response(response) -> Usage:
     u = getattr(response, "usage", None)
     if u is None:
         return Usage()
+    # `cache_creation_input_tokens` is the TTL-blind total. When the per-TTL
+    # breakdown is present, split it out so the 1h prefix bills at its real 2x
+    # rather than being under-reported at the 5m rate.
+    total_write = int(getattr(u, "cache_creation_input_tokens", 0) or 0)
+    breakdown = getattr(u, "cache_creation", None)
+    write_1h = int(getattr(breakdown, "ephemeral_1h_input_tokens", 0) or 0) if breakdown else 0
     return Usage(
         input_tokens=int(getattr(u, "input_tokens", 0) or 0),
         output_tokens=int(getattr(u, "output_tokens", 0) or 0),
         cache_read_tokens=int(getattr(u, "cache_read_input_tokens", 0) or 0),
-        cache_write_tokens=int(getattr(u, "cache_creation_input_tokens", 0) or 0),
+        cache_write_tokens=max(0, total_write - write_1h),
+        cache_write_1h_tokens=write_1h,
     )
 
 
@@ -69,6 +93,7 @@ def split_cost(usage: Usage, model: str) -> tuple[float, float]:
     input_cost = (
         usage.input_tokens * in_rate
         + usage.cache_write_tokens * in_rate * _CACHE_WRITE_MULT
+        + usage.cache_write_1h_tokens * in_rate * _CACHE_WRITE_1H_MULT
         + usage.cache_read_tokens * in_rate * _CACHE_READ_MULT
     ) / 1_000_000
     return input_cost, usage.output_tokens * out_rate / 1_000_000

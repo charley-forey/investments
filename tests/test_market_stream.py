@@ -219,12 +219,15 @@ def test_gate_wakes_on_a_queued_market_event(tmp_path):
     config.settings.agents.trigger_gate_enabled = True
     config.settings.paths.journal_db = str(tmp_path / "j.db")
     j = Journal(tmp_path / "j.db")
-    j.record_wake_event(symbol="NVDA", kind="orb", detail="broke OR high 211", price=211.4)
+    # AAPL, not an arbitrary ticker: ORB events are now scoped to names the agent
+    # can act on (core universe / held / armed / watchlist / candidates), and this
+    # fixture's core universe is SPY+AAPL. See test_wake_event_scoping.py.
+    j.record_wake_event(symbol="AAPL", kind="orb", detail="broke OR high 211", price=211.4)
 
     now = datetime(2026, 7, 27, 11, 0, tzinfo=ET)   # outside every forced window
     d = should_run_intraday_llm(config, j, StubBroker(make_account()), make_account(),
                                 now_et=now)
-    assert d.run_llm and "market event" in d.reason and "NVDA" in d.reason
+    assert d.run_llm and "market event" in d.reason and "AAPL" in d.reason
     # Drained: the same event must not buy a second call.
     assert j.pending_wake_events() == []
 

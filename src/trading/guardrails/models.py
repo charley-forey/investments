@@ -26,7 +26,13 @@ class OrderProposal(BaseModel):
     asset_class: Literal["stock", "option"] = "stock"
     side: Literal["buy", "sell"] = "buy"   # net direction for stocks; ignored for multi-leg
     qty: float = Field(default=0, ge=0)    # shares for stocks; 0 for options (qty on legs)
-    order_type: Literal["limit", "market"] = "limit"
+    # "stop" is a resting protective exit: it does NOT execute until price
+    # reaches stop_price. Without it the only way to express "get me out if this
+    # breaks 173" was a sell limit at 172, which is an instruction to sell at 172
+    # *or better* and therefore fills instantly at the market. That is what
+    # happened to CRM on 2026-07-29 (#33): filled at 182.94 against a 172 limit,
+    # liquidating the position it was meant to protect.
+    order_type: Literal["limit", "market", "stop"] = "limit"
     limit_price: float | None = Field(default=None, gt=0)
     stop_price: float | None = Field(default=None, gt=0)   # protective stop (bracket + sizing)
     target_price: float | None = Field(default=None, gt=0)  # take-profit (bracket)

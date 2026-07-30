@@ -11,12 +11,13 @@ from dataclasses import dataclass
 
 from ..broker.models import AccountState
 from ..config import Config
-from ..cost import Usage, usage_from_response
+from ..cost import Usage, supports_adaptive_thinking, usage_from_response
 from ..data.journal import Journal
 from ..guardrails.models import OrderProposal
 from ..tools.assignment import web_search_tool_schema
 from ..tools.registry import ToolContext, ToolRegistry
 from . import prompts
+from .runner import _roll_cache_breakpoint
 
 VERDICT_SCHEMA = {
     "type": "object",
@@ -127,7 +128,7 @@ def review_proposal(
 
     # Manual tool loop, then a final constrained-output call for the verdict.
     system = [{"type": "text", "text": system_prompt or prompts.RISK_SYSTEM,
-               "cache_control": {"type": "ephemeral"}}]
+               "cache_control": {"type": "ephemeral", "ttl": "1h"}}]
     review_model = model or config.settings.agents.model_for("risk")
     messages: list[dict] = [{"role": "user", "content": user_message}]
     spent = Usage()
@@ -139,10 +140,11 @@ def review_proposal(
         create_kwargs: dict = dict(
             model=review_model,
             max_tokens=config.settings.agents.max_tokens,
-            thinking={"type": "adaptive"},
             system=system,
             messages=messages,
         )
+        if supports_adaptive_thinking(review_model):
+            create_kwargs["thinking"] = {"type": "adaptive"}
         effort = config.settings.agents.effort_for(agent_name)
         if effort:
             create_kwargs["output_config"] = {"effort": effort}
@@ -182,6 +184,12 @@ def review_proposal(
             journal.heartbeat(f"agent:{agent_name}", detail=f"tools: {', '.join(called)}")
         if results:
             messages.append({"role": "user", "content": results})
+            # Same fix runner.py already had: without it only the ~470-token
+            # system prompt was cached and the whole growing transcript was
+            # re-billed at full rate on each of up to 25 iterations, plus again
+            # on the final verdict call. Risk sat at 28% cache hit vs strategy's
+            # 71%.
+            _roll_cache_breakpoint(messages)
 
     # Constrained final verdict.
     messages.append({

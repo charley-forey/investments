@@ -83,6 +83,46 @@ def momentum_continuation(lookback: int = 20, threshold: float = 0.05):
     return signal
 
 
+def trend_pullback_short(fast: int = 20, slow: int = 50):
+    """Mirror of `trend_pullback_long`: downtrend, rally into the fast SMA, fail.
+
+    Short until the downtrend breaks. Registered so the bearish side is measurable
+    rather than merely assertable — the system was long-only in practice and the
+    regime sweep says these signals pay in `down/elevated`, which a long-only book
+    cannot express at all.
+    """
+
+    def signal(bars: list[Bar], i: int) -> int:
+        if i < slow + 1:
+            return 0
+        close = bars[i].close
+        if close > _sma(bars, i, slow):           # downtrend gone -> flat
+            return 0
+        fast_now, fast_prev = _sma(bars, i, fast), _sma(bars, i - 1, fast)
+        rejected = bars[i - 1].close > fast_prev and close < fast_now
+        return -1 if (rejected or close < fast_now) else 0
+
+    return signal
+
+
+def breakdown(lookback: int = 20):
+    """Mirror of `breakout`: short a new `lookback`-day low, flat on a new high."""
+
+    def signal(bars: list[Bar], i: int) -> int:
+        if i < lookback:
+            return 0
+        window = bars[i - lookback:i]
+        high = max(b.close for b in window)
+        low = min(b.close for b in window)
+        if bars[i].close <= low:
+            return -1
+        if bars[i].close >= high:
+            return 0
+        return -1 if bars[i].close < (high + low) / 2 else 0
+
+    return signal
+
+
 def breakout(lookback: int = 20):
     """Long when the close makes a new `lookback`-day high, flat on a new low."""
 

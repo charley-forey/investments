@@ -45,6 +45,55 @@ def run_cycle_safe(cycle: str) -> None:
         journal.close()
 
 
+def run_core_position_safe() -> None:
+    """Rebalance the passive core toward its regime-scaled target weight.
+
+    Deterministic and LLM-free by design: the sweep says being flat is the
+    expensive state, and re-deriving "hold the index" every cycle is exactly the
+    kind of deliberation that cost $14.40 for one trade idea. A target, a band, a
+    rebalance -- once a day, after the open has settled.
+    """
+    from .analytics.core_position import core_proposal, plan_core_position
+    from .guardrails.engine import OrderPipeline
+    # Same entry point the overlay uses, so the two halves cannot disagree about
+    # what regime it is -- they must agree by construction, not by coincidence.
+    from .tools.market_context import market_regime
+
+    config = get_config()
+    if not config.limits.core_position.enabled:
+        return
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        broker = AlpacaBroker(config)
+        if not broker.market_open():
+            return
+        account = broker.get_account_state(journal)
+        symbol = config.limits.core_position.symbol
+        quote = broker.get_quote(symbol)
+        price = quote.mid or quote.last
+        trend = vol_state = None
+        try:
+            reg = market_regime(broker)
+            trend, vol_state = reg.trend, reg.vol_state
+        except Exception:
+            log.exception("core: regime lookup failed; sizing at the neutral weight")
+        plan = plan_core_position(config, journal, account, price,
+                                  trend=trend, vol_state=vol_state)
+        if plan is None or not plan.acts:
+            log.info("core: no rebalance (%s)", plan.reason if plan else "disabled")
+            return
+        proposal = core_proposal(plan, price)
+        result = OrderPipeline(config, journal, broker).process(
+            proposal, account, quote, market_is_open=True)
+        log.info("core: %s %d %s -> %s (%s)", proposal.side, proposal.qty,
+                 plan.symbol, result.status, plan.reason)
+    except Exception:
+        log.exception("core position rebalance failed")
+        journal.heartbeat("core_position", status="error", detail="rebalance failed")
+    finally:
+        journal.close()
+
+
 def run_protect_safe() -> None:
     """Backstop: every position carries a live GTC stop. Runs at daemon start and
     before the close, so a cancelled/expired bracket leg can't leave a position
@@ -338,7 +387,18 @@ def build_scheduler():
         CronTrigger(day_of_week=sched.weekend_research_day, hour=wk_h, minute=wk_m),
         args=["weekend"], id="weekend", max_instances=1,
     )
-    # Protective-stop backstop 5 minutes before the close.
+    # Protective-stop backstop. At the OPEN as well as before the close: on
+    # 2026-07-29 the agent spent three proposals and nine minutes hand-building a
+    # stop for a position that had been unprotected since the previous session,
+    # because the only sweep ran at 15:55 — six hours after it noticed.
+    scheduler.add_job(run_protect_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="9", minute="32"),
+                      id="protect_open", max_instances=1)
+    # Passive core, once a day after the open has settled. Off unless
+    # limits.core_position.enabled.
+    scheduler.add_job(run_core_position_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="10", minute="0"),
+                      id="core_position", max_instances=1)
     scheduler.add_job(run_protect_safe,
                       CronTrigger(day_of_week="mon-fri", hour="15", minute="55"),
                       id="protect", max_instances=1)
@@ -348,7 +408,11 @@ def build_scheduler():
     scheduler.add_job(run_daily_summary_safe,
                       CronTrigger(day_of_week="mon-fri", hour="16", minute="45"),
                       id="daily_summary", max_instances=1)
-    scheduler.add_job(run_backup_safe, CronTrigger(hour="23", minute="30"),
+    # Backup at 18:05, not 23:30. The machine running this is not up at 23:30 --
+    # the daemon is restarted each morning ~07:42 and the last backup on disk was
+    # 2026-07-27 despite the job being scheduled nightly. A backup that only runs
+    # when someone happens to leave the machine on is not a backup.
+    scheduler.add_job(run_backup_safe, CronTrigger(hour="18", minute="5"),
                       id="backup", max_instances=1)
     # Shadow-grade matured scanner candidates nightly (after the close, before backup).
     scheduler.add_job(run_signal_grading_safe,

@@ -53,6 +53,15 @@ STRATEGIES: dict[str, Strategy] = {
     "extended-from-sma": Strategy(
         "extended-from-sma", "extended_from_sma", "extended-from-sma", scanner=True),
     "breakout": Strategy("breakout", "breakout", "breakout"),
+    # The bearish side. Registering the long tags made every short tag
+    # unregisterable (`relative-strength-short`, bearish `news-impulse`), so the
+    # book went long-only the day that landed — while the regime sweep says these
+    # signals pay in down/elevated, which a long-only book cannot express.
+    # They start at `unproven` (0.25x) like everything else and must earn size
+    # through the nightly sweep, not through assertion.
+    "trend-pullback-short": Strategy(
+        "trend-pullback-short", "trend_pullback_short", "trend-pullback-short"),
+    "breakdown": Strategy("breakdown", "breakdown", "breakdown"),
     # Baseline for the sweep to measure the others against; not a licence to trade.
     "sma-crossover": Strategy(
         "sma-crossover", "sma_crossover", None, proposable=False),

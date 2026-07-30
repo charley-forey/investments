@@ -118,6 +118,30 @@ class EventGate(BaseModel):
     block_stock_entry_within_days: int = Field(default=0, ge=0)  # 0 = off
 
 
+class CorePosition(BaseModel):
+    """Passive long core: the DEFAULT STATE of the book, not a signal.
+
+    The nightly sweep is unambiguous over 40,212 trades and 10 years: not one of
+    the five strategies beats an exposure-matched passive hold, and they are worst
+    in the calm uptrends that dominate the decade. The honest reading is not "the
+    signals are broken" — per-trade expectancy is positive net of friction — it is
+    "being flat is expensive". Over 8 trading days flat cost $63 of compute to
+    realise $83 gross.
+
+    So hold a baseline index position and run the signals as an overlay on top. It
+    is deliberately deterministic: no LLM decides this, it rebalances on a band,
+    and it is exempt from the event wall because a passive allocation is not a
+    directional bet on a print.
+    """
+    enabled: bool = False
+    symbol: str = "SPY"
+    target_pct: float = Field(default=0.0, ge=0, le=100)   # % of equity at full weight
+    rebalance_band_pct: float = Field(default=5.0, gt=0)   # drift before we trade
+    # Share of gross exposure the core may occupy, so it cannot crowd out the
+    # overlay it exists to complement.
+    max_share_of_gross_pct: float = Field(default=50.0, gt=0, le=100)
+
+
 class Limits(BaseModel):
     mode: Literal["paper", "live"] = "paper"
     position: PositionLimits
@@ -134,6 +158,7 @@ class Limits(BaseModel):
     reconciliation: Reconciliation = Reconciliation()
     exits: ExitLimits = ExitLimits()
     events: EventGate = EventGate()
+    core_position: CorePosition = CorePosition()
 
 
 class Schedule(BaseModel):

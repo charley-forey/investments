@@ -9,7 +9,7 @@ headline context beyond the stored Alpaca news stream.
 from __future__ import annotations
 
 from ..config import Config
-from ..cost import Usage, usage_from_response
+from ..cost import Usage, supports_adaptive_thinking, usage_from_response
 from ..data.intel import IntelStore
 from ..tools.assignment import web_search_tool_schema
 from . import prompts
@@ -66,10 +66,14 @@ def run_intel_session(client, config: Config, store: IntelStore,
         kwargs: dict = dict(
             model=model,
             max_tokens=max_tokens,
-            thinking={"type": "adaptive"},
             system=system,
             messages=messages,
         )
+        # `model` resolves through scoring_model, which is claude-haiku-4-5.
+        # Haiku 4.5 rejects adaptive thinking with a 400, and that 400 killed
+        # the digest silently from 2026-07-23 to 07-29.
+        if supports_adaptive_thinking(model):
+            kwargs["thinking"] = {"type": "adaptive"}
         effort = config.settings.agents.effort_for("intel")
         if effort:
             kwargs["output_config"] = {"effort": effort}
