@@ -686,12 +686,16 @@ class Orchestrator:
         circuit = (pl.drawdown_circuit_pct / 100.0) if pl.drawdown_circuit_pct > 0 else 0.15
         from .analytics.autocalibrate import size_multiplier
         from .analytics.sizing import drawdown_throttle
-        from .analytics.sweep import regime_size_multiplier
+        from .analytics.sweep import regime_size_multiplier, unvalidated_multiplier
 
         dd_mult = drawdown_throttle(dd, soft=circuit / 2, hard=circuit)
         cal_mult = size_multiplier(self.journal, draft.strategy_tag)
         reg_mult = regime_size_multiplier(
             self.journal, draft.strategy_tag, regime[0], regime[1])
+        # A tag with no backtest record anywhere is full size in every regime
+        # purely because nothing has measured it. Discount it to the sizing it
+        # would get if it had a record and failed.
+        reg_mult *= unvalidated_multiplier(self.journal, draft.strategy_tag)
         return dd_mult * cal_mult * reg_mult, dd_mult, cal_mult, reg_mult
 
     def _risk_size_option(self, draft: OrderProposal, account, report: CycleReport,

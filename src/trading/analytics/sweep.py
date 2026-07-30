@@ -633,6 +633,31 @@ def regime_size_multiplier(journal: Journal, tag: str,
                1.0 + (per_trade / REGIME_FLOOR_R) * (1.0 - REGIME_MIN_MULT))
 
 
+UNVALIDATED_MULT = 0.25
+
+
+def unvalidated_multiplier(journal: Journal, tag: str) -> float:
+    """0.25x for a strategy with NO backtest record at all, else 1.0.
+
+    `regime_size_multiplier` returns 1.0 for an unknown (tag, regime) because
+    absence of evidence must not shrink a position that other evidence supports.
+    Applied to a tag with no record ANYWHERE that rule inverts: the strategy is
+    full size in every regime precisely because nothing has ever measured it.
+
+    vol-premium is exactly that case -- it cannot be backtested (no options price
+    history), so it was the only tag tradeable in all eight regimes and the only
+    one available in up/calm, at full size, on no evidence. The `unproven`
+    lifecycle stage does not catch this: `live_size_scale` is applied only when
+    config.is_live, so in paper the stage gates at zero and never scales.
+    """
+    try:
+        if journal.get_state(f"backtest:{tag}") is None:
+            return UNVALIDATED_MULT
+    except Exception:
+        pass
+    return 1.0
+
+
 def regime_context(journal: Journal, trend: str | None, vol_state: str | None) -> str:
     """Per-strategy standing in the CURRENT regime, for the strategy prompt."""
     from .. import strategies as registry

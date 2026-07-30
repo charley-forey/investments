@@ -45,6 +45,46 @@ def run_cycle_safe(cycle: str) -> None:
         journal.close()
 
 
+def run_beta_hold_safe() -> None:
+    """Hold index beta while the tape is up/calm; flat otherwise.
+
+    Deterministic and LLM-free. Runs often enough to exit promptly when the regime
+    turns, because the entire thesis is that this edge exists in one cell only.
+    """
+    from .analytics.beta_hold import beta_proposal, plan_beta_hold
+    from .guardrails.engine import OrderPipeline
+    from .tools.market_context import market_regime
+
+    config = get_config()
+    if not config.limits.beta_hold.enabled:
+        return
+    journal = Journal(config.settings.paths.journal_db)
+    try:
+        broker = AlpacaBroker(config)
+        if not broker.market_open():
+            return
+        account = broker.get_account_state(journal)
+        symbol = config.limits.beta_hold.symbol
+        quote = broker.get_quote(symbol)
+        price = quote.mid or quote.last
+        reg = market_regime(broker)
+        plan = plan_beta_hold(config, journal, account, price,
+                              trend=reg.trend, vol_state=reg.vol_state)
+        if plan is None or not plan.acts:
+            log.info("beta hold: no action (%s)", plan.reason if plan else "disabled")
+            return
+        proposal = beta_proposal(plan, price)
+        result = OrderPipeline(config, journal, broker).process(
+            proposal, account, quote, market_is_open=True)
+        log.info("beta hold: %s %d %s -> %s (%s)", proposal.side, proposal.qty,
+                 plan.symbol, result.status, plan.reason)
+    except Exception:
+        log.exception("beta hold failed")
+        journal.heartbeat("beta_hold", status="error", detail="rebalance failed")
+    finally:
+        journal.close()
+
+
 def run_protect_safe() -> None:
     """Backstop: every position carries a live GTC stop. Runs at daemon start and
     before the close, so a cancelled/expired bracket leg can't leave a position
@@ -345,6 +385,14 @@ def build_scheduler():
     scheduler.add_job(run_protect_safe,
                       CronTrigger(day_of_week="mon-fri", hour="9", minute="32"),
                       id="protect_open", max_instances=1)
+    # Beta hold, every 30 minutes during the session. Frequent because leaving
+    # up/calm must close the position promptly -- the edge is one cell wide.
+    scheduler.add_job(run_beta_hold_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="9-15", minute="35"),
+                      id="beta_hold", max_instances=1)
+    scheduler.add_job(run_beta_hold_safe,
+                      CronTrigger(day_of_week="mon-fri", hour="9-15", minute="5"),
+                      id="beta_hold_half", max_instances=1)
     scheduler.add_job(run_protect_safe,
                       CronTrigger(day_of_week="mon-fri", hour="15", minute="55"),
                       id="protect", max_instances=1)

@@ -118,6 +118,19 @@ class EventGate(BaseModel):
     block_stock_entry_within_days: int = Field(default=0, ge=0)  # 0 = off
 
 
+class BetaHold(BaseModel):
+    """Index exposure in `up/calm` only — the one cell where no signal beats it.
+
+    Narrower than a passive core on purpose: it is flat in every other regime, so
+    it never competes with the overlay for capital where the overlay has measured
+    edge, and it carries no guardrail carve-outs.
+    """
+    enabled: bool = False
+    symbol: str = "SPY"
+    target_pct: float = Field(default=0.0, ge=0, le=100)   # % of equity while active
+    rebalance_band_pct: float = Field(default=3.0, gt=0)
+
+
 class Limits(BaseModel):
     mode: Literal["paper", "live"] = "paper"
     position: PositionLimits
@@ -134,6 +147,7 @@ class Limits(BaseModel):
     reconciliation: Reconciliation = Reconciliation()
     exits: ExitLimits = ExitLimits()
     events: EventGate = EventGate()
+    beta_hold: BetaHold = BetaHold()
 
 
 class Schedule(BaseModel):

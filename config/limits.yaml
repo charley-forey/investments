@@ -90,6 +90,17 @@ exits:
   trailing_pct: 8
   max_holding_days: null
   option_roll_dte: 7
+# Index exposure in up/calm ONLY -- the single regime where no signal beats simply
+# being long. Four different bet families (trend-long, trend-short, mean-reversion,
+# short-vol) all measure negative alpha there against an exposure-matched hold, over
+# ~3,000 trades each, because the benchmark in a quiet uptrend IS being long.
+# Flat in every other regime, so it never competes with the overlay where the
+# overlay has edge. Deterministic, no LLM, no guardrail carve-outs.
+beta_hold:
+  enabled: true
+  symbol: SPY
+  target_pct: 30
+  rebalance_band_pct: 3
 events:
   # Block a NEW STOCK entry within this many days of a binary event (FOMC/CPI/NFP/
   # PCE/GDP, or the name's own earnings). Exits and defined-risk verticals are never

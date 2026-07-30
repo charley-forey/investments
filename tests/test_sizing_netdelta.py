@@ -55,6 +55,11 @@ class TestVolSizing:
     def _orch(self, tmp_path, vol):
         config = make_config(portfolio=PortfolioLimits(vol_target_annual=0.15))
         journal = Journal(tmp_path / "j.db")
+        # Give the tag a backtest record so these tests measure the VOL-TARGETING
+        # math in isolation. Without one, unvalidated_multiplier correctly applies
+        # its 0.25x "no evidence anywhere" discount and swamps the number under
+        # test. That discount has its own coverage in test_unvalidated_sizing.py.
+        journal.set_state("backtest:x", '{"mean_alpha_r": 0.0, "regime": {}}')
         if vol is not None:
             journal.record_snapshot(cycle="intraday", symbol="NVDA", bid=100, ask=100,
                                     last=100, spread_bps=1.0,
