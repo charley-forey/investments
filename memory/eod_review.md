@@ -1,8 +1,13 @@
-# postclose note — 2026-07-24T20:30+00:00
+# postclose note — 2026-07-29T20:30+00:00
 
-Per-strategy performance:
-  news-impulse: 7 trades, win 0%, expectancy $-2.40 (after-tax $-1.71), gross $-16.83, maxDD $16.83
+Scored today: 7 round-trip lot(s), gross $+179.14
+
+Per-strategy performance (all-time, closed round trips):
+  news-impulse: 1 trades, win 0%, expectancy $-16.83 (after-tax $-11.95), gross $-16.83, maxDD $16.83
+  relative-strength-long: 1 trades, win 100%, expectancy $+179.14 (after-tax $+127.19), gross $+179.14, maxDD $0.00
   trend-pullback-long: 1 trades, win 0%, expectancy $-78.75 (after-tax $-55.91), gross $-78.75, maxDD $78.75
-Total realized: gross $-95.58, after-tax $-67.86
+Total realized: gross $+83.56, after-tax $+59.33
 
-Stages: news-impulse=paper; trend-pullback-long=paper
+Open positions: none (flat).
+
+Stages: news-impulse=unproven (default); relative-strength-long=unproven (default); trend-pullback-long=unproven (default)

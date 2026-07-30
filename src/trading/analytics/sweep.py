@@ -73,6 +73,18 @@ REGIME_MIN_MULT = 0.25          # floor on the regime size multiplier
 REGIME_FLOOR_R = 0.5            # alpha/trade at which the multiplier bottoms out
 _REGIME_WINDOW = 60             # closes needed to classify (compute_regime needs 50)
 
+# Below this alpha/trade the cell is not "worse", it is losing, and the right size
+# is zero rather than a quarter. Shrink-only sizing left the catastrophic cells
+# (sideways/elevated runs -1.05 to -2.29 R/trade across all five strategies) still
+# trading at 0.25x, which is a smaller loss, not a gain. Measured over the stored
+# sweep, gating instead of shrinking moves deployed alpha from ~+0.02 to ~+0.12
+# per trade while still taking 41-55% of the trades.
+#
+# Deliberately well inside the noise band rather than at 0.0: a cell that merely
+# fails to beat the benchmark is a sizing question, and only a clearly negative one
+# is a skip. REGIME_MIN_TRADES still applies, so a thin cell is never gated.
+REGIME_SKIP_BELOW_R = -0.05
+
 
 def regime_key(trend: str | None, vol_state: str | None) -> str | None:
     if not trend or not vol_state or "unknown" in (trend, vol_state):
@@ -424,6 +436,10 @@ def regime_size_multiplier(journal: Journal, tag: str,
     per_trade = float(rec.get("per_trade", 0.0))
     if per_trade >= 0:
         return 1.0
+    # Clearly negative and well sampled -> do not trade it. Sizing a losing cell
+    # down to 0.25x still loses; it just takes longer.
+    if per_trade < REGIME_SKIP_BELOW_R:
+        return 0.0
     # Per trade, not the total: the total scales with how much of the last decade a
     # regime happened to occupy, so `up/calm` would dominate purely by being common.
     # -0.5R per trade or worse bottoms out the multiplier; linear in between.

@@ -147,14 +147,16 @@ class TestRegimeConditioning:
                                 "passed": False, "regime": regime_payload}))
         return j
 
-    def test_negative_regime_scales_size_down(self, tmp_path):
+    def test_marginally_negative_regime_scales_size_down(self, tmp_path):
+        """Between REGIME_SKIP_BELOW_R and 0 the cell is a sizing question, not a
+        skip -- it underperforms the benchmark rather than losing money."""
         from trading.analytics.sweep import regime_size_multiplier
 
-        j = self._seed(tmp_path, {"up/calm": {"alpha": -796.5, "per_trade": -0.268,
+        j = self._seed(tmp_path, {"up/calm": {"alpha": -60.0, "per_trade": -0.04,
                                               "trades": 2978}})
         mult = regime_size_multiplier(j, "trend-pullback-long", "up", "calm")
         assert 0.25 <= mult < 1.0
-        assert mult == pytest.approx(1.0 + (-0.268 / 0.5) * 0.75, abs=1e-3)
+        assert mult == pytest.approx(1.0 + (-0.04 / 0.5) * 0.75, abs=1e-3)
 
     def test_positive_regime_is_full_size(self, tmp_path):
         from trading.analytics.sweep import regime_size_multiplier
@@ -163,16 +165,29 @@ class TestRegimeConditioning:
                                                 "trades": 1304}})
         assert regime_size_multiplier(j, "trend-pullback-long", "up", "normal") == 1.0
 
-    def test_multiplier_has_a_floor(self, tmp_path):
-        """sideways/elevated measured -1.85R/trade. Without a floor that is a
-        negative position size."""
-        from trading.analytics.sweep import REGIME_MIN_MULT, regime_size_multiplier
+    def test_clearly_losing_regime_gates_to_zero(self, tmp_path):
+        """sideways/elevated measured -1.85R/trade across every strategy. Shrinking
+        that to 0.25x still loses -- it just takes four times as long. Sized to zero
+        it becomes a skip, which is what the evidence supports.
+
+        Measured over the stored sweep, gating rather than shrinking moves deployed
+        alpha from ~+0.02 to ~+0.12 per trade while still taking 41-55% of trades."""
+        from trading.analytics.sweep import regime_size_multiplier
 
         j = self._seed(tmp_path, {"sideways/elevated": {"alpha": -738.2,
                                                         "per_trade": -1.85,
                                                         "trades": 399}})
         assert regime_size_multiplier(
-            j, "trend-pullback-long", "sideways", "elevated") == REGIME_MIN_MULT
+            j, "trend-pullback-long", "sideways", "elevated") == 0.0
+
+    def test_a_thin_losing_cell_is_never_gated(self, tmp_path):
+        """REGIME_MIN_TRADES still governs: a badly-sampled cell must not be able to
+        switch a strategy off entirely."""
+        from trading.analytics.sweep import regime_size_multiplier
+
+        j = self._seed(tmp_path, {"down/calm": {"alpha": -30.0, "per_trade": -3.0,
+                                                "trades": 9}})
+        assert regime_size_multiplier(j, "trend-pullback-long", "down", "calm") == 1.0
 
     def test_thin_sample_does_not_shrink_positions(self, tmp_path):
         """Absence of evidence is not evidence of absence: an under-sampled regime

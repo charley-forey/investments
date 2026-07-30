@@ -334,6 +334,30 @@ class Orchestrator:
                     self._record_reasoning(pid, session)
                     continue
 
+            # Backtested regime gate. Distinct from the graded-ledger check above:
+            # that one needs live evidence this system has barely accumulated, this
+            # one runs off 40,212 replayed trades and is available today. A zero
+            # multiplier means the cell is not merely worse, it loses -- sizing it
+            # to a quarter would just lose more slowly. Vetoed here rather than
+            # sized to zero downstream so the reason is legible, and vetoed BEFORE
+            # the risk review so a doomed setup does not also cost an LLM call.
+            if not draft.reduces_position:
+                from .analytics.sweep import regime_size_multiplier
+
+                if regime_size_multiplier(self.journal, draft.strategy_tag,
+                                          regime_trend, regime_vol) <= 0:
+                    report.vetoed += 1
+                    pid = self._journal_veto(draft, "regime_gate", risk_mod.RiskVerdict(
+                        verdict="veto",
+                        reason=f"{draft.strategy_tag} has clearly negative backtested "
+                               f"alpha in {regime_trend}/{regime_vol}; the sized "
+                               f"position is zero in this regime, so the trade is a "
+                               f"skip rather than a smaller bet",
+                        concerns=[],
+                    ))
+                    self._record_reasoning(pid, session)
+                    continue
+
             would_be_dt = self._would_be_day_trade(draft)
             verdict = self._review(
                 self.client, self.config, self.journal, self.broker, account, draft
@@ -583,13 +607,27 @@ class Orchestrator:
 
     def _risk_size(self, draft: OrderProposal, account, report: CycleReport,
                    *, regime: tuple = (None, None)) -> None:
-        """Clamp an opening stock buy to a volatility-targeted size (never larger than
-        the agent proposed), then scale by a drawdown throttle. Off when
-        portfolio.vol_target_annual is 0. Best-effort: no vol/price -> leave as-is."""
+        """Clamp an opening STOCK entry — long or short — to a volatility-targeted
+        size (never larger than the agent proposed), then scale by the drawdown
+        throttle, the auto-calibration multiplier and the regime multiplier. Off
+        when portfolio.vol_target_annual is 0. Best-effort: no vol/price -> leave
+        as-is.
+
+        Shorts were excluded by a `side != "buy"` guard that was harmless while the
+        registry was long-only, and became a hole the moment short tags existed:
+        an unconditioned short is the single most dangerous position this system
+        can hold, since its loss is unbounded and gaps do not respect stops.
+
+        Options are still handled separately below — their risk is the net debit,
+        not a share count, so vol-targeting a share quantity is meaningless for
+        them. They get the regime and drawdown conditioning via _risk_size_option.
+        """
         pl = self.config.limits.portfolio
         if pl.vol_target_annual <= 0:
             return
-        if draft.asset_class != "stock" or draft.side != "buy" or draft.reduces_position:
+        if draft.is_option:
+            return self._risk_size_option(draft, account, report, regime=regime)
+        if draft.asset_class != "stock" or draft.reduces_position:
             return
         vol = self._symbol_vol(draft.symbol)
         price = draft.limit_price or self._mark(draft.symbol)
@@ -602,6 +640,30 @@ class Orchestrator:
             target_annual_vol=pl.vol_target_annual,
             max_weight=self.config.limits.position.max_position_pct / 100.0,
         )
+        # Drawdown throttle x auto-calibration x regime. Regime conditioning scales
+        # risk into the cells where the sweep actually measured edge; 1.0 when the
+        # regime is unknown or under-sampled, because absence of evidence must not
+        # quietly shrink every position.
+        combined, dd_mult, cal_mult, reg_mult = self._conditioning_multiplier(
+            draft, account, regime)
+        sized = int(target * combined)
+        if sized < draft.qty:
+            old = draft.qty
+            draft.qty = max(sized, 0)
+            report.notes.append(
+                f"vol-sized {draft.symbol} {old:g}->{draft.qty:g} "
+                f"({'short, ' if draft.side == 'sell' else ''}vol {vol:.0%}"
+                + (f", cal x{cal_mult:g}" if cal_mult < 1.0 else "")
+                + (f", regime {regime[0]}/{regime[1]} x{reg_mult:.2f}"
+                   if reg_mult < 1.0 else "")
+                + (f", dd x{dd_mult:.2f}" if dd_mult < 1.0 else "") + ")"
+            )
+
+    def _conditioning_multiplier(self, draft: OrderProposal, account,
+                                 regime: tuple) -> tuple[float, float, float, float]:
+        """(combined, drawdown, calibration, regime) — the risk dials that apply to
+        any opening position regardless of instrument."""
+        pl = self.config.limits.portfolio
         dd = 0.0
         try:
             peak = float(self.journal.get_state("equity_peak", "0") or 0)
@@ -610,30 +672,48 @@ class Orchestrator:
         except Exception:
             pass
         circuit = (pl.drawdown_circuit_pct / 100.0) if pl.drawdown_circuit_pct > 0 else 0.15
-        # Auto-calibrated per-strategy sizing multiplier (<=1.0): scale into what
-        # the graded ledger shows works, out of what doesn't. Bounded in kv_state.
         from .analytics.autocalibrate import size_multiplier
-        cal_mult = size_multiplier(self.journal, draft.strategy_tag)
-        # Regime conditioning: the sweep measures each strategy against an
-        # exposure-matched passive hold IN EACH REGIME, and these strategies lose in
-        # strong uptrends while earning their keep in choppier tape. Scale risk into
-        # the regimes where the edge was actually measured. 1.0 when the regime is
-        # unknown or under-sampled -- absence of evidence must not shrink positions.
+        from .analytics.sizing import drawdown_throttle
         from .analytics.sweep import regime_size_multiplier
+
+        dd_mult = drawdown_throttle(dd, soft=circuit / 2, hard=circuit)
+        cal_mult = size_multiplier(self.journal, draft.strategy_tag)
         reg_mult = regime_size_multiplier(
             self.journal, draft.strategy_tag, regime[0], regime[1])
-        sized = int(target * drawdown_throttle(dd, soft=circuit / 2, hard=circuit)
-                    * cal_mult * reg_mult)
-        if sized < draft.qty:
-            old = draft.qty
-            draft.qty = max(sized, 0)
+        return dd_mult * cal_mult * reg_mult, dd_mult, cal_mult, reg_mult
+
+    def _risk_size_option(self, draft: OrderProposal, account, report: CycleReport,
+                          *, regime: tuple = (None, None)) -> None:
+        """Scale an opening option structure by the same risk dials as stock.
+
+        The lever is CONTRACT COUNT, not shares: a defined-risk spread's risk is the
+        net debit x 100 x contracts, so scaling every leg by the same factor shrinks
+        the risk proportionally and leaves the structure intact. Legs must move
+        together — scaling one side of a vertical turns it into something else.
+
+        Options previously bypassed all conditioning, which meant the one instrument
+        the prompt actively pushes was also the only one with no drawdown throttle,
+        no calibration and no regime sizing on it.
+        """
+        if draft.reduces_position or not draft.legs:
+            return
+        combined, _dd, cal_mult, reg_mult = self._conditioning_multiplier(
+            draft, account, regime)
+        if combined >= 1.0:
+            return
+        before = [leg.qty for leg in draft.legs]
+        # Round down but never below one contract: a spread scaled to zero is not a
+        # smaller trade, it is a malformed one. The regime GATE (multiplier 0) has
+        # already vetoed the genuinely unwanted case upstream.
+        for leg in draft.legs:
+            leg.qty = max(1, int(leg.qty * combined))
+        if [leg.qty for leg in draft.legs] != before:
             report.notes.append(
-                f"vol-sized {draft.symbol} {old:g}->{draft.qty:g} "
-                f"(vol {vol:.0%}"
+                f"option-sized {draft.symbol} {before}->{[l.qty for l in draft.legs]} "
+                f"(x{combined:.2f}"
                 + (f", cal x{cal_mult:g}" if cal_mult < 1.0 else "")
                 + (f", regime {regime[0]}/{regime[1]} x{reg_mult:.2f}"
-                   if reg_mult < 1.0 else "")
-                + (f", dd {dd:.0%}" if dd > 0 else "") + ")"
+                   if reg_mult < 1.0 else "") + ")"
             )
 
     def _symbol_vol(self, symbol: str) -> float | None:
