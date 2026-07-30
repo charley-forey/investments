@@ -85,6 +85,19 @@ _REGIME_WINDOW = 60             # closes needed to classify (compute_regime need
 # is a skip. REGIME_MIN_TRADES still applies, so a thin cell is never gated.
 REGIME_SKIP_BELOW_R = -0.05
 
+# Promotion gate. `mean_alpha_r` measures each strategy traded BLINDLY in every
+# regime, which is not the strategy we run — regime_size_multiplier is live, so the
+# deployed strategy skips its losing cells. Gating on the blind number denied full
+# size to all five strategies permanently (-1.70 to -2.50) and left every trade at
+# the `unproven` 0.25x forever, which is a 4x cap on profit that no amount of better
+# trade selection can lift.
+#
+# So gate on deployed alpha instead — but walk-forwarded, because picking the cells
+# that paid and then reporting that they paid is circular. Cell multipliers are
+# fitted on folds 0..k-1 and scored on fold k.
+MIN_OOS_ALPHA_PER_TRADE = 0.0
+MIN_OOS_FOLDS = 2               # at least two independent out-of-sample scorings
+
 
 def regime_key(trend: str | None, vol_state: str | None) -> str | None:
     if not trend or not vol_state or "unknown" in (trend, vol_state):
@@ -168,6 +181,83 @@ def _regime_alpha(acc: dict) -> dict:
     return out
 
 
+def _merge_acc(accs: list[dict]) -> dict:
+    """Sum several fold accumulators into one."""
+    out: dict = {}
+    for acc in accs:
+        for lab, d in acc.items():
+            tgt = out.setdefault(lab, {"r": 0.0, "trades": 0, "held": 0,
+                                       "bench_r": 0.0, "bars": 0})
+            for k in ("r", "trades", "held", "bench_r", "bars"):
+                tgt[k] += d.get(k, 0)
+    return out
+
+
+def _deployed_alpha_per_trade(train: dict, test: dict) -> tuple[float, int, int]:
+    """Alpha/trade of the strategy AS DEPLOYED, fitted on `train`, scored on `test`.
+
+    This is the number that should gate promotion. `mean_alpha_r` measures the
+    strategy traded blindly in every regime — which is not the strategy we run,
+    because regime_size_multiplier is live. Gating on the blind version denied full
+    size to all five strategies forever (measured -1.70 to -2.50), while the
+    conditioned version they actually run is positive.
+
+    Fitting the cell multipliers on earlier folds and scoring on a later one keeps
+    that honest: the sizing decision never sees the fold it is judged on. Without
+    this split the whole thing is circular — pick the cells that paid, then report
+    that the cells that paid, paid.
+
+    Returns (alpha_per_trade, trades_taken, trades_available).
+    """
+    train_stats = _regime_alpha(train)
+    alpha_total = 0.0
+    taken = available = 0
+    for lab, d in test.items():
+        bars, trades = d.get("bars", 0), d.get("trades", 0)
+        if not bars or not trades:
+            continue
+        available += trades
+        fitted = train_stats.get(lab)
+        # Unseen or thin in training -> full size, matching the live multiplier's
+        # "absence of evidence must not shrink positions" rule.
+        mult = 1.0
+        if fitted and fitted["trades"] >= REGIME_MIN_TRADES:
+            pt = fitted["per_trade"]
+            if pt < REGIME_SKIP_BELOW_R:
+                mult = 0.0
+            elif pt < 0:
+                mult = max(REGIME_MIN_MULT,
+                           1.0 + (pt / REGIME_FLOOR_R) * (1.0 - REGIME_MIN_MULT))
+        if mult <= 0:
+            continue
+        exposure = min(1.0, d["held"] / bars)
+        alpha_total += (d["r"] - d.get("bench_r", 0.0) * exposure) * mult
+        taken += trades
+    return (alpha_total / taken if taken else 0.0), taken, available
+
+
+def _walk_forward_oos(by_fold: list[dict]) -> tuple[float, int, int, int] | None:
+    """Fit the regime multipliers on folds 0..k-1, score fold k, average over k.
+
+    Returns (alpha_per_trade, folds_scored, trades_taken, trades_available), or
+    None when there is nothing out-of-sample to score.
+    """
+    scores: list[float] = []
+    taken = available = 0
+    for k in range(1, len(by_fold)):
+        train = _merge_acc(by_fold[:k])
+        if not train or not by_fold[k]:
+            continue
+        a, t, av = _deployed_alpha_per_trade(train, by_fold[k])
+        if av:
+            scores.append(a)
+            taken += t
+            available += av
+    if not scores:
+        return None
+    return sum(scores) / len(scores), len(scores), taken, available
+
+
 def _folds(bars, n_folds: int):
     """Same sequential split walk_forward uses, so the comparison lines up exactly."""
     size = len(bars) // n_folds
@@ -193,6 +283,13 @@ class TagResult:
     # regime key -> {"alpha": R above an exposure-matched passive hold in that
     # regime, "trades": n}. This is the payload regime conditioning runs on.
     regime: dict = field(default_factory=dict)
+    # The gating number: alpha/trade of the regime-conditioned strategy, with the
+    # cell multipliers fitted on earlier folds and scored on a later one. None when
+    # there were not enough folds or no regime labels — which blocks promotion.
+    oos_alpha_per_trade: float | None = None
+    oos_folds: int = 0            # how many out-of-sample scorings went into it
+    oos_trade_share: float | None = None   # fraction of trades the gate still takes
+    symbols_positive_oos: int = 0          # symbols positive under the deployed policy
     passed: bool = False
     promoted_from: str | None = None
     note: str = ""
@@ -201,12 +298,26 @@ class TagResult:
     def positive_fraction(self) -> float:
         return self.symbols_positive / self.symbols_tested if self.symbols_tested else 0.0
 
+    @property
+    def oos_positive_fraction(self) -> float:
+        """Share of symbols the REGIME-CONDITIONED strategy is positive on."""
+        return (self.symbols_positive_oos / self.symbols_tested
+                if self.symbols_tested else 0.0)
+
     def summary(self) -> str:
         if self.symbols_tested == 0:
             return f"{self.tag}: no data ({self.note})"
         verdict = "PASS" if self.passed else "fail"
-        line = (f"{self.tag}: {verdict} — {self.mean_alpha_r:+.1f}R vs buy-and-hold, "
-                f"{self.symbols_positive}/{self.symbols_tested} symbols beat it, "
+        # Lead with the gating number. mean_alpha_r stays visible because it is the
+        # blind-strategy baseline and the gap between the two IS the finding.
+        oos = ("n/a" if self.oos_alpha_per_trade is None
+               else f"{self.oos_alpha_per_trade:+.3f} R/trade over "
+                    f"{self.oos_folds} OOS fold(s)"
+                    + (f", takes {self.oos_trade_share:.0%} of trades"
+                       if self.oos_trade_share is not None else ""))
+        line = (f"{self.tag}: {verdict} — regime-conditioned OOS {oos}; "
+                f"{self.symbols_positive_oos}/{self.symbols_tested} symbols positive; "
+                f"blind {self.mean_alpha_r:+.1f}R vs buy-and-hold, "
                 f"{self.mean_r:+.3f} R/trade, {self.trades} trades")
         if self.promoted_from:
             line += f" — PROMOTED {self.promoted_from} -> paper"
@@ -271,7 +382,12 @@ def run_sweep(config: Config, journal: Journal, *, symbols: list[str] | None = N
     from ..data.bars import BarStore
 
     trail = config.limits.exits.trailing_pct
-    bt_kwargs = {"stop_pct": STOP_PCT}
+    # Shorts must be replayed or the bearish tags measure nothing: the engine
+    # defaults allow_shorts=False and silently flattens every -1, so
+    # trend-pullback-short and breakdown produced ZERO trades. It also means
+    # momentum-continuation — a deliberately two-sided signal — had only ever been
+    # measured long-only, i.e. not as the strategy the agent can actually propose.
+    bt_kwargs = {"stop_pct": STOP_PCT, "allow_shorts": True}
     if trail and trail > 0:
         # Mirror the live exit: a trailing stop and no resting target. Measured on
         # 2026-07-28 -- with a fixed target the trail never fires, so a sweep that
@@ -310,8 +426,18 @@ def run_sweep(config: Config, journal: Journal, *, symbols: list[str] | None = N
 
             per_symbol_r: list[float] = []
             per_symbol_alpha: list[float] = []
+            # symbol -> per-fold regime accumulators. Scored AFTER the loop, because
+            # the multipliers must be fitted on the POOLED cross-symbol history --
+            # that is what regime_size_multiplier reads live. Fitting per symbol
+            # leaves ~14 trades per cell, under REGIME_MIN_TRADES, so every cell
+            # falls back to full size and the "conditioned" number silently measures
+            # the unconditioned strategy.
+            sym_accs: dict[str, list[dict]] = {}
             by_fold: list[list[float]] = []
             regime_acc: dict = {}
+            # Same accumulation, kept per fold so the regime multipliers can be
+            # fitted on earlier folds and scored on a later one.
+            regime_by_fold: list[dict] = [{} for _ in range(n_folds)]
             for sym, bars in cache.items():
                 # Run the folds directly rather than via walk_forward: the alpha
                 # measure needs each fold's individual trades to compute exposure,
@@ -319,7 +445,12 @@ def run_sweep(config: Config, journal: Journal, *, symbols: list[str] | None = N
                 fold_rs: list[float] = []
                 fold_alphas: list[float] = []
                 sym_trades = 0
-                for seg in _folds(bars, n_folds):
+                # Per-symbol, per-fold regime accumulation. Needed so the breadth
+                # check can ask "how many symbols does the DEPLOYED strategy work
+                # on" -- asking it of the blind strategy would re-impose the very
+                # criterion this gate exists to replace.
+                sym_regime_by_fold: list[dict] = [{} for _ in range(n_folds)]
+                for fold_idx, seg in enumerate(_folds(bars, n_folds)):
                     try:
                         bt = run_backtest(seg, signal, **bt_kwargs)
                     except Exception:
@@ -334,10 +465,17 @@ def run_sweep(config: Config, journal: Journal, *, symbols: list[str] | None = N
                     fold_alphas.append(sum(rs) - benchmark)
                     if labels_by_date:
                         _accumulate_regime(regime_acc, seg, bt.trades, labels_by_date)
+                        if fold_idx < len(regime_by_fold):
+                            _accumulate_regime(regime_by_fold[fold_idx], seg,
+                                               bt.trades, labels_by_date)
+                            _accumulate_regime(sym_regime_by_fold[fold_idx], seg,
+                                               bt.trades, labels_by_date)
 
                 if sym_trades < MIN_TRADES_PER_SYMBOL or not fold_alphas:
                     continue
                 alpha = sum(fold_alphas) / len(fold_alphas)
+
+                sym_accs[sym] = sym_regime_by_fold
 
                 for k, a in enumerate(fold_alphas):
                     while len(by_fold) <= k:
@@ -361,15 +499,59 @@ def run_sweep(config: Config, journal: Journal, *, symbols: list[str] | None = N
             res.mean_alpha_r = sum(per_symbol_alpha) / len(per_symbol_alpha)
             res.fold_alpha = [round(sum(f) / len(f), 2) for f in by_fold if f]
             res.regime = _regime_alpha(regime_acc)
-            res.passed = (strat.proposable
-                          and res.mean_alpha_r > MIN_MEAN_ALPHA_R
-                          and res.positive_fraction >= MIN_POSITIVE_FRACTION)
+
+            # Walk-forward the regime conditioning: fit the cell multipliers on
+            # folds 0..k-1, score fold k. Averaged over every k>=1 this is the
+            # out-of-sample alpha of the strategy AS DEPLOYED, and it is what gates
+            # promotion — `mean_alpha_r` measures a blind strategy nobody runs.
+            agg = _walk_forward_oos(regime_by_fold)
+            if agg is not None:
+                _alpha, folds_scored, taken, available = agg
+                res.oos_folds = folds_scored
+                res.oos_trade_share = round(taken / available, 3) if available else None
+                # Per symbol, scored with the pooled fit -- exactly what live does.
+                per_symbol_oos = []
+                for sym, folds in sym_accs.items():
+                    scores = []
+                    for k in range(1, len(folds)):
+                        train = _merge_acc(regime_by_fold[:k])   # POOLED, past only
+                        if not train or not folds[k]:
+                            continue
+                        a, _t, av = _deployed_alpha_per_trade(train, folds[k])
+                        if av:
+                            scores.append(a)
+                    if scores:
+                        per_symbol_oos.append(sum(scores) / len(scores))
+                # Mean across SYMBOLS, matching how mean_alpha_r is computed, so a
+                # single heavily-traded name cannot carry the number.
+                if per_symbol_oos:
+                    res.oos_alpha_per_trade = round(
+                        sum(per_symbol_oos) / len(per_symbol_oos), 4)
+                    res.symbols_positive_oos = sum(1 for a in per_symbol_oos if a > 0)
+
+            # No out-of-sample number means no promotion. Falling back to the pooled
+            # measure would reinstate the gate that has denied full size to
+            # everything since it was written; falling back to "pass" would give
+            # size away for free. Absence of evidence keeps the strategy at
+            # `unproven`, which is the honest default.
+            res.passed = (
+                strat.proposable
+                and res.oos_alpha_per_trade is not None
+                and res.oos_folds >= MIN_OOS_FOLDS
+                and res.oos_alpha_per_trade > MIN_OOS_ALPHA_PER_TRADE
+                # Breadth, measured on the DEPLOYED strategy. `positive_fraction`
+                # counts symbols where the BLIND strategy beat buy-and-hold, so
+                # using it here would smuggle back the criterion this gate exists
+                # to replace -- and it is why every strategy still read "fail"
+                # while scoring positive out-of-sample.
+                and res.oos_positive_fraction >= MIN_POSITIVE_FRACTION
+            )
 
             if res.passed and promote:
                 stage_before = lifecycle.get_stage(journal, strat.tag)
                 change = lifecycle.promote_after_backtest(
-                    journal, strat.tag, res.mean_alpha_r,
-                    min_expectancy=MIN_MEAN_ALPHA_R)
+                    journal, strat.tag, res.oos_alpha_per_trade,
+                    min_expectancy=MIN_OOS_ALPHA_PER_TRADE)
                 if change:
                     res.promoted_from = stage_before
                     report.promoted.append(strat.tag)
@@ -395,6 +577,10 @@ def _persist(journal: Journal, res: TagResult) -> None:
         "passed": res.passed,
         "fold_alpha": res.fold_alpha,
         "regime": res.regime,
+        "oos_alpha_per_trade": res.oos_alpha_per_trade,
+        "oos_folds": res.oos_folds,
+        "oos_trade_share": res.oos_trade_share,
+        "symbols_positive_oos": res.symbols_positive_oos,
     }))
 
 
