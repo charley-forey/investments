@@ -424,6 +424,71 @@ def cmd_sweep(args) -> int:
     return 0
 
 
+def cmd_reconcile(args) -> int:
+    """Compare the journal's open lots to the broker's positions, and optionally
+    force them to agree.
+
+    Exists because this was done by hand, twice, against the live database on the
+    night of 2026-07-30 -- when a multi-leg sync bug had left the journal holding
+    two option contracts the broker did not, realized P&L reading $0 on a -$395
+    day, and every downstream statistic computed from the wrong book. Ad-hoc SQL
+    at 4am is not a recovery procedure.
+    """
+    from .broker.alpaca import AlpacaBroker
+    from .broker.sync import find_drift, repair_drift, sync_fills
+
+    config = get_config()
+    journal = _journal()
+    broker = AlpacaBroker(config)
+
+    # Real fills beat any adjustment, and most drift is simply an unsynced fill.
+    if not args.no_sync:
+        try:
+            rep = sync_fills(config, journal, broker)
+            print(f"sync: orders={rep.orders_seen} fills={rep.fills_recorded} "
+                  f"lots+{rep.lots_opened}/-{rep.lots_closed}")
+        except Exception as e:
+            print(f"sync failed ({e}); reconciling against what is on the books")
+
+    drifts = find_drift(config, journal, broker)
+    if not drifts:
+        print("CLEAN — journal open lots match broker positions")
+        if journal.get_state("reconcile_halt"):
+            journal.set_state("reconcile_halt", "")
+            print("cleared a stale reconcile halt")
+        return 0
+
+    print(f"\n{len(drifts)} drift(s):")
+    for d in drifts:
+        print(f"  {d.symbol:24} broker={d.broker_qty:>8g}  journal={d.journal_qty:>8g}"
+              f"  delta={d.delta:>+8g}  ({d.asset_class})")
+
+    if not args.repair:
+        print("\nDry run. Re-run with --repair to force the journal to match the "
+              "broker.\nThe broker is the authority: it holds the real positions "
+              "and the real cash.")
+        return 1
+
+    def mark_for(symbol: str):
+        try:
+            q = (broker.get_option_quote(symbol) if len(symbol) > 10
+                 else broker.get_quote(symbol))
+            return q.mid or q.last
+        except Exception:
+            return None
+
+    actions = repair_drift(config, journal, broker, drifts, mark_for=mark_for)
+    print("\nrepaired:")
+    for a in actions:
+        print(f"  {a}")
+    print("\nAdjustments are tagged 'reconcile-adjustment' and marked at the "
+          "CURRENT price,\nso the P&L lands in the right total but on the wrong "
+          "day. That is the honest\nlimit of repairing after the fact.")
+    remaining = find_drift(config, journal, broker)
+    print(f"\n{'CLEAN' if not remaining else str(len(remaining)) + ' drift(s) remain'}")
+    return 0 if not remaining else 1
+
+
 def _load_bars_for(symbol, days):
     """Prefer the persisted bar store; fall back to a live broker fetch.
 
@@ -862,6 +927,15 @@ def main(argv: list[str] | None = None) -> int:
     sw.add_argument("--dry-run", action="store_true",
                     help="report only; do not promote any strategy")
     sw.set_defaults(fn=cmd_sweep)
+
+    rc = sub.add_parser("reconcile",
+                        help="compare journal lots to broker positions; --repair to fix")
+    rc.add_argument("--repair", action="store_true",
+                    help="force the journal to match the broker (writes adjustments)")
+    rc.add_argument("--no-sync", action="store_true",
+                    help="skip the fill sync first (default syncs, since real fills "
+                         "beat any adjustment)")
+    rc.set_defaults(fn=cmd_reconcile)
 
     tx = sub.add_parser("tax", help="tax accounting: wash sales, realized gains, harvesting")
     tx.add_argument("action", choices=["wash", "report", "export", "harvest"])

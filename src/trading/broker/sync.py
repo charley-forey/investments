@@ -413,6 +413,95 @@ def _recorded_stop(journal: Journal, symbol: str) -> float | None:
     return float(row["stop_price"]) if row and row["stop_price"] else None
 
 
+@dataclass
+class Drift:
+    symbol: str
+    broker_qty: float
+    journal_qty: float
+    asset_class: str
+
+    @property
+    def delta(self) -> float:
+        """What the journal is missing. Positive = journal must gain exposure."""
+        return self.broker_qty - self.journal_qty
+
+
+def find_drift(config: Config, journal: Journal, broker) -> list[Drift]:
+    """Every symbol where journal open lots disagree with broker positions.
+
+    Same comparison `_reconcile` halts on, exposed so it can be reported and
+    repaired rather than only warned about.
+    """
+    state = broker.get_account_state(journal)
+    tol = config.limits.reconciliation.tolerance_shares
+    broker_pos = {p.symbol.upper(): p for p in state.positions}
+    journal_qty: dict[str, float] = {}
+    classes: dict[str, str] = {}
+    for lot in journal.open_lots():
+        sym = lot["symbol"].upper()
+        journal_qty[sym] = journal_qty.get(sym, 0) + lot["qty"]
+        classes[sym] = lot["asset_class"] if "asset_class" in lot else "stock"
+    for sym, p in broker_pos.items():
+        classes.setdefault(sym, getattr(p, "asset_class", "stock"))
+
+    out = []
+    for sym in set(broker_pos) | set(journal_qty):
+        b = broker_pos[sym].qty if sym in broker_pos else 0.0
+        j = journal_qty.get(sym, 0.0)
+        symbol_tol = 0.0 if classes.get(sym) == "option" else tol
+        if abs(b - j) > symbol_tol:
+            out.append(Drift(sym, b, j, classes.get(sym, "stock")))
+    return sorted(out, key=lambda d: d.symbol)
+
+
+def repair_drift(config: Config, journal: Journal, broker, drifts: list[Drift],
+                 *, mark_for) -> list[str]:
+    """Force journal open lots to match broker positions. Returns what it did.
+
+    The broker is the authority: it holds the actual positions and the actual
+    cash. When the two disagree the journal is wrong by definition, and every
+    downstream number -- expectancy, per-strategy stats, lifecycle demotion,
+    auto-calibration -- is being computed from the wrong book.
+
+    Adjustments are tagged `reconcile-adjustment` so they can never be mistaken
+    for a strategy's own record. They are marked at the CURRENT price, which
+    means the P&L lands in the right total but on the wrong day; that is the
+    honest limit of repairing after the fact, and it is why this is a manual
+    command rather than something the daemon does silently.
+
+    Run `sync_fills` FIRST. Real fills are always better than an adjustment, and
+    most drift is just an unsynced fill.
+    """
+    from datetime import datetime, timezone
+
+    actions: list[str] = []
+    now = datetime.now(timezone.utc)
+    for d in drifts:
+        price = mark_for(d.symbol)
+        if price is None or price <= 0:
+            actions.append(f"{d.symbol}: SKIPPED (no usable mark)")
+            continue
+        mult = 100.0 if d.asset_class == "option" else 1.0
+        # Reuse the fill router rather than branching on delta's sign. Doing it by
+        # hand got this wrong: a journal short of -10 against a flat broker has a
+        # POSITIVE delta (+10), which reads as "open a long" and would have added
+        # exposure instead of covering. _apply_fill already closes opposing
+        # exposure first and only opens with the remainder, which is the same
+        # problem this is.
+        side = "buy" if d.delta > 0 else "sell"
+        _apply_fill(journal, d.symbol, side, abs(d.delta), price, now,
+                    strategy_tag="reconcile-adjustment", multiplier=mult,
+                    asset_class=d.asset_class, proposal_id=None)
+        actions.append(
+            f"{d.symbol}: {side} {abs(d.delta):g} @ {price:.2f} "
+            f"(journal {d.journal_qty:+g} -> broker {d.broker_qty:+g})")
+    if actions:
+        journal.set_state("reconcile_halt", "")
+        journal.heartbeat("reconcile", status="warn",
+                          detail=f"REPAIRED {len(actions)} drift(s)")
+    return actions
+
+
 def _reconcile(config: Config, journal: Journal, broker, report: SyncReport) -> None:
     """Compare journal open-lot quantities to broker positions. Drift beyond the
     tolerance is a warning and — if configured — trips a halt flag that blocks new
