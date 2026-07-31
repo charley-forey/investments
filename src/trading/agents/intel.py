@@ -62,48 +62,34 @@ def run_intel_session(client, config: Config, store: IntelStore,
     max_iters = max(1, config.settings.agents.max_tool_iterations // 5)
     digest = ""
 
+    # Same provider routing as the other two loops, so `scoring_model` may name a
+    # gpt-* model. Adaptive thinking / effort translation lives in the adapter --
+    # this loop no longer needs to know that Haiku 4.5 rejects adaptive thinking,
+    # the 400 that killed the digest silently from 2026-07-23 to 07-29.
+    from .providers import provider_for_model
+
+    provider = provider_for_model(model, client)
+    effort = config.settings.agents.effort_for("intel")
+
     for _ in range(max_iters):
-        kwargs: dict = dict(
-            model=model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=messages,
-        )
-        # `model` resolves through scoring_model, which is claude-haiku-4-5.
-        # Haiku 4.5 rejects adaptive thinking with a 400, and that 400 killed
-        # the digest silently from 2026-07-23 to 07-29.
-        if supports_adaptive_thinking(model):
-            kwargs["thinking"] = {"type": "adaptive"}
-        effort = config.settings.agents.effort_for("intel")
-        if effort:
-            kwargs["output_config"] = {"effort": effort}
-        if tools:
-            kwargs["tools"] = tools
-        response = client.messages.create(**kwargs)
+        turn = provider.create(
+            model=model, system=system, tools=tools, messages=messages,
+            max_tokens=max_tokens, effort=effort,
+            web_search=resolved.web_search,
+            web_search_max_uses=resolved.web_search_max_uses)
         if usage is not None:
-            usage.add(usage_from_response(response))
-            usage.web_searches += sum(
-                1 for b in response.content
-                if getattr(b, "type", None) == "server_tool_use"
-                and getattr(b, "name", "") == "web_search"
-            )
+            usage.add(turn.usage)
+            usage.web_searches += turn.web_searches
+        if turn.text:
+            digest = turn.text.strip()
 
-        text_parts = [b.text for b in response.content if getattr(b, "type", None) == "text"]
-        if text_parts:
-            digest = "\n".join(text_parts).strip()
-
-        # Server-side web_search: Anthropic executes it; we just continue the loop
-        # if the model still wants client tools (intel has none) or pause_turn.
-        if response.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": response.content})
+        # web_search is server-side on both providers: the search already ran, so
+        # there are no client tool results to send back. Echo the turn and nudge.
+        if turn.stop_reason == "pause_turn":
+            provider.append_assistant(messages, turn)
             continue
-        if response.stop_reason == "tool_use":
-            # Only server tools expected; append assistant content and continue
-            # so the model can finish after search results already in the turn.
-            messages.append({"role": "assistant", "content": response.content})
-            # No client tool_results to send; if only server tools ran, Anthropic
-            # usually ends with end_turn on a subsequent call once we echo.
-            # Nudge completion:
+        if turn.stop_reason == "tool_use":
+            provider.append_assistant(messages, turn)
             messages.append({
                 "role": "user",
                 "content": "Continue and produce the final digest now.",

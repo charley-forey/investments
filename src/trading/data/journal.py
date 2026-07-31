@@ -275,6 +275,14 @@ class Journal:
         if "cache_write_1h_tokens" not in usage_cols:
             self.conn.execute(
                 "ALTER TABLE usage ADD COLUMN cache_write_1h_tokens INTEGER NOT NULL DEFAULT 0")
+        # Billed inside output_tokens, but it is the number that decides a provider
+        # comparison -- gpt-5.6-luna spends ~3x terra's output on reasoning, and
+        # whether that matters depends entirely on the per-token price. Second time
+        # a field was added to the cost model and not to the table; the ledger is
+        # the only place it can actually be checked.
+        if "reasoning_tokens" not in usage_cols:
+            self.conn.execute(
+                "ALTER TABLE usage ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0")
         # target_price on proposals: without it, reward:risk — the thing that made
         # expectancy negative — cannot be measured on the proposals table at all.
         prop_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(proposals)")}
@@ -857,14 +865,17 @@ class Journal:
         self, *, cycle: str | None, agent: str, model: str,
         input_tokens: int, output_tokens: int, cache_read_tokens: int, cost_usd: float,
         cache_write_tokens: int = 0, cache_write_1h_tokens: int = 0,
+        reasoning_tokens: int = 0,
     ) -> None:
         self.conn.execute(
             """INSERT INTO usage
                (ts, cycle, agent, model, input_tokens, output_tokens,
-                cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, cost_usd)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                cache_read_tokens, cache_write_tokens, cache_write_1h_tokens,
+                reasoning_tokens, cost_usd)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
             (utcnow(), cycle, agent, model, input_tokens, output_tokens,
-             cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, cost_usd),
+             cache_read_tokens, cache_write_tokens, cache_write_1h_tokens,
+             reasoning_tokens, cost_usd),
         )
         self.conn.commit()
 

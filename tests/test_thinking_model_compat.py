@@ -85,4 +85,8 @@ def test_intel_session_keeps_thinking_on_a_capable_model(config, tmp_path):
     client = RecordingClient()
     run_intel_session(client, config, IntelStore(tmp_path / "intel.db"))
 
-    assert client.calls[0]["thinking"] == {"type": "adaptive"}
+    # `display: summarized` since intel moved onto the shared provider adapter --
+    # same thinking config as every other Anthropic agent. Costs nothing extra;
+    # thinking is billed identically whether or not a summary is returned.
+    assert client.calls[0]["thinking"] == {"type": "adaptive",
+                                           "display": "summarized"}

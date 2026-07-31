@@ -925,6 +925,7 @@ class Orchestrator:
             cache_read_tokens=usage.cache_read_tokens, cost_usd=cost_usd,
             cache_write_tokens=getattr(usage, "cache_write_tokens", 0),
             cache_write_1h_tokens=getattr(usage, "cache_write_1h_tokens", 0),
+            reasoning_tokens=getattr(usage, "reasoning_tokens", 0),
         )
 
     def _arm_plan(self, draft: OrderProposal, verdict) -> int:
@@ -1084,7 +1085,11 @@ class Orchestrator:
                     self.client, self.config, self.journal, self.broker, account,
                     usage=spent,
                 )
-                self._record_usage("postclose", "scoring", spent, report)
+                # Explicit: scoring resolves model_for("scoring") with NO cycle,
+                # so re-resolving here with one prices it at the cycle's model.
+                self._record_usage(
+                    "postclose", "scoring", spent, report,
+                    model=self.config.settings.agents.model_for("scoring"))
                 report.notes.append(f"{len(lessons)} lessons recorded")
             except Exception as e:
                 report.notes.append(f"scoring agent failed: {e}")
@@ -1111,7 +1116,12 @@ class Orchestrator:
                 spent = cost.Usage()
                 if self._run_curation(spent):
                     report.notes.append("refreshed market-intel digest")
-                self._record_usage(cycle, "intel", spent, report)
+                # intel runs on the cheap tier via model_for("scoring"). Metered
+                # as the cycle model it was a 10x over-charge once those diverged
+                # (luna $0.20/$1.20 recorded at terra's $2.00/$12.00).
+                self._record_usage(
+                    cycle, "intel", spent, report,
+                    model=self.config.settings.agents.model_for("scoring"))
             except Exception as e:
                 report.notes.append(f"intel curation failed: {e}")
         session = self._run_strategy(

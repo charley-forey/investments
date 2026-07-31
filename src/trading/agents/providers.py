@@ -154,23 +154,28 @@ def _instructions(system) -> str:
     return str(system)
 
 
-def _openai_tools(tools: list[dict]) -> list[dict]:
-    """Anthropic tool schemas -> OpenAI function tools.
+def _openai_tools(tools: list[dict], *, web_search: bool = False) -> list[dict]:
+    """Anthropic tool schemas -> OpenAI tools.
 
     `input_schema` becomes `parameters`; everything else is the same JSON Schema.
-    Anthropic's server-side web_search has no equivalent here and is dropped
-    rather than faked -- a silently missing capability is worse than an absent one.
+    Anthropic's server-side web_search block is replaced with OpenAI's own
+    server-side `web_search` rather than dropped -- the intel agent has NO other
+    tools, so losing it would have quietly reduced the market digest to a summary
+    of already-stored text. That capability is not optional: it is the only reason
+    the digest knows anything the journal does not.
     """
     out = []
     for t in tools:
         if "input_schema" not in t:
-            continue  # server-side tool (web_search); no OpenAI counterpart
+            continue  # server-side tool; handled below
         out.append({
             "type": "function",
             "name": t["name"],
             "description": t.get("description", ""),
             "parameters": t["input_schema"],
         })
+    if web_search:
+        out.append({"type": "web_search"})
     return out
 
 
@@ -181,28 +186,16 @@ class OpenAIProvider(Provider):
     def __init__(self, client):
         self.client = client
 
-    _warned_web_search = False
-
     def create(self, *, model, system, tools, messages, max_tokens, effort,
                web_search=False, web_search_max_uses=0):
         import json
-        import logging
-
-        # Anthropic's server-side web_search has no counterpart here and is dropped
-        # by _openai_tools. Say so once rather than letting a role quietly lose a
-        # capability -- that is how the market digest died for six days.
-        if web_search and web_search_max_uses > 0 and not OpenAIProvider._warned_web_search:
-            OpenAIProvider._warned_web_search = True
-            logging.getLogger(__name__).warning(
-                "web_search is unavailable on %s (OpenAI); this role is running "
-                "without it. Keep web_search-dependent roles on an Anthropic model.",
-                model)
 
         kwargs = dict(model=model, instructions=_instructions(system), input=messages,
                       max_output_tokens=max_tokens)
         if effort:
             kwargs["reasoning"] = {"effort": effort}
-        ot = _openai_tools(tools or [])
+        ot = _openai_tools(tools or [],
+                           web_search=bool(web_search and web_search_max_uses > 0))
         if ot:
             kwargs["tools"] = ot
         resp = self.client.responses.create(**kwargs)
@@ -223,7 +216,13 @@ class OpenAIProvider(Provider):
 
         turn = Turn(usage=usage, raw=resp.output, text=(resp.output_text or "").strip())
         for item in resp.output or []:
-            if getattr(item, "type", None) == "function_call":
+            itype = getattr(item, "type", None)
+            if itype == "web_search_call":
+                # Server-side and billed per call, like Anthropic's. Counted so it
+                # reaches the daily cap rather than running off-book.
+                turn.web_searches += 1
+                continue
+            if itype == "function_call":
                 try:
                     args = json.loads(item.arguments or "{}")
                 except (ValueError, TypeError):

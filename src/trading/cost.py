@@ -58,6 +58,13 @@ def supports_adaptive_thinking(model: str) -> bool:
 # Anthropic server-side web_search: $10 per 1,000 searches, billed on top of tokens.
 # Invisible to the token ledger, so it used to be spent entirely off-book — 72
 # strategy sessions on 2026-07-28 could each run up to `web_search_max_uses`.
+#
+# UNVERIFIED FOR OPENAI. Their server-side web_search is also billed per call, but
+# the rate was not supplied with the token pricing, so searches on a gpt-* model
+# are currently charged at Anthropic's rate. That is a placeholder, not a fact:
+# it keeps the spend on-book rather than invisible, which is the failure that
+# matters, but the number will be wrong until someone checks. Intel runs 2-5
+# searches per digest, so the error is bounded at a few cents a day.
 WEB_SEARCH_USD = 0.01
 
 
