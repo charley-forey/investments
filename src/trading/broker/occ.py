@@ -34,7 +34,16 @@ def build_occ(underlying: str, expiry: date, right: str, strike: float) -> str:
 def parse_occ(occ: str, underlying: str | None = None) -> OccParts:
     """Parse an OCC symbol. If `underlying` is given it's stripped as the root;
     otherwise the root is inferred as the leading alphabetic characters before
-    the 6-digit date."""
+    the 6-digit date.
+
+    Non-string input raises ValueError like any other unparseable symbol. It used
+    to raise AttributeError on `.strip()`, which callers guarding `except
+    ValueError` did not catch -- and a multi-leg parent order carries
+    `symbol=None`, so one of those aborted the entire fill-sync loop on every
+    cycle from the first options trade onward.
+    """
+    if not isinstance(occ, str) or not occ.strip():
+        raise ValueError(f"not an OCC symbol: {occ!r}")
     occ = occ.strip().upper()
     if underlying:
         root = underlying.upper()

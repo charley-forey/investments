@@ -33,6 +33,10 @@ class SyncReport:
 def _parse_ts(value) -> datetime:
     if isinstance(value, datetime):
         return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+    if value is None:
+        # Sorts first rather than raising: used to order fills, and an order with
+        # no timestamp at all must not be able to abort a sync.
+        return datetime.min.replace(tzinfo=timezone.utc)
     return datetime.fromisoformat(str(value))
 
 
@@ -52,7 +56,7 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
                         config=RetryConfig(retries=2))
     newest = since
     terminal = {"canceled", "cancelled", "rejected", "expired", "done_for_day"}
-    for order in orders:
+    for order in _expand_legs(orders):
         report.orders_seen += 1
         updated = _parse_ts(getattr(order, "updated_at", None) or getattr(order, "submitted_at"))
         newest = max(newest, updated)
@@ -161,6 +165,50 @@ def _classify(symbol: str) -> tuple[str, float, str]:
         return "option", 100.0, symbol.upper()
     except ValueError:
         return "stock", 1.0, symbol.upper()
+
+
+class _Leg:
+    """A multi-leg child presented as a standalone order.
+
+    Legs carry their own symbol, side, fill quantity and price, but the
+    `client_order_id` that attributes a fill back to its proposal lives on the
+    PARENT. Without inheriting it every option fill loses its strategy tag and
+    falls back to a symbol heuristic.
+    """
+
+    def __init__(self, leg, parent):
+        self._leg, self._parent = leg, parent
+
+    def __getattr__(self, name):
+        val = getattr(self._leg, name, None)
+        if val is None and name in ("client_order_id", "submitted_at", "updated_at"):
+            return getattr(self._parent, name, None)
+        return val
+
+
+def _expand_legs(orders):
+    """Yield tradeable orders, replacing multi-leg parents with their legs.
+
+    An MLEG parent has `symbol=None` and no fills of its own -- the fills are on
+    the legs. Passing the parent through meant `_classify(None)` blew up and took
+    the entire sync loop with it, so from the first vertical onward NO fills were
+    recorded at all: no lot closes, no realized P&L, no reconciliation.
+    """
+    expanded = []
+    for order in orders:
+        legs = getattr(order, "legs", None) or []
+        if legs and not getattr(order, "symbol", None):
+            expanded.extend(_Leg(leg, order) for leg in legs)
+        else:
+            expanded.append(order)
+    # Chronological. Lot pairing is order-dependent: a close processed before its
+    # open has nothing to close, so it opens opposing exposure instead and the
+    # position ends up doubled with the P&L split across the wrong rows. The
+    # broker does not promise ordering here.
+    expanded.sort(key=lambda o: _parse_ts(
+        getattr(o, "filled_at", None) or getattr(o, "updated_at", None)
+        or getattr(o, "submitted_at", None)))
+    return expanded
 
 
 def _apply_fill(journal: Journal, symbol: str, side: str, qty: float, price: float,
