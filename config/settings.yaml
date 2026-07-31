@@ -76,6 +76,20 @@ agents:
   risk_model: null
   scoring_model: claude-haiku-4-5
   redteam_model: null
+  # A gpt-* id here routes that cycle to OpenAI; anything else goes to Anthropic.
+  # The model id is the entire switch -- no other flag, and the loop, guardrails
+  # and journal are identical either way.
+  #
+  # Measured 2026-07-31 on identical live sessions:
+  #   agent loop   gpt-5.6-terra $0.0186  vs opus-4.8 $0.0924  (5.0x cheaper)
+  #   risk review  gpt-5.6-terra $0.0397  vs opus-4.8 $0.1537  (3.9x)
+  # and 2026-07-30's real volumes repriced: luna $0.54, terra $5.44, sol $13.60
+  # against opus-4.8's $13.74. Most of that gap is the cache write premium
+  # ($7.61 of that day), which OpenAI does not charge.
+  #
+  # Left on Anthropic pending a live A/B on DECISION quality, not price. Cheaper
+  # per token has twice been more expensive per decision in this codebase. Note
+  # web_search is Anthropic-only, so any role that needs it must stay here.
   model_by_cycle:
     intraday: claude-opus-4-8
     premarket: claude-opus-4-8

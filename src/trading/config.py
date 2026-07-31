@@ -304,6 +304,7 @@ class Secrets(BaseModel):
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
     anthropic_api_key: str = ""
+    openai_api_key: str = ""
     discord_webhook_url: str = ""
 
     @property
@@ -339,6 +340,7 @@ def load_config(root: Path | None = None) -> Config:
         alpaca_api_key=os.getenv(f"{prefix}_API_KEY", ""),
         alpaca_secret_key=os.getenv(f"{prefix}_SECRET_KEY", ""),
         anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", ""),
+        openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         discord_webhook_url=os.getenv("DISCORD_WEBHOOK_URL", ""),
     )
     config = Config(limits=limits, settings=settings, secrets=secrets)

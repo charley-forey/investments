@@ -96,87 +96,53 @@ def run_agent(
     reasoning_parts: list[str] = []
     tool_calls: list = []
 
+    # Which vendor answers is decided by the model id alone, so `model_by_cycle` in
+    # settings.yaml is the whole switch. The loop below is identical either way --
+    # it was already provider-agnostic in shape; only the encoding differed.
+    from .providers import provider_for_model
+
+    provider = provider_for_model(model, client)
+
     while iterations < max_iterations:
         iterations += 1
 
-        def _create():
-            kwargs = dict(
-                model=model,
-                max_tokens=max_tokens,
-                system=system,
-                messages=messages,
-            )
-            # Gated on the resolved model, not hardcoded: adaptive thinking is a
-            # 400 on Haiku 4.5 and older, and any role that resolves to one of
-            # those would fail every call. See supports_adaptive_thinking.
-            if supports_adaptive_thinking(model):
-                # summarized so the agent's reasoning can be captured for
-                # transparency (the raw chain of thought is never exposed).
-                kwargs["thinking"] = {"type": "adaptive", "display": "summarized"}
-            if effort:
-                kwargs["output_config"] = {"effort": effort}
-            if tools:
-                kwargs["tools"] = tools
-            return client.messages.create(**kwargs)
+        turn = with_retry(
+            lambda: provider.create(
+                model=model, system=system, tools=tools, messages=messages,
+                max_tokens=max_tokens, effort=effort,
+                web_search=web_search, web_search_max_uses=web_search_max_uses),
+            config=RetryConfig(retries=2))
 
-        response = with_retry(_create, config=RetryConfig(retries=2))
-        total_usage.add(usage_from_response(response))
-        for block in response.content:
-            if getattr(block, "type", None) == "thinking":
-                t = getattr(block, "thinking", "")
-                if t:
-                    reasoning_parts.append(t)
+        total_usage.add(turn.usage)
+        total_usage.web_searches += turn.web_searches
+        if turn.reasoning:
+            reasoning_parts.append(turn.reasoning)
+        if turn.text:
+            final_text = turn.text
 
-        if response.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": response.content})
+        if turn.stop_reason == "pause_turn":
+            provider.append_assistant(messages, turn)
             continue
 
-        text_parts = [b.text for b in response.content if b.type == "text"]
-        if text_parts:
-            final_text = "\n".join(text_parts)
-
-        if response.stop_reason != "tool_use":
-            # Still journal any server-side searches that completed this turn.
-            for block in response.content:
-                if (getattr(block, "type", None) == "server_tool_use"
-                        and getattr(block, "name", "") == WEB_SEARCH):
-                    total_usage.web_searches += 1
-                    tool_calls.append({
-                        "name": WEB_SEARCH,
-                        "input": getattr(block, "input", None) or {},
-                    })
-            stop_reason = response.stop_reason or "end_turn"
+        if turn.stop_reason != "tool_use":
+            stop_reason = turn.stop_reason or "end_turn"
             break
 
-        messages.append({"role": "assistant", "content": response.content})
+        provider.append_assistant(messages, turn)
         tool_results = []
         called = []
-        for block in response.content:
-            btype = getattr(block, "type", None)
-            if btype == "server_tool_use" and getattr(block, "name", "") == WEB_SEARCH:
-                called.append(WEB_SEARCH)
-                total_usage.web_searches += 1
-                tool_calls.append({
-                    "name": WEB_SEARCH,
-                    "input": getattr(block, "input", None) or {},
-                })
-                continue
-            if btype != "tool_use":
-                continue
-            result = registry.dispatch(block.name, block.input or {})
-            called.append(block.name)
-            tool_calls.append({"name": block.name, "input": block.input or {}})
-            tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": block.id,
-                    "content": result,
-                    "is_error": result.startswith("error:"),
-                }
-            )
+        for call in turn.tool_calls:
+            result = registry.dispatch(call.name, call.input)
+            called.append(call.name)
+            tool_calls.append({"name": call.name, "input": call.input})
+            tool_results.append({
+                "call_id": call.call_id,
+                "content": result,
+                "is_error": result.startswith("error:"),
+            })
         if tool_results:
-            messages.append({"role": "user", "content": tool_results})
-            _roll_cache_breakpoint(messages)
+            provider.append_tool_results(messages, tool_results)
+            provider.roll_cache_breakpoint(messages)
         if journal is not None and called:
             journal.heartbeat(f"agent:{agent_name}", detail=f"tools: {', '.join(called)}")
 

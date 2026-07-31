@@ -16,11 +16,30 @@ PRICING: dict[str, tuple[float, float]] = {
     "claude-sonnet-5": (3.0, 15.0),
     "claude-sonnet-4-6": (3.0, 15.0),
     "claude-haiku-4-5": (1.0, 5.0),
+    # OpenAI GPT-5.6, rates supplied 2026-07-31.
+    "gpt-5.6-luna": (0.20, 1.20),
+    "gpt-5.6-terra": (2.00, 12.00),
+    "gpt-5.6-sol": (5.00, 30.00),
 }
 _DEFAULT = (5.0, 25.0)
 _CACHE_READ_MULT = 0.1
 _CACHE_WRITE_MULT = 1.25   # 5-minute TTL
 _CACHE_WRITE_1H_MULT = 2.0  # 1-hour TTL, used for the frozen system+tools prefix
+
+# OpenAI prices cached input as an explicit rate rather than a multiple of input,
+# and -- the structurally important part -- charges NOTHING to populate the cache.
+# Anthropic's write premium was $7.61 of a $13.74 day on 2026-07-30, so this is
+# most of the difference between the providers, not the headline token rates.
+_OPENAI_CACHED_INPUT: dict[str, float] = {
+    "gpt-5.6-luna": 0.02,
+    "gpt-5.6-terra": 0.20,
+    "gpt-5.6-sol": 0.50,
+}
+
+
+def provider_for(model: str) -> str:
+    """'openai' | 'anthropic'. Model id is the only routing signal there is."""
+    return "openai" if (model or "").startswith("gpt-") else "anthropic"
 
 # Models that accept `thinking={"type": "adaptive"}`. Older models require
 # {"type": "enabled", "budget_tokens": N} and return 400 on adaptive -- which is
@@ -49,6 +68,11 @@ class Usage:
     cache_read_tokens: int = 0
     cache_write_tokens: int = 0        # 5-minute TTL writes
     cache_write_1h_tokens: int = 0     # 1-hour TTL writes, billed at 2x not 1.25x
+    # Already counted inside output_tokens and billed as output. Tracked separately
+    # because it is the number that decides a provider comparison: gpt-5.6-luna
+    # spent 516 of 602 output tokens reasoning on a probe where terra spent 107,
+    # and whether that matters depends entirely on the per-token price.
+    reasoning_tokens: int = 0
     web_searches: int = 0
 
     def add(self, other: "Usage") -> None:
@@ -57,6 +81,7 @@ class Usage:
         self.cache_read_tokens += other.cache_read_tokens
         self.cache_write_tokens += other.cache_write_tokens
         self.cache_write_1h_tokens += other.cache_write_1h_tokens
+        self.reasoning_tokens += other.reasoning_tokens
         self.web_searches += other.web_searches
 
 
@@ -88,8 +113,26 @@ def split_cost(usage: Usage, model: str) -> tuple[float, float]:
     The three input counts are disjoint: the API reports `input_tokens` as the
     uncached remainder, so total prompt = input + cache_write + cache_read. Cache
     writes bill at 1.25x input and are the easiest cost to miss entirely — every
-    cycle writes the cached system prompt."""
+    cycle writes the cached system prompt.
+
+    OpenAI bills the same three counts on a different shape: cached input has its
+    own published rate rather than a multiple of input, and populating the cache
+    is FREE. So `cache_write_tokens` there is simply ordinary input -- not a
+    premium -- which is why the provider gap is much wider than the headline token
+    rates suggest.
+    """
     in_rate, out_rate = PRICING.get(model, _DEFAULT)
+    if provider_for(model) == "openai":
+        cached_rate = _OPENAI_CACHED_INPUT.get(model, in_rate * _CACHE_READ_MULT)
+        input_cost = (
+            (usage.input_tokens
+             + usage.cache_write_tokens
+             + usage.cache_write_1h_tokens) * in_rate
+            + usage.cache_read_tokens * cached_rate
+        ) / 1_000_000
+        # Reasoning tokens are already inside output_tokens on the Responses API
+        # and are billed as output; they are tracked separately for visibility.
+        return input_cost, usage.output_tokens * out_rate / 1_000_000
     input_cost = (
         usage.input_tokens * in_rate
         + usage.cache_write_tokens * in_rate * _CACHE_WRITE_MULT

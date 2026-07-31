@@ -136,75 +136,56 @@ def review_proposal(
     if resolved.web_search:
         tools.append(web_search_tool_schema(resolved.web_search_max_uses))
 
+    # Provider chosen by model id, exactly as in runner.py, so `risk_model` may
+    # name a gpt-* model without anything else here changing.
+    from .providers import provider_for_model
+
+    provider = provider_for_model(review_model, client)
+    effort = config.settings.agents.effort_for(agent_name)
+
     for _ in range(config.settings.agents.max_tool_iterations):
-        create_kwargs: dict = dict(
-            model=review_model,
-            max_tokens=config.settings.agents.max_tokens,
-            system=system,
-            messages=messages,
-        )
-        if supports_adaptive_thinking(review_model):
-            create_kwargs["thinking"] = {"type": "adaptive"}
-        effort = config.settings.agents.effort_for(agent_name)
-        if effort:
-            create_kwargs["output_config"] = {"effort": effort}
-        if tools:
-            create_kwargs["tools"] = tools
-        response = client.messages.create(**create_kwargs)
-        spent.add(usage_from_response(response))
+        turn = provider.create(
+            model=review_model, system=system, tools=tools, messages=messages,
+            max_tokens=config.settings.agents.max_tokens, effort=effort,
+            web_search=resolved.web_search,
+            web_search_max_uses=resolved.web_search_max_uses)
+        spent.add(turn.usage)
         # Counted here rather than in the dispatch branch below so searches on a
         # turn that ends without tool_use are still billed to us.
-        spent.web_searches += sum(
-            1 for b in response.content
-            if getattr(b, "type", None) == "server_tool_use"
-            and getattr(b, "name", "") == "web_search"
-        )
-        if response.stop_reason == "pause_turn":
-            messages.append({"role": "assistant", "content": response.content})
+        spent.web_searches += turn.web_searches
+        if turn.stop_reason == "pause_turn":
+            provider.append_assistant(messages, turn)
             continue
-        if response.stop_reason != "tool_use":
+        if turn.stop_reason != "tool_use":
             break
-        messages.append({"role": "assistant", "content": response.content})
+        provider.append_assistant(messages, turn)
         results = []
         called = []
-        for block in response.content:
-            btype = getattr(block, "type", None)
-            if btype == "server_tool_use" and getattr(block, "name", "") == "web_search":
-                called.append("web_search")
-                continue
-            if btype != "tool_use":
-                continue
-            out = registry.dispatch(block.name, block.input or {})
-            called.append(block.name)
-            results.append({
-                "type": "tool_result", "tool_use_id": block.id,
-                "content": out, "is_error": out.startswith("error:"),
-            })
+        for call in turn.tool_calls:
+            out = registry.dispatch(call.name, call.input)
+            called.append(call.name)
+            results.append({"call_id": call.call_id, "content": out,
+                            "is_error": out.startswith("error:")})
         if journal is not None and called:
             journal.heartbeat(f"agent:{agent_name}", detail=f"tools: {', '.join(called)}")
         if results:
-            messages.append({"role": "user", "content": results})
+            provider.append_tool_results(messages, results)
             # Same fix runner.py already had: without it only the ~470-token
             # system prompt was cached and the whole growing transcript was
             # re-billed at full rate on each of up to 25 iterations, plus again
             # on the final verdict call. Risk sat at 28% cache hit vs strategy's
-            # 71%.
-            _roll_cache_breakpoint(messages)
+            # 71%. (No-op on OpenAI, which caches without breakpoints.)
+            provider.roll_cache_breakpoint(messages)
 
     # Constrained final verdict.
     messages.append({
         "role": "user",
         "content": "Now output your final verdict as JSON matching the schema.",
     })
-    final = client.messages.create(
-        model=review_model,
-        max_tokens=2000,
-        system=system,
-        messages=messages,
-        output_config={"format": {"type": "json_schema", "schema": VERDICT_SCHEMA}},
-    )
-    spent.add(usage_from_response(final))
-    text = next((b.text for b in final.content if b.type == "text"), "{}")
+    text, verdict_usage = provider.create_json(
+        model=review_model, system=system, messages=messages,
+        schema=VERDICT_SCHEMA, max_tokens=2000)
+    spent.add(verdict_usage)
     data = json.loads(text)
     return RiskVerdict(
         verdict=data.get("verdict", "veto"),
