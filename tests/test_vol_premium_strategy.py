@@ -109,3 +109,30 @@ def test_scan_warns_about_selling_into_an_event(journal):
     agent has to apply itself."""
     _snap(journal, "RICH", 92.0, 0.10)
     assert "binary event" in scan_context(journal, "sideways")
+
+
+# -- liquidity: the richest premium is often the least tradeable ---------------
+
+def test_a_known_untradeable_chain_is_excluded(journal):
+    """NET led this scan at 98% IV rank on 2026-07-30 with an ATM spread of
+    1,788bps. No credit clears that, so the agent spent a whole session
+    rediscovering it. Underlying spread is not a usable proxy -- NET's was
+    7.75bps -- so the filter uses the chain's own measurement."""
+    from trading.scanner.vol_premium import MAX_ATM_SPREAD_BPS
+
+    _snap(journal, "WIDE", 95.0, 0.10)
+    journal.set_state("atm_spread_bps:WIDE", str(MAX_ATM_SPREAD_BPS + 1))
+    assert scan_context(journal, "sideways") == ""
+
+
+def test_a_tight_chain_is_kept(journal):
+    _snap(journal, "TIGHT", 95.0, 0.10)
+    journal.set_state("atm_spread_bps:TIGHT", "35.0")
+    assert "TIGHT" in scan_context(journal, "sideways")
+
+
+def test_an_unmeasured_chain_is_still_shown(journal):
+    """Absence of evidence is not evidence of a bad market -- a name whose chain
+    has never been read must not be silently hidden forever."""
+    _snap(journal, "NEW", 95.0, 0.10)
+    assert "NEW" in scan_context(journal, "sideways")

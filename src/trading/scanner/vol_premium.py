@@ -15,6 +15,10 @@ LOW_IV_RANK = 30.0
 # Minimum recent move before a sideways tape gives a directional lean. Below this
 # the mean-reversion read is noise and there is no side worth picking.
 MIN_STRETCH = 0.03
+# ATM option spread above which a credit cannot clear the 2x cost hurdle. Recorded
+# by get_options_chain when a chain is read; unknown means "not yet measured", not
+# "bad". 300bps is already generous -- the liquid megacap chains run 10-40bps.
+MAX_ATM_SPREAD_BPS = 300.0
 
 _TREND_DIR = {"up": "bullish", "down": "bearish"}
 
@@ -84,6 +88,18 @@ def scan_context(journal, regime_trend: str | None, *, limit: int = 5) -> str:
 
     picks = []
     for r in rows:
+        sym = str(r["symbol"]).upper()
+        # Skip chains already known to be untradeable. Ranking on IV rank alone
+        # surfaces the richest premium, which is frequently the least liquid --
+        # NET led this scan at 98% rank on 2026-07-30 with an ATM spread of
+        # 1,788bps, and no credit clears that. Unknown spread still gets shown:
+        # absence of evidence is not evidence of a bad market.
+        try:
+            known = journal.get_state(f"atm_spread_bps:{sym}")
+            if known and float(known) > MAX_ATM_SPREAD_BPS:
+                continue
+        except (TypeError, ValueError):
+            pass
         stretch = None
         try:
             feats = _json.loads(r["features_json"] or "{}")
@@ -101,8 +117,9 @@ def scan_context(journal, regime_trend: str | None, *, limit: int = 5) -> str:
     if not picks:
         return ""
     lines = ["Vol-premium read (short-vol / mean-reverting — the one strategy here "
-             "that is NOT a trend bet; check the chain before acting, and never sell "
-             "premium into a binary event):"]
+             "that is NOT a trend bet; names with a known-untradeable ATM spread are "
+             "already excluded, but confirm the chain, and never sell premium into a "
+             "binary event):"]
     for sym, rank, (mode, direction) in picks:
         verb = "sell premium" if mode == "credit" else "buy premium"
         lines.append(f"  {sym}: IV rank {rank:.0f}% — {verb}, "

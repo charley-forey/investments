@@ -466,6 +466,18 @@ class ToolRegistry:
 
         sig = chain_signals(rows, realized_vol)
         rank = iv_rank(sig.atm_iv, self._atm_iv_history(symbol))
+        # Remember how tradeable this chain was. The vol-premium scan ranks on IV
+        # rank alone, and the richest IV is often the least liquid: on 2026-07-30
+        # it put NET top at 98% rank, and the agent then spent a session
+        # discovering an ATM spread of 1,788bps that no credit could clear.
+        # Underlying spread is not a usable proxy (NET's was 7.75bps), so the only
+        # honest source is the chain itself.
+        if sig.atm_spread_bps is not None:
+            try:
+                self.ctx.journal.set_state(f"atm_spread_bps:{symbol}",
+                                           f"{sig.atm_spread_bps:.1f}")
+            except Exception:
+                pass
         head = f"{symbol} spot ~{spot:.2f} — {sig.summary()}"
         if rank is not None:
             head += f"; IV rank {rank:.0f}%"
