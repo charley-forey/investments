@@ -627,42 +627,54 @@ class Journal:
     ) -> dict:
         """Close `qty` units of a lot. If qty >= the lot's size, closes it fully;
         otherwise splits off a closed child lot and reduces the remainder — so
-        partial exits produce correct per-lot basis and realized P&L."""
+        partial exits produce correct per-lot basis and realized P&L.
+
+        SHORT lots carry a NEGATIVE qty. `qty` here is always a magnitude, and the
+        sign of the lot decides the sign of the P&L: covering a short below its
+        open price is a gain, because (close - open) is negative and lot_qty is
+        negative too. Without this a sold-to-open leg had nowhere to live at all —
+        the short side of both option verticals on 2026-07-30 was recorded
+        nowhere, and the day's -$395 never reached the ledger.
+        """
         row = self.conn.execute("SELECT * FROM tax_lots WHERE id=?", (lot_id,)).fetchone()
         if row is None or row["close_ts"] is not None:
             raise ValueError(f"lot {lot_id} not open")
         lot_qty = row["qty"]
+        sign = 1.0 if lot_qty >= 0 else -1.0
+        take = abs(qty)
         close_ts = ts or utcnow()
         opened = datetime.fromisoformat(row["open_ts"])
         holding_days = (datetime.fromisoformat(close_ts) - opened).days
         term = "long" if holding_days > long_term_days else "short"
         mult = (row["multiplier"] if "multiplier" in row.keys() else 1.0) or 1.0
 
-        if qty >= lot_qty - 1e-9:
+        if take >= abs(lot_qty) - 1e-9:
             realized = (price - row["open_price"]) * lot_qty * mult
             self.conn.execute(
                 "UPDATE tax_lots SET close_ts=?, close_price=?, realized_pnl=?, term=? WHERE id=?",
                 (close_ts, price, realized, term, lot_id),
             )
             self.conn.commit()
-            return {"realized_pnl": realized, "term": term, "qty_closed": lot_qty,
+            return {"realized_pnl": realized, "term": term, "qty_closed": abs(lot_qty),
                     "child_lot_id": lot_id}
 
-        # Partial: closed child row for `qty`, parent keeps the remainder.
-        realized = (price - row["open_price"]) * qty * mult
+        # Partial: closed child row for `take`, parent keeps the remainder. Both
+        # keep the parent's sign so a partially-covered short stays a short.
+        realized = (price - row["open_price"]) * (take * sign) * mult
         pid = row["proposal_id"] if "proposal_id" in row.keys() else None
         cur = self.conn.execute(
             """INSERT INTO tax_lots
                (symbol, qty, open_ts, open_price, close_ts, close_price, realized_pnl,
                 term, strategy_tag, multiplier, asset_class, proposal_id)
                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-            (row["symbol"], qty, row["open_ts"], row["open_price"], close_ts, price,
-             realized, term, row["strategy_tag"], mult,
+            (row["symbol"], take * sign, row["open_ts"], row["open_price"], close_ts,
+             price, realized, term, row["strategy_tag"], mult,
              row["asset_class"] if "asset_class" in row.keys() else "stock", pid),
         )
-        self.conn.execute("UPDATE tax_lots SET qty=? WHERE id=?", (lot_qty - qty, lot_id))
+        self.conn.execute("UPDATE tax_lots SET qty=? WHERE id=?",
+                          (lot_qty - take * sign, lot_id))
         self.conn.commit()
-        return {"realized_pnl": realized, "term": term, "qty_closed": qty,
+        return {"realized_pnl": realized, "term": term, "qty_closed": take,
                 "child_lot_id": int(cur.lastrowid)}
 
     def open_lots(self, symbol: str | None = None) -> list[dict]:

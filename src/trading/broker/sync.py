@@ -108,20 +108,17 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
                             slippage_bps=slippage)
         report.fills_recorded += 1
 
-        if side == "buy":
-            journal.open_lot(symbol=lot_symbol, qty=delta, price=price,
+        applied = _apply_fill(journal, lot_symbol, side, delta, price, updated,
                              strategy_tag=tag, multiplier=multiplier,
                              asset_class=asset_class, proposal_id=proposal_id)
-            report.lots_opened += 1
-        else:
-            closed = _close_lots_hifo(journal, lot_symbol, delta, price, updated)
-            report.lots_closed += closed["closed"]
-            if closed["day_trade"]:
-                journal.conn.execute(
-                    "UPDATE orders SET is_day_trade=1 WHERE id=?", (order_id,)
-                )
-                journal.conn.commit()
-                report.day_trades_flagged += 1
+        report.lots_opened += applied["opened"]
+        report.lots_closed += applied["closed"]
+        if applied["day_trade"]:
+            journal.conn.execute(
+                "UPDATE orders SET is_day_trade=1 WHERE id=?", (order_id,)
+            )
+            journal.conn.commit()
+            report.day_trades_flagged += 1
 
         # Advance the recorded-qty watermark to the cumulative filled qty.
         journal.set_state(f"synced_qty:{broker_id}", str(filled_qty))
@@ -166,13 +163,62 @@ def _classify(symbol: str) -> tuple[str, float, str]:
         return "stock", 1.0, symbol.upper()
 
 
-def _close_lots_hifo(journal: Journal, symbol: str, qty: float, price: float,
-                     close_dt: datetime) -> dict:
-    """Close open lots highest-cost-first to minimize realized gain, splitting the
-    final lot if the sell quantity doesn't consume it whole. Returns the count of
-    lot-closings and whether any closed lot was opened the same day (day trade)."""
+def _apply_fill(journal: Journal, symbol: str, side: str, qty: float, price: float,
+                close_dt: datetime, *, strategy_tag, multiplier: float,
+                asset_class: str, proposal_id) -> dict:
+    """Route a fill to the right lot operation, in BOTH directions.
+
+    `side == "sell"` used to mean "close long lots" unconditionally. A sell with
+    no open lot -- a sell-to-OPEN -- therefore closed nothing and was recorded
+    nowhere. That is the short leg of every credit spread and every stock short,
+    so on 2026-07-30 both option verticals had their short side vanish from the
+    ledger entirely: the journal showed two naked long calls/puts it did not own,
+    realized P&L of $0, and the day's -$395 existed only in the equity number.
+
+    The rule is direction-agnostic: a fill first CLOSES whatever opposing exposure
+    exists, and any remainder OPENS new exposure on its own side. Shorts are
+    negative-qty lots.
+    """
     lots = journal.open_lots(symbol)
-    lots.sort(key=lambda lot: lot["open_price"], reverse=True)  # HIFO
+    # A buy closes short lots (negative qty); a sell closes long lots.
+    closing_shorts = side == "buy"
+    opposing = sum(abs(l["qty"]) for l in lots
+                   if (l["qty"] < 0) == closing_shorts)
+    out = {"opened": 0, "closed": 0, "day_trade": False}
+
+    to_close = min(qty, opposing)
+    if to_close > 1e-9:
+        res = _close_lots_hifo(journal, symbol, to_close, price, close_dt,
+                               closing_shorts=closing_shorts)
+        out["closed"] += res["closed"]
+        out["day_trade"] = res["day_trade"]
+
+    remainder = qty - to_close
+    if remainder > 1e-9:
+        journal.open_lot(symbol=symbol,
+                         qty=remainder if side == "buy" else -remainder,
+                         price=price, strategy_tag=strategy_tag,
+                         multiplier=multiplier, asset_class=asset_class,
+                         proposal_id=proposal_id)
+        out["opened"] += 1
+    return out
+
+
+def _close_lots_hifo(journal: Journal, symbol: str, qty: float, price: float,
+                     close_dt: datetime, *, closing_shorts: bool = False) -> dict:
+    """Close open lots highest-cost-first to minimize realized gain, splitting the
+    final lot if the quantity doesn't consume it whole. Returns the count of
+    lot-closings and whether any closed lot was opened the same day (day trade).
+
+    `closing_shorts` covers short exposure instead: those lots carry a negative
+    qty, and the cheapest-opened short is closed first, which is the same
+    gain-minimising intent mirrored (a short opened low has the smallest gain when
+    covered).
+    """
+    lots = [l for l in journal.open_lots(symbol)
+            if (l["qty"] < 0) == closing_shorts]
+    # HIFO for longs; mirrored (lowest-first) for shorts -- same intent either way.
+    lots.sort(key=lambda lot: lot["open_price"], reverse=not closing_shorts)
     remaining = qty
     closed = 0
     day_trade = False
@@ -182,7 +228,8 @@ def _close_lots_hifo(journal: Journal, symbol: str, qty: float, price: float,
         opened = _parse_ts(lot["open_ts"])
         if opened.date() == close_dt.date():
             day_trade = True
-        take = min(remaining, lot["qty"])
+        # Magnitudes: a short lot's qty is negative, and close_lot_qty takes a size.
+        take = min(remaining, abs(lot["qty"]))
         journal.close_lot_qty(lot["id"], qty=take, price=price, ts=close_dt.isoformat())
         remaining -= take
         closed += 1
@@ -330,14 +377,25 @@ def _reconcile(config: Config, journal: Journal, broker, report: SyncReport) -> 
     tol = config.limits.reconciliation.tolerance_shares
     broker_qty = {p.symbol: p.qty for p in state.positions}
     journal_qty: dict[str, float] = {}
+    option_symbols: set[str] = set()
     for lot in journal.open_lots():
         journal_qty[lot["symbol"]] = journal_qty.get(lot["symbol"], 0) + lot["qty"]
+        if (lot["asset_class"] if "asset_class" in lot else "stock") == "option":
+            option_symbols.add(lot["symbol"])
+    for p in state.positions:
+        if getattr(p, "asset_class", "stock") == "option":
+            option_symbols.add(p.symbol)
 
     mismatches = []
     for symbol in set(broker_qty) | set(journal_qty):
         b = broker_qty.get(symbol, 0)
         j = journal_qty.get(symbol, 0)
-        if abs(b - j) > tol:
+        # Share tolerance exists for fractional-share drift on STOCK. One option
+        # contract is 100 shares of exposure, so tolerating "1" there tolerates a
+        # whole position: on 2026-07-30 the journal held 1 contract the broker did
+        # not, abs(0-1) was not > 1, and the halt never fired.
+        symbol_tol = 0.0 if symbol in option_symbols else tol
+        if abs(b - j) > symbol_tol:
             msg = f"{symbol}: broker={b:g} journal_lots={j:g}"
             mismatches.append(msg)
             report.reconciliation_warnings.append(msg)

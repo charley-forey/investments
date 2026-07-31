@@ -1,6 +1,6 @@
-# postclose note — 2026-07-29T20:30+00:00
+# postclose note — 2026-07-30T20:30+00:00
 
-Scored today: 7 round-trip lot(s), gross $+179.14
+Scored today: 0 round-trip lot(s), gross $+0.00
 
 Per-strategy performance (all-time, closed round trips):
   news-impulse: 1 trades, win 0%, expectancy $-16.83 (after-tax $-11.95), gross $-16.83, maxDD $16.83

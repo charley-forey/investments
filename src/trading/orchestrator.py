@@ -38,6 +38,11 @@ _BILLING_RETRY_MINUTES = 30.0
 # The share now derives from how much of the session is actually left, so spend
 # spreads across it by construction. The floor stops a quiet morning from handing
 # one hour an unbounded allowance.
+# How long to wait before re-attempting an exit that left no resting order. Short
+# enough that a breached stop is still chased, long enough that a failing
+# submission cannot produce 39 proposals in 35 minutes (2026-07-30, MSFT).
+_EXIT_RETRY_MINUTES = 5.0
+
 _MIN_HOURLY_BUDGET_SHARE = 0.15
 # Reserved for the postclose learning cycle, which shares this budget and lost
 # every contest against intraday: it ran at cost=$0.000 on 07-29 and has not
@@ -551,6 +556,8 @@ class Orchestrator:
             if q is None:
                 continue
             side = "sell" if pos.qty > 0 else "buy"
+            if self._exit_already_in_flight(act.symbol, side):
+                continue
             proposal = OrderProposal(
                 agent="exit_manager", strategy_tag="deterministic_exit",
                 symbol=act.symbol, asset_class="stock", side=side, qty=abs(pos.qty),
@@ -564,6 +571,44 @@ class Orchestrator:
                 report.notes.append(f"exit {act.symbol} ({act.reason}): {res.status}")
             except Exception as e:
                 report.notes.append(f"exit {act.symbol} failed: {e}")
+
+    def _exit_already_in_flight(self, symbol: str, side: str) -> bool:
+        """True when an exit for this symbol is already working or was just tried.
+
+        Exit rules re-evaluate every cycle, and a breached stop stays breached
+        until the position is gone -- so without this the same close is proposed
+        once a minute forever. On 2026-07-30 a single MSFT option stop produced
+        **39 proposals in 35 minutes**, 34 of them left dangling, while the
+        position stayed open the whole time.
+
+        Two conditions, because they fail differently:
+        * A resting order on the closing side means the exit is live; re-sending
+          stacks duplicate orders against the same position.
+        * A recent attempt that produced no resting order means submission failed.
+          Retrying instantly just fails again, so back off briefly -- but DO retry,
+          because a stop that gives up is worse than one that never fired.
+        """
+        try:
+            for o in self.broker.list_open_orders():
+                if str(getattr(o, "symbol", "")).upper() != symbol.upper():
+                    continue
+                o_side = str(getattr(o, "side", "")).lower()
+                if side in o_side:
+                    return True
+        except Exception:
+            pass  # never block an exit because the order book could not be read
+        key = f"exit_attempt:{symbol.upper()}:{side}"
+        last = self.journal.get_state(key)
+        now = datetime.now(timezone.utc)
+        if last:
+            try:
+                age_min = (now - datetime.fromisoformat(last)).total_seconds() / 60.0
+                if age_min < _EXIT_RETRY_MINUTES:
+                    return True
+            except (TypeError, ValueError):
+                pass
+        self.journal.set_state(key, now.isoformat())
+        return False
 
     def _close_option(self, pos, act, account, report: CycleReport, market_open: bool) -> None:
         """Execute a defined-risk close of one option position through the guardrail
@@ -585,6 +630,8 @@ class Orchestrator:
         if qty <= 0:
             return
         side = "sell" if pos.qty > 0 else "buy"
+        if self._exit_already_in_flight(pos.symbol, side):
+            return
 
         limit = None
         premium = abs(pos.market_value) / (qty * 100) if qty else 0.0  # mark fallback
