@@ -924,6 +924,7 @@ class Orchestrator:
             input_tokens=usage.input_tokens, output_tokens=usage.output_tokens,
             cache_read_tokens=usage.cache_read_tokens, cost_usd=cost_usd,
             cache_write_tokens=getattr(usage, "cache_write_tokens", 0),
+            cache_write_1h_tokens=getattr(usage, "cache_write_1h_tokens", 0),
         )
 
     def _arm_plan(self, draft: OrderProposal, verdict) -> int:

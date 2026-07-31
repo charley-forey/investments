@@ -113,15 +113,35 @@ def signal_for(tag: str):
     return fn() if fn is not None else None
 
 
+# Tags `propose_vertical` synthesizes as "{mode}-{right}-vertical". They are not
+# registry strategies -- there is no options price history to backtest them
+# against -- but they are legitimate and must pass validation.
+_SYNTHESIZED_OPTION_TAGS = frozenset(
+    f"{mode}-{right}-vertical" for mode in ("debit", "credit")
+    for right in ("call", "put")
+)
+
+
 def validate_tag(tag: str, asset_class: str = "stock") -> str | None:
     """Error string if this tag may not be proposed, else None.
 
-    Options are exempt: their tags are synthesized by `propose_vertical`
-    (`debit-call-vertical` and friends) rather than chosen by the model, and the
-    defined-risk guardrails govern them instead.
+    Options used to be exempt entirely, on the reasoning that `propose_vertical`
+    synthesizes their tags rather than the model choosing them. But `propose_order`
+    also accepts `asset_class="option"` with hand-built legs and a free-text tag,
+    so the exemption was a hole: on 2026-07-30 proposal #37 was SUBMITTED under
+    `relative-strength-long` -- a tag deleted for grading -$901 and rejected on
+    every stock proposal. The registry existed to stop exactly that.
+
+    Options now accept registry tags plus the synthesized vertical names, and
+    reject anything else.
     """
+    t = (tag or "").strip().lower()
     if asset_class != "stock":
-        return None
+        if t in _SYNTHESIZED_OPTION_TAGS or get(t) is not None:
+            return None
+        return (f"unknown strategy_tag '{tag}' for an option. Use a registered "
+                f"strategy ({', '.join(proposable_tags())}) or let propose_vertical "
+                f"synthesize the tag.")
     s = get(tag)
     if s is None or not s.proposable:
         return (f"unknown strategy_tag '{tag}'. Choose one of: "

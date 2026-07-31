@@ -123,9 +123,19 @@ TOOL_SCHEMAS: dict[str, dict] = {
         "input_schema": {"type": "object", "properties": {}},
     },
     "read_playbook": {
-        "description": "Read the strategy playbooks (rules, filters, known failure modes "
-                       "per strategy tag). Consult before trading a tagged setup.",
-        "input_schema": {"type": "object", "properties": {}},
+        "description": "Read a strategy playbook: rules, filters and known failure modes "
+                       "for one strategy_tag. Consult before trading a tagged setup. "
+                       "Pass the tag you are actually considering — omitting it returns "
+                       "every playbook, which is a lot of text you did not ask for.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "strategy_tag": {
+                    "type": "string",
+                    "description": "e.g. 'breakout'. Omit only to list what exists.",
+                },
+            },
+        },
     },
     "get_sentiment": {
         "description": "Crude sentiment signal for a symbol: news + Reddit mention volume "
@@ -315,6 +325,12 @@ TOOL_SCHEMAS: dict[str, dict] = {
     },
 }
 
+# Contracts returned by get_options_chain. `chain_rows` already filters to
+# near-the-money within the DTE window, so this bounds the tail rather than the
+# useful part: 40 rows covers several expiries either side of spot, which is more
+# than a two-leg vertical can use.
+_CHAIN_ROW_LIMIT = 40
+
 _PROPOSE_TOOLS = ("propose_order", "propose_vertical")
 READ_ONLY_TOOLS = [t for t in sorted(TOOL_SCHEMAS) if t not in _PROPOSE_TOOLS]
 STRATEGY_TOOLS = sorted(TOOL_SCHEMAS)
@@ -476,8 +492,16 @@ class ToolRegistry:
         except Exception:
             pass
         lines = [head, "exp right strike bid ask iv delta theta vega dte occ"]
-        for r in rows[:80]:
+        # 80 rows was ~2,300 tokens, and the agent called this in 50 of 51 sessions
+        # on 2026-07-30 -- roughly 116k tokens/day to pick two strikes. `rows` is
+        # already near-the-money and DTE-filtered, so the nearest expiries carry
+        # everything a vertical needs; the far tail is read-once-never-used.
+        for r in rows[:_CHAIN_ROW_LIMIT]:
             lines.append(r.line())
+        if len(rows) > _CHAIN_ROW_LIMIT:
+            lines.append(f"... {len(rows) - _CHAIN_ROW_LIMIT} further contracts omitted "
+                         f"(wider strikes / later expiries); ask for a specific expiry "
+                         f"with target_dte if you need them")
         return "\n".join(lines)
 
     def _atm_iv_history(self, symbol: str) -> list:
@@ -523,17 +547,46 @@ class ToolRegistry:
     def _t_read_memory(self, _inp: dict) -> str:
         return self._read_dir(self.ctx.config.settings.paths.memory_dir, "memory")
 
-    def _t_read_playbook(self, _inp: dict) -> str:
-        return self._read_dir(self.ctx.config.settings.paths.playbooks_dir, "playbook")
+    def _t_read_playbook(self, inp: dict) -> str:
+        """One playbook, not all of them.
 
-    @staticmethod
-    def _read_dir(dir_path: str, label: str) -> str:
+        This dumped every file in playbooks/ on each call: 14,935 chars (~3.7k
+        tokens) across nine strategies, when the agent is considering one. It also
+        grew every time a strategy was registered — four landed on 2026-07-30
+        alone — so the cost of thinking about ONE setup scaled with the size of
+        the whole registry.
+        """
+        d = Path(self.ctx.config.settings.paths.playbooks_dir)
+        tag = str(inp.get("strategy_tag") or "").strip().lower()
+        if tag:
+            f = d / f"{tag}.md"
+            if f.exists():
+                return f"=== {f.name} ===\n{f.read_text(encoding='utf-8').strip()}"
+            available = ", ".join(sorted(p.stem for p in d.glob("*.md"))) or "none"
+            return f"no playbook for '{tag}'. Available: {available}"
+        return self._read_dir(d, "playbook")
+
+    # Per-file ceiling on directory dumps. memory/ is re-read every cycle (51 of 51
+    # sessions on 2026-07-30) at 3,402 tokens, the largest repeated payload in the
+    # loop — and it grows monotonically as the system writes lessons and reviews.
+    # An unbounded read that runs every minute is a cost leak with a slow fuse.
+    # ponytail: flat head-truncation, not summarisation — upgrade if the tail of
+    # a memory file ever turns out to matter more than the head.
+    _DIR_READ_CHARS = 4000
+
+    @classmethod
+    def _read_dir(cls, dir_path: str, label: str) -> str:
         d = Path(dir_path)
         if not d.exists():
             return f"no {label} files yet"
         chunks = []
         for f in sorted(d.glob("*.md")):
-            chunks.append(f"=== {f.name} ===\n{f.read_text(encoding='utf-8').strip()}")
+            text = f.read_text(encoding="utf-8").strip()
+            if len(text) > cls._DIR_READ_CHARS:
+                text = (text[:cls._DIR_READ_CHARS]
+                        + f"\n... [truncated {len(text) - cls._DIR_READ_CHARS} chars; "
+                          f"open the file directly if the tail matters]")
+            chunks.append(f"=== {f.name} ===\n{text}")
         return "\n\n".join(chunks) or f"no {label} files yet"
 
     def _t_get_sentiment(self, inp: dict) -> str:
