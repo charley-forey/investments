@@ -106,10 +106,10 @@ def sync_fills(config: Config, journal: Journal, broker) -> SyncReport:
         order_id = journal.record_order(
             proposal_id=proposal_id, mode=config.limits.mode, symbol=symbol, side=side,
             qty=delta, order_type="limit", limit_price=price,
-            broker_order_id=broker_id,
+            broker_order_id=broker_id, ts=updated.isoformat(),
         )
         journal.record_fill(order_id, qty=delta, price=price, fees_usd=fees,
-                            slippage_bps=slippage)
+                            slippage_bps=slippage, ts=updated.isoformat())
         report.fills_recorded += 1
 
         applied = _apply_fill(journal, lot_symbol, side, delta, price, updated,

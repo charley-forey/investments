@@ -454,14 +454,20 @@ class Journal:
         limit_price: float | None,
         broker_order_id: str | None = None,
         is_day_trade: bool = False,
+        ts: str | None = None,
     ) -> int:
+        """`ts` is when the order HAPPENED at the broker, not when we recorded it.
+
+        trades_since() counts distinct orders by this column and drives the daily
+        and weekly trade budgets, so a replayed or delayed sync spends today's
+        budget on yesterday's trades."""
         cur = self.conn.execute(
             """INSERT INTO orders
                (proposal_id, broker_order_id, ts, mode, symbol, side, qty, order_type,
                 limit_price, is_day_trade)
                VALUES (?,?,?,?,?,?,?,?,?,?)""",
             (
-                proposal_id, broker_order_id, utcnow(), mode, symbol.upper(), side, qty,
+                proposal_id, broker_order_id, ts or utcnow(), mode, symbol.upper(), side, qty,
                 order_type, limit_price, int(is_day_trade),
             ),
         )
@@ -471,12 +477,20 @@ class Journal:
     def record_fill(
         self, order_id: int, *, qty: float, price: float,
         fees_usd: float = 0.0, est_cost_usd: float | None = None,
-        slippage_bps: float | None = None,
+        slippage_bps: float | None = None, ts: str | None = None,
     ) -> int:
+        """`ts` is when the fill HAPPENED at the broker, not when we noticed.
+
+        Defaulting to now looked harmless while sync ran every minute. It is not:
+        `trades_since` drives the daily trade budget and PDT day-trade detection,
+        so a delayed or replayed sync books yesterday's fills against today's
+        limits. Re-syncing four 2026-07-30 option legs put the next session at
+        8/10 trades before it opened.
+        """
         cur = self.conn.execute(
             "INSERT INTO fills (order_id, ts, qty, price, fees_usd, est_cost_usd, "
             "slippage_bps) VALUES (?,?,?,?,?,?,?)",
-            (order_id, utcnow(), qty, price, fees_usd, est_cost_usd, slippage_bps),
+            (order_id, ts or utcnow(), qty, price, fees_usd, est_cost_usd, slippage_bps),
         )
         self.conn.commit()
         return int(cur.lastrowid)
