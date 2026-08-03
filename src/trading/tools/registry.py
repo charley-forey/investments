@@ -832,6 +832,15 @@ class ToolRegistry:
             expected_edge_usd=inp["expected_edge_usd"],
             confidence=inp.get("confidence"),
             reduces_position=bool(inp.get("reduces_position", False)),
+            # Dropping these silently is why armed_plans held 0 rows while the
+            # agent sent arm_level 16 times (2026-08-03). The prompt told it to
+            # arm, the schema accepted the fields, and this constructor ate them
+            # -- so every untriggered setup came back as a marketable limit and
+            # the trigger-hit gate re-woke the LLM on it every minute.
+            arm_level=inp.get("arm_level"),
+            arm_direction=inp.get("arm_direction"),
+            **({"arm_valid_hours": inp["arm_valid_hours"]}
+               if inp.get("arm_valid_hours") else {}),
         )
         if proposal.asset_class == "stock":
             if proposal.qty <= 0:

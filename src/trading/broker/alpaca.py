@@ -238,14 +238,20 @@ class AlpacaBroker:
         # so the position is protected the instant the entry fills.
         bracket_kwargs = {}
         if stop_loss_price is not None and order_type != "stop":
-            bracket_kwargs["order_class"] = OrderClass.BRACKET
             bracket_kwargs["stop_loss"] = StopLossRequest(
                 stop_price=round(float(stop_loss_price), 2)
             )
             if take_profit_price is not None:
+                bracket_kwargs["order_class"] = OrderClass.BRACKET
                 bracket_kwargs["take_profit"] = TakeProfitRequest(
                     limit_price=round(float(take_profit_price), 2)
                 )
+            else:
+                # Stop-only exit (exits.trailing_pct drops the target leg on
+                # purpose). Alpaca rejects BRACKET without take_profit -- 40010001
+                # killed every stopped entry from 2026-07-28 to 08-03. OTO is the
+                # one-child form: entry fills, the stop attaches, nothing else.
+                bracket_kwargs["order_class"] = OrderClass.OTO
 
         # Standalone protective stops (e.g. re-attach after a bracket was cancelled)
         # use GTC so overnight protection survives the session.

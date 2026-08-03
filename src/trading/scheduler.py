@@ -328,11 +328,19 @@ def run_calendar_safe() -> None:
         report = refresh_calendar(config)
         log.info("calendar refresh: %d events (%d symbols ok, %d failed)",
                  report.events_written, report.symbols_ok, report.symbols_failed)
-        journal.heartbeat(
-            "calendar", status="ok",
-            detail=f"events={report.events_written} ok={report.symbols_ok} "
-                   f"fail={report.symbols_failed}",
-        )
+        # ok=0/fail=31 was reported as status 'ok' every day from 2026-07-21:
+        # events_written stayed non-zero because macro dates are generated
+        # locally, so the count looked healthy while every earnings date was
+        # missing. A source that fetched nothing is not a successful refresh.
+        every_symbol_failed = report.symbols_ok == 0 and report.symbols_failed > 0
+        detail = (f"events={report.events_written} ok={report.symbols_ok} "
+                  f"fail={report.symbols_failed}")
+        if every_symbol_failed:
+            detail += f" | NO EARNINGS DATA: {'; '.join(report.errors[:2])}"
+            log.error("calendar: every symbol failed — earnings blackout is blind")
+        journal.heartbeat("calendar",
+                          status="warn" if every_symbol_failed else "ok",
+                          detail=detail)
     except Exception as e:
         log.exception("calendar refresh failed")
         journal.heartbeat("calendar", status="error", detail=str(e))

@@ -572,6 +572,23 @@ class Journal:
         ).fetchone()
         return row is not None
 
+    def vetoed_today(self) -> list[dict]:
+        """Entry ideas already vetoed/rejected today, newest first.
+
+        The repitch_guard catches a re-pitch, but only after a whole strategy
+        session was spent producing it: on 2026-08-03 the agent re-pitched MSFT
+        4 minutes after its veto and NET 2 minutes after its own, because each
+        cycle starts with no memory of the last. Feeding this back as context is
+        what makes the prompt's "no same-day re-pitch" rule actionable."""
+        today = datetime.now(timezone.utc).date().isoformat()
+        return [dict(r) for r in self.conn.execute(
+            "SELECT p.symbol, p.side, p.strategy_tag, v.reason FROM proposals p "
+            "LEFT JOIN verdicts v ON v.proposal_id = p.id AND v.verdict = 'veto' "
+            "WHERE p.status IN ('vetoed','rejected') AND substr(p.ts,1,10)=? "
+            "GROUP BY p.id ORDER BY p.id DESC",
+            (today,),
+        )]
+
     def recent_strategy_tag_for(self, symbol: str) -> str | None:
         """Best-effort attribution: the strategy_tag of the most recent submitted
         proposal for this symbol. Used to tag lots opened via broker sync."""
