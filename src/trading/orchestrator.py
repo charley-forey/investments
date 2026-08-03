@@ -280,6 +280,27 @@ class Orchestrator:
                     )
         except Exception as e:
             report.notes.append(f"candidate context failed: {e}")
+        # What is already decided. Without these two lists every cycle starts
+        # amnesiac: it re-pitches a name vetoed four minutes ago (MSFT/NET,
+        # 2026-08-03) and re-arms a plan that is already live. Both are pure
+        # waste -- the repitch_guard and the arm path catch them, but only after
+        # a full strategy session has been paid for.
+        try:
+            armed = self.journal.active_armed_plans()
+            if armed:
+                extra += "\n\nAlready ARMED (live until they fire or expire — do " \
+                         "NOT re-arm or re-examine these):\n" + "\n".join(
+                             f"- {p['symbol']} {p['direction']} {p['level']:g}"
+                             for p in armed)
+            vetoed = self.journal.vetoed_today()
+            if vetoed:
+                extra += "\n\nAlready VETOED today (do NOT re-propose unless you " \
+                         "have fixed the named objection):\n" + "\n".join(
+                             f"- {v['side']} {v['symbol']} ({v['strategy_tag']}): "
+                             f"{(v['reason'] or 'no reason recorded')[:160]}"
+                             for v in vetoed[:8])
+        except Exception as e:
+            report.notes.append(f"decided-context failed: {e}")
         try:
             session = self._run_strategy(
                 self.client, self.config, self.journal, self.broker, account,
