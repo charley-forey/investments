@@ -318,15 +318,39 @@ class TestAuth:
         assert bearer.status_code == 200
         assert client.get("/api/metrics", headers={"X-Dashboard-Token": "wrong"}).status_code == 401
 
-    def test_the_shell_loads_unauthenticated_so_it_can_ask_for_the_token(self, tmp_path):
+    def test_signed_out_visitors_land_on_the_login_page(self, tmp_path):
+        """The shell redirects rather than rendering an app frame whose every
+        panel 401s. Static stays open — it holds no data and the login page
+        must render before a session exists."""
         config = make_config()
         config.settings.paths.journal_db = str(tmp_path / "j.db")
         client = TestClient(create_app(get_config_fn=lambda: config,
                                        broker_factory=lambda c: None, token="s3cret"))
-        assert client.get("/").status_code == 200
+        r = client.get("/", follow_redirects=False)
+        assert r.status_code == 302 and r.headers["location"] == "/login"
+        assert client.get("/login").status_code == 200
         assert client.get("/static/js/app.js").status_code == 200
         assert client.get("/api/auth").json() == {"required": True, "authenticated": False,
                                                   "loopback": True}
+
+    def test_signing_in_sets_a_cookie_that_opens_the_api(self, tmp_path):
+        config = make_config()
+        config.settings.paths.journal_db = str(tmp_path / "j.db")
+        client = TestClient(create_app(get_config_fn=lambda: config,
+                                       broker_factory=lambda c: None, token="s3cret"))
+        assert client.post("/login", json={"token": "wrong"}).status_code == 401
+        assert client.get("/api/metrics").status_code == 401
+
+        assert client.post("/login", json={"token": "s3cret"}).status_code == 200
+        # The cookie now rides on every subsequent request from this client.
+        assert client.get("/api/metrics").status_code == 200
+        assert client.get("/", follow_redirects=False).status_code == 200
+
+    def test_without_a_token_configured_there_is_nothing_to_sign_into(self, tmp_path):
+        """Loopback-only local runs keep the existing no-friction workflow."""
+        client, _, _ = client_and_journal(tmp_path)
+        assert client.get("/", follow_redirects=False).status_code == 200
+        assert client.get("/login", follow_redirects=False).headers["location"] == "/"
 
     def test_non_loopback_without_a_token_is_refused(self, tmp_path):
         """Fail closed: these endpoints submit orders."""

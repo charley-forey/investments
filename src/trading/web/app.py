@@ -22,6 +22,15 @@ from ..data.journal import Journal
 
 _STATIC = Path(__file__).parent / "static"
 
+# Module scope on purpose. `from __future__ import annotations` turns route hints
+# into strings that FastAPI resolves against module globals — a `Request` imported
+# inside create_app() is invisible there, and the param silently degrades into a
+# required query arg (422). fastapi stays an optional extra, hence the guard.
+try:
+    from fastapi import Request
+except ImportError:  # pragma: no cover — create_app() is what actually needs fastapi
+    Request = None
+
 
 def _ts_gap(a: str | None, b: str | None) -> float:
     """Absolute seconds between two ISO timestamps; large if unparseable."""
@@ -87,8 +96,9 @@ def create_app(get_config_fn=get_config, broker_factory=None, token=None):
     import os
     import secrets
 
-    from fastapi import FastAPI, HTTPException, Request
-    from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
+    from fastapi import FastAPI, HTTPException
+    from fastapi.responses import (FileResponse, HTMLResponse, JSONResponse,
+                                   RedirectResponse)
 
     app = FastAPI(title="Agentic Trading — Operations")
     _make_broker = broker_factory or _default_broker_factory
@@ -108,13 +118,17 @@ def create_app(get_config_fn=get_config, broker_factory=None, token=None):
         is refused unless it carries the token. Loopback with no token configured
         stays open, which is the existing single-user local workflow.
 
-        The shell and its static assets are served unauthenticated — they hold no
-        data, and the page needs to load in order to ask for the token.
+        The static assets stay unauthenticated — they hold no data. The shell at
+        `/` is gated only so a signed-out visitor lands on the login page instead
+        of an app frame that 401s every panel; the API check above is the real
+        boundary.
         """
-        if not request.url.path.startswith("/api"):
-            return await call_next(request)
         host = (request.client.host if request.client else "") or ""
         authed = (secrets.compare_digest(_supplied(request), _token) if _token else True)
+        if not request.url.path.startswith("/api"):
+            if request.url.path == "/" and _token and not authed:
+                return RedirectResponse("/login", status_code=302)
+            return await call_next(request)
         # Answered here rather than as a route so the console can ask whether it
         # needs a token without first having one.
         if request.url.path == "/api/auth":
@@ -771,6 +785,65 @@ def create_app(get_config_fn=get_config, broker_factory=None, token=None):
 
         threading.Thread(target=_run, daemon=True).start()
         return {"ok": True, "started": cycle}
+
+    # -- sign in --------------------------------------------------------------
+
+    # Self-contained on purpose: the login page must render before the session
+    # exists, so it pulls nothing from /static and no stylesheet can 404 it blank.
+    _LOGIN_HTML = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light"><title>Sign in — Agentic Trading</title>
+<style>
+:root{color-scheme:dark light}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0e1116;color:#e6edf3;
+font:15px/1.5 ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
+form{width:min(92vw,320px);display:grid;gap:12px}
+h1{margin:0 0 4px;font-size:17px;font-weight:600}
+p{margin:0;color:#8b949e;font-size:13px}
+input{padding:10px 12px;border-radius:8px;border:1px solid #30363d;background:#161b22;
+color:inherit;font:inherit}
+input:focus{outline:2px solid #3987e5;outline-offset:-1px;border-color:#3987e5}
+button{padding:10px 12px;border-radius:8px;border:0;background:#3987e5;color:#fff;
+font:inherit;font-weight:600;cursor:pointer}
+button:hover{background:#2f76cd}
+.err{color:#f85149;font-size:13px;min-height:1.5em}
+</style></head><body>
+<form id="f">
+  <h1>Agentic Trading</h1>
+  <p>Operations console. Enter your dashboard token.</p>
+  <input id="t" type="password" autocomplete="current-password" placeholder="Dashboard token"
+         aria-label="Dashboard token" autofocus>
+  <button type="submit">Sign in</button>
+  <div class="err" id="e" role="alert"></div>
+</form>
+<script>
+const f=document.getElementById('f'),e=document.getElementById('e');
+f.addEventListener('submit',async ev=>{
+  ev.preventDefault(); e.textContent='';
+  const r=await fetch('/login',{method:'POST',headers:{'content-type':'application/json'},
+    body:JSON.stringify({token:document.getElementById('t').value})});
+  if(r.ok){location.href='/';} else {e.textContent='Incorrect token.';}
+});
+</script></body></html>"""
+
+    @app.get("/login", response_class=HTMLResponse)
+    def login_page():
+        if not _token:
+            return RedirectResponse("/", status_code=302)
+        return HTMLResponse(_LOGIN_HTML)
+
+    @app.post("/login")
+    def login(payload: dict, request: Request):
+        if not _token:
+            return {"ok": True}
+        if not secrets.compare_digest(str(payload.get("token") or ""), _token):
+            raise HTTPException(401, "incorrect token")
+        resp = JSONResponse({"ok": True})
+        # Secure only over TLS, or the cookie never sets on a loopback dev run.
+        https = request.headers.get("x-forwarded-proto", request.url.scheme) == "https"
+        resp.set_cookie("dash_token", _token, httponly=True, samesite="lax",
+                        secure=https, max_age=60 * 60 * 24 * 30)
+        return resp
 
     # -- frontend -------------------------------------------------------------
 

@@ -11,7 +11,11 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+# Everything mutable (data/, memory/, config/) resolves under this root. In a
+# container the code lives on an ephemeral image layer, so TRADING_ROOT points at
+# the mounted volume instead — otherwise every redeploy would silently reset the
+# journal, the lessons and any limits saved from the dashboard.
+PROJECT_ROOT = Path(os.environ.get("TRADING_ROOT") or Path(__file__).resolve().parents[2])
 
 
 class PositionLimits(BaseModel):

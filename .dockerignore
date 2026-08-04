@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+.claude/
+.env
+data/
+docs/
+tests/
+*.egg-info/
+
+# NOT excluded: backtest/ and memory/. backtest/ is an installed package
+# (pyproject packages.find) and the nightly sweep dies without it; memory/ is what
+# cmd_serve seeds the volume from on first boot.

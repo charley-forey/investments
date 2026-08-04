@@ -829,6 +829,89 @@ def cmd_daemon(_args) -> int:
     return run_daemon()
 
 
+def _seed_root() -> None:
+    """First boot against a volume: copy the config and memory the image ships
+    with onto it.
+
+    Only files that are missing — the daemon rewrites memory/ every cycle and the
+    dashboard's config editor rewrites limits.yaml, so overwriting on boot would
+    revert real edits (and real risk limits) on every redeploy. Copying only what
+    is absent still lets a new config file added upstream land on the next deploy.
+    """
+    import shutil
+    from pathlib import Path
+
+    from .config import PROJECT_ROOT
+
+    image = Path(__file__).resolve().parents[2]
+    if PROJECT_ROOT == image:
+        return  # no TRADING_ROOT override — running straight from the checkout
+    (PROJECT_ROOT / "data").mkdir(parents=True, exist_ok=True)
+    for name in ("config", "memory"):
+        src, dst = image / name, PROJECT_ROOT / name
+        if not src.is_dir():
+            continue
+        dst.mkdir(parents=True, exist_ok=True)
+        for f in src.iterdir():
+            if f.is_file() and not (dst / f.name).exists():
+                shutil.copy2(f, dst / f.name)
+
+
+def cmd_serve(_args) -> int:
+    """Run the whole system as one process tree: daemon, both websockets, and the
+    dashboard.
+
+    A Railway volume attaches to exactly one service, and all four processes share
+    data/*.db — so they cannot be split into separate services. These are the same
+    four commands start-trading.ps1 runs locally, spawned as children rather than
+    reimplemented as threads: the daemon's scheduler is blocking and its SQLite
+    handles are per-process, and that arrangement is the one already proven.
+    """
+    import os
+    import subprocess
+    import time
+
+    _seed_root()
+
+    port = os.environ.get("PORT", "8787")
+    if not os.environ.get("DASHBOARD_TOKEN"):
+        # cmd_dashboard would refuse to bind 0.0.0.0 anyway; failing here names the
+        # reason once instead of crash-looping a child every five seconds.
+        print("serve: refusing to start without DASHBOARD_TOKEN — the dashboard "
+              "binds 0.0.0.0 and its endpoints submit orders.", file=sys.stderr)
+        return 2
+
+    spec = {
+        "daemon": ["daemon"],
+        "stream": ["stream"],
+        "marketstream": ["marketstream"],
+        "dashboard": ["dashboard", "--host", "0.0.0.0", "--port", port],
+    }
+
+    def spawn(name: str):
+        print(f"serve: starting {name}", flush=True)
+        return subprocess.Popen([sys.executable, "-m", "trading", *spec[name]])
+
+    procs = {name: spawn(name) for name in spec}
+    try:
+        while True:
+            time.sleep(5)
+            for name, p in list(procs.items()):
+                if p.poll() is not None:
+                    print(f"serve: {name} exited rc={p.returncode}; restarting",
+                          file=sys.stderr, flush=True)
+                    # ponytail: no backoff. A child that crash-loops respawns every
+                    # 5s and is visible in the logs; add exponential backoff if that
+                    # ever costs more than noise.
+                    procs[name] = spawn(name)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        for p in procs.values():
+            p.terminate()
+    return 0
+
+
 def cmd_reset_kill_switch(_args) -> int:
     journal = _journal()
     journal.reset_kill_switch()
@@ -990,6 +1073,8 @@ def main(argv: list[str] | None = None) -> int:
     dash.add_argument("--host", default="127.0.0.1")  # localhost-only by default
     dash.add_argument("--port", type=int, default=8787)
     dash.set_defaults(fn=cmd_dashboard)
+    sub.add_parser("serve", help="run daemon + streams + dashboard in one process tree "
+                                 "(container entrypoint)").set_defaults(fn=cmd_serve)
     sub.add_parser("stream", help="run the real-time fill websocket").set_defaults(fn=cmd_stream)
     sub.add_parser("marketstream",
                    help="run the real-time market-data websocket (queues wake events)"
