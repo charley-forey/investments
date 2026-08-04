@@ -48,16 +48,10 @@ tax:
   federal_short_term_rate: 0.24
   federal_long_term_rate: 0.15
   state_rate: 0.05
-paths:
-  journal_db: C:\Users\charl\Desktop\trading\data\journal.db
-  bars_dir: C:\Users\charl\Desktop\trading\data\bars
-  bars_db: C:\Users\charl\Desktop\trading\data\bars.db
-  intel_db: C:\Users\charl\Desktop\trading\data\intel.db
-  vectors_db: C:\Users\charl\Desktop\trading\data\vectors.db
-  fundamentals_db: C:\Users\charl\Desktop\trading\data\fundamentals.db
-  memory_dir: C:\Users\charl\Desktop\trading\memory
-  playbooks_dir: C:\Users\charl\Desktop\trading\playbooks
-  calendar_file: C:\Users\charl\Desktop\trading\data\calendar.json
+# `paths:` is deliberately absent — the Paths defaults are repo-relative and get
+# resolved against the project root at load. Pinning them here writes one machine's
+# layout into the file, which is how absolute Windows paths reached a Linux
+# container and became filenames under the volume root.
 agents:
   model: gpt-5.6-terra
   max_tokens: 16000

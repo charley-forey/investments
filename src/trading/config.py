@@ -296,7 +296,10 @@ class Settings(BaseModel):
     universe: Universe
     schedule: Schedule
     tax: TaxRates
-    paths: Paths
+    # Optional: the defaults are repo-relative and resolved against the project root
+    # at load. Pinning them in YAML writes one machine's absolute layout into the
+    # file, which does not survive moving to another machine (or a container).
+    paths: Paths = Paths()
     agents: AgentSettings
     data_feed: str = "iex"   # 'sip' (consolidated tape) needs Algo Trader Plus
 

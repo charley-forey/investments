@@ -700,13 +700,28 @@ def create_app(get_config_fn=get_config, broker_factory=None, token=None):
         model = {"limits": Limits, "settings": Settings}.get(section)
         if model is None:
             raise HTTPException(400, "section must be 'limits' or 'settings'")
-        try:
-            model.model_validate(payload.get("data", {}))
-        except Exception as e:
-            return {"ok": False, "errors": str(e)}
-        from ..config import PROJECT_ROOT
+        from ..config import PROJECT_ROOT, _load_yaml
         fname = "limits.yaml" if section == "limits" else "settings.yaml"
         path = PROJECT_ROOT / "config" / fname
+
+        data = dict(payload.get("data", {}))
+        if section == "settings":
+            # Never persist `paths`. /api/config serves them already resolved to
+            # absolute, machine-specific locations, so a save round-trip writes one
+            # machine's layout into the file. That is how C:\...\journal.db reached a
+            # Linux container, where it is not absolute and so became a *filename*
+            # under the volume root — the daemon silently opened an empty database.
+            # Whatever the file already had wins; absent means the defaults apply.
+            existing = _load_yaml(path) if path.exists() else {}
+            if "paths" in existing:
+                data["paths"] = existing["paths"]
+            else:
+                data.pop("paths", None)
+
+        try:
+            model.model_validate(data)
+        except Exception as e:
+            return {"ok": False, "errors": str(e)}
         # Snapshot before overwrite — these files govern real money limits.
         backup = None
         if path.exists():
@@ -715,7 +730,7 @@ def create_app(get_config_fn=get_config, broker_factory=None, token=None):
             bdir.mkdir(parents=True, exist_ok=True)
             backup = bdir / f"{path.stem}.{stamp}.yaml"
             backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
-        path.write_text(yaml.safe_dump(payload["data"], sort_keys=False), encoding="utf-8")
+        path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
         get_config.cache_clear()
         return {"ok": True, "saved": str(path),
                 "backup": str(backup) if backup else None}

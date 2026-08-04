@@ -5,7 +5,9 @@ UI rather than a loud failure — hence the tests.
 """
 
 import json
+from pathlib import Path
 
+import yaml
 from fastapi.testclient import TestClient
 
 from conftest import make_config
@@ -155,6 +157,28 @@ class TestConfigEditor:
         data["position"]["max_position_pct"] = 900      # schema says <= 100
         r = client.post("/api/config/save", json={"section": "limits", "data": data}).json()
         assert r["ok"] is False and r["errors"]
+
+    def test_saving_settings_never_writes_resolved_paths(self, tmp_path, monkeypatch):
+        """/api/config serves paths already resolved to absolute. Round-tripping a
+        save used to bake one machine's layout into settings.yaml — which put
+        C:\\...\\journal.db into a Linux container, where it is not absolute and so
+        became a filename under the volume root. The daemon then opened an empty
+        database and reported no orders, no proposals, no history.
+        """
+        client, _, _ = client_and_journal(tmp_path)
+        cfgdir = tmp_path / "config"
+        cfgdir.mkdir()
+        (cfgdir / "settings.yaml").write_text("timezone: America/New_York\n", encoding="utf-8")
+        monkeypatch.setattr("trading.config.PROJECT_ROOT", tmp_path)
+
+        data = client.get("/api/config").json()["settings"]
+        assert Path(data["paths"]["journal_db"]).is_absolute()   # what the UI is handed
+
+        r = client.post("/api/config/save", json={"section": "settings", "data": data}).json()
+        assert r["ok"], r
+
+        written = (cfgdir / "settings.yaml").read_text(encoding="utf-8")
+        assert "paths" not in yaml.safe_load(written)
 
 
 class TestStaticBundle:
